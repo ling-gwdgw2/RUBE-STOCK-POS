@@ -8,5 +8,5 @@ rube-shared-contracts = { path = "../shared-contracts" }
 rube-core-engine = { path = "../core-engine" }
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+
 

@@ -262,3 +262,90 @@ pub fn compute_multilevel_bom_deductions(
 
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bom_dag_cycle_and_double_scale_guard_and_signed_modifier_cogs() {
+        let mut catalog = HashMap::new();
+        catalog.insert(
+            "DRINK".to_string(),
+            VariantStockSnapshot {
+                variant_id: "DRINK".to_string(),
+                is_composite: true,
+                use_production: false,
+                average_cost_micro_baht: 0,
+            },
+        );
+        catalog.insert(
+            "SUB_SWEET".to_string(),
+            VariantStockSnapshot {
+                variant_id: "SUB_SWEET".to_string(),
+                is_composite: true,
+                use_production: false,
+                average_cost_micro_baht: 0,
+            },
+        );
+        catalog.insert(
+            "RAW_HONEY".to_string(),
+            VariantStockSnapshot {
+                variant_id: "RAW_HONEY".to_string(),
+                is_composite: false,
+                use_production: false,
+                average_cost_micro_baht: 250_000,
+            },
+        );
+
+        let edges = vec![
+            BomComponentEdge {
+                composite_variant_id: "DRINK".to_string(),
+                component_variant_id: "SUB_SWEET".to_string(),
+                component_role: ComponentRole::Sweetener,
+                quantity_milli: 1_000,
+                wastage_basis_points: 0,
+            },
+            BomComponentEdge {
+                composite_variant_id: "SUB_SWEET".to_string(),
+                component_variant_id: "RAW_HONEY".to_string(),
+                component_role: ComponentRole::Sweetener,
+                quantity_milli: 20_000,
+                wastage_basis_points: 0,
+            },
+        ];
+
+        assert!(validate_bom_dag_acyclic(&edges).is_ok());
+
+        let modifiers = vec![
+            AppliedModifierInput {
+                modifier_mode: ModifierMode::RoleScaleBps,
+                component_variant_id: None,
+                quantity_delta_milli: 0,
+                target_component_role: Some(ComponentRole::Sweetener),
+                scale_basis_points: -5_000,
+            },
+            AppliedModifierInput {
+                modifier_mode: ModifierMode::FixedQtyDelta,
+                component_variant_id: Some("RAW_HONEY".to_string()),
+                quantity_delta_milli: -4_000,
+                target_component_role: None,
+                scale_basis_points: 0,
+            },
+        ];
+
+        let deds = compute_multilevel_bom_deductions(
+            catalog.get("DRINK").unwrap(),
+            1_000,
+            &modifiers,
+            &catalog,
+            &edges,
+        )
+        .unwrap();
+
+        assert_eq!(deds.len(), 2);
+        assert_eq!(deds[0].quantity_change_milli, -10_000);
+        assert_eq!(deds[1].quantity_change_milli, 4_000);
+        assert!(deds[1].line_cogs_micro_baht < 0);
+    }
+}

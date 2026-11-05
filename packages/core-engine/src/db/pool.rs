@@ -137,3 +137,39 @@ impl SqliteReadWriteSplitPool {
         f(&reader_guard)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::migrator::execute_fk_safe_migration;
+
+    #[test]
+    fn test_sqlcipher_pool_and_fk_safe_migration_on_real_encrypted_db() {
+        let temp_dir = std::env::temp_dir().join(format!("rube_sqlcipher_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("encrypted_pos.db");
+        let raw_key = "98483C6EB40B6C31A448C22A66DED3B5E5E8D5119CAC8327B655C8B5C4836489";
+
+        let pool = SqliteReadWriteSplitPool::new(&db_path, raw_key, 4).unwrap();
+        assert_eq!(pool.reader_pool_size(), 4);
+
+        let schema_sql = include_str!("../../migrations/0001_initial_v3_1_schema.sql");
+        {
+            let writer = pool.writer_conn.lock().unwrap();
+            let checksum =
+                execute_fk_safe_migration(&writer, 1, "0001_initial_v3_1_schema.sql", schema_sql)
+                    .expect("5-step migration on SQLCipher must succeed");
+            assert_eq!(checksum.len(), 64);
+        }
+
+        // Verify Reader connection enforces PRAGMA query_only = ON
+        let read_write_attempt = pool.execute_read(|reader| {
+            reader
+                .execute_batch("INSERT INTO store_config (key, value) VALUES ('k1', 'v1');")
+                .map_err(|e| e.to_string())
+        });
+        assert!(read_write_attempt.is_err());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}

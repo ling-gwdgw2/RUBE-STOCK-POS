@@ -149,3 +149,34 @@ pub fn compute_new_mac(
     round_div_to_i64((q_curr * c_curr) + (q_rec * c_rec), q_curr + q_rec)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_landed_cost_exact_and_negative_stock_mac_guard() {
+        let lines = vec![
+            PoLineInput {
+                item_id: "A".to_string(),
+                received_qty_milli: 10_000,
+                base_unit_cost_micro_baht: 33_333_333,
+            },
+            PoLineInput {
+                item_id: "B".to_string(),
+                received_qty_milli: 20_000,
+                base_unit_cost_micro_baht: 33_333_333,
+            },
+        ];
+        let allocated = allocate_landed_cost_exact(&lines, 10_000).unwrap();
+        let total_micro: i64 = allocated
+            .iter()
+            .map(|a| a.allocated_landed_cost_micro_baht)
+            .sum();
+        assert_eq!(total_micro, 100_000_000);
+
+        // Negative stock guard resets MAC to incoming unit cost
+        let mac_reset = compute_new_mac(-2_000, 40_000_000, 10_000, 50_000_000).unwrap();
+        assert_eq!(mac_reset, 50_000_000);
+    }
+}
+

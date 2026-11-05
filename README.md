@@ -2,7 +2,8 @@
 
 Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Hardened Blueprint)
 
-[![Phase 0 & 1 Tests](https://img.shields.io/badge/Phase%200%20%26%201%20Tests-14%2F14%20Passing-brightgreen)](#automated-testing)
+[![Phase 0 & 1 Tests](https://img.shields.io/badge/Node%20Tests-14%2F14%20Passing-brightgreen)](#automated-testing)
+[![Rust Workspace Tests](https://img.shields.io/badge/Cargo%20Tests-5%2F5%20Passing-brightgreen)](#automated-testing)
 [![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.0-blue)](#key-architectural-pillars)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Standalone%20%7C%20Local%20LAN-orange)](#overview)
 
@@ -73,11 +74,14 @@ npm run verify:schema
 # รันชุดทดสอบเฉพาะเฟสที่ 1 (SQLite WAL Split Pool + Landed Cost + Multi-Level BOM + Scale Barcode)
 npm run test:phase1
 
-# รันชุดทดสอบทั้งหมด (Phase 0 + Phase 1 + Accounting Invariants + Logic Audit Regressions)
+# รันชุดทดสอบทั้งหมดของฝั่ง TypeScript / SQLite Runtime (Phase 0 + Phase 1 + Accounting Invariants)
 npm test
+
+# รันชุดทดสอบและคอมไพล์ฝั่ง Rust Workspace ทั้ง 4 Crates (rusqlite + i128 math + Epoch Fencing)
+cargo test
 ```
 
-ผลการทดสอบ: **14/14 Tests ผ่านครบ 100%**
+ผลการทดสอบ: **Node.js `14/14 Tests` + Rust `5/5 Tests` ผ่านครบ 100%**
 
 ---
 

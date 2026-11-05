@@ -16,6 +16,7 @@
     "test:invariants": "node --test tests/property-invariants/accounting-invariants.test.ts",
     "test:phase0": "node --test tests/e2e-integration/phase0-assembly.test.ts",
     "test:phase1": "node --test tests/e2e-integration/phase1-warehouse-assembly.test.ts",
+    "test:rust": "cargo test",
     "verify:schema": "node scripts/verify-schema-checksum.mjs"
   },
   "engines": {

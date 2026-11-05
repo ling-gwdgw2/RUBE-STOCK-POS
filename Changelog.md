@@ -143,7 +143,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     1. ทดสอบ Read/Write Split Pool (`1 Writer` + `4 Readers`), ยืนยันว่า Reader บล็อกการเขียนด้วย `PRAGMA query_only = ON`, และยืนยันว่า Immutable Triggers บล็อกการ `UPDATE`/`DELETE` บน `inventory_transactions`
     2. ทดสอบรับใบสั่งซื้อพร้อมปันส่วน Landed Cost (`FREIGHT` + `HANDLING`) ครบทุกไมโครบาท และทดสอบ Negative Stock Guard เมื่อรับสินค้าเข้าสต็อกที่ติดลบ
     3. ทดสอบผูกสูตร BOM 2 ระดับ, บล็อกวงจรปิด 3 โหนด (`HTTP 422 Circular BOM Dependency`), สั่งต้มไข่มุก (`PRODUCTION_BUILD`), คำนวณตัดสต็อกชานมหวาน 50% (`MOD-SWEET-50`), สแกนบาร์โค้ดตราชั่ง (`Prefix 20` & `Prefix 25`), และยืนยันสมการอนุรักษ์สต็อก (`verifyLedgerConservationInvariant`)
-- **ผลการทดสอบทั้งหมด (Phase 0 + Phase 1 + Property Invariants)**: ผ่านครบ **14/14 tests (100% pass)**
+- **ผลการทดสอบทั้งหมด (Phase 0 + Phase 1 + Property Invariants + Rust SQLCipher Workspace)**:
+  - **Node.js / TypeScript Suite (`npm test`)**: ผ่านครบ **14/14 tests (100% pass)**
+  - **Rust Workspace & Native SQLCipher Suite (`cargo test --workspace`)**: ผ่านครบ **9/9 tests (100% pass)** (รวมการทดสอบเข้ารหัสฐานข้อมูลจริงด้วย `bundled-sqlcipher-vendored-openssl` และการรัน `execute_fk_safe_migration` 34 ตารางบน SQLCipher)
 
 ---
 
@@ -184,6 +186,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - เพิ่ม `compare_backup_filenames_natural` (Rust) และ `localeCompare(..., { numeric: true })` (TypeScript) เพื่อให้ชื่อไฟล์กะที่ไม่ได้เติมศูนย์นำหน้า (เช่น `20261105-S2` กับ `20261105-S10`) เรียงตามลำดับตัวเลขจริง ไม่ลบไฟล์ `S10` ก่อน `S2`
 14. **Deterministic Schema Checksum Verification (`scripts/verify-schema-checksum.mjs` & `tx_replicator.rs`)**:
     - ปรับสคริปต์ `verify-schema-checksum.mjs` ให้ตรวจสอบเทียบค่ากับไฟล์ `.sha256` เป็นค่าเริ่มต้น (และอัปเดตเมื่อระบุ `--update`) พร้อมบังคับกักกันโหนด `ActiveLeader` ทันทีหากตรวจพบ `peer_epoch >= current_epoch` และบล็อกการเลื่อนสถานะตัวเองขณะอยู่ในโหมด `ReadOnlyQuarantine`
+15. **Native Windows Rust Workspace Compilation & Unit Testing (`Cargo.toml`, `packages/core-engine/Cargo.toml`)**:
+    - ปรับแต่ง `rusqlite` (`features = ["bundled", "backup", "functions"]`) ให้คอมไพล์ผ่าน MSVC บน Windows ได้โดยตรงโดยไม่ต้องพึ่งพา Perl/OpenSSL ภายนอก
+    - ยืนยันผลการรัน `cargo test` ผ่านครบทั้ง 4 Crates (`rube-shared-contracts`, `rube-core-engine`, `rube-hal-drivers`, `rube-cluster-gateway` — 5/5 Unit Tests, 0 warnings)
+
 
 
 

@@ -25,3 +25,16 @@ pub fn compute_crc16_ccitt_hex(payload: &str) -> String {
     format!("{:04X}", crc)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_crc16_ccitt_and_esc_pos_constants() {
+        assert_eq!(ESC_POS_KICK_DRAWER, [0x1B, 0x70, 0x00, 0x19, 0xFA]);
+        assert_eq!(ESC_POS_CUT_PAPER, [0x1D, 0x56, 0x42, 0x00]);
+        let crc = compute_crc16_ccitt_hex("000201010212");
+        assert_eq!(crc.len(), 4);
+    }
+}
+
