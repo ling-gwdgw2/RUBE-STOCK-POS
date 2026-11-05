@@ -103,5 +103,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ยืนยันการหั่นภาพใบเสร็จ Chunked Raster 203-DPI ไม่เกินบัฟเฟอร์ 8KB ของเครื่องพิมพ์
   - ยืนยันการสร้าง QR พร้อมเพย์และบล็อกสลิป BOT Mini-QR ซ้ำ
   - ยืนยันการตัดเข้าโหมดสำรองไฟ UPS และการหมุนเวียนไฟล์สำรองใน USB Flash Drive คงเหลือ 14 กะล่าสุด
-- **ผลการทดสอบทั้งหมด**: ผ่านครบ **10/10 tests (100% pass)** ในเวลา ~116ms
+- **ผลการทดสอบทั้งหมด (Phase 0)**: ผ่านครบ **10/10 tests (100% pass)** ในเวลา ~116ms
+
+---
+
+### Phase 1: High-Speed SQLCipher Read/Write Split Pool & `i128` Costing/BOM Engine (Weeks 2–4)
+
+#### Squad A: Core Database & Accounting Engine (`packages/core-engine`)
+- **`src/db/pool.rs` & `src/runtime/sqlite-engine.ts` (`WBS-01` & `WBS-02`)**:
+  - พัฒนา `SqliteReadWriteSplitPool` และ `SqliteReadWritePoolEngine` (ใช้ `node:sqlite` `DatabaseSync` บนฐานข้อมูลไฟล์จริงโหมด WAL)
+  - แยก **1 Dedicated Writer Connection** ที่ทำงานผ่านคิว FIFO แบบอนุกรมด้วย `BEGIN IMMEDIATE TRANSACTION;` ออกจาก **4–8 Concurrent Reader Connections** ที่ล็อก `PRAGMA query_only = ON;` และกระจายโหลดแบบ Round-Robin ขจัดปัญหา `SQLITE_BUSY` 100%
+  - ปรับปรุงตัวรัน Migration 5 ขั้นตอนให้คัดกรองคำสั่งระดับการเชื่อมต่อ (`PRAGMA journal_mode`, `PRAGMA synchronous`) ออกก่อนรัน DDL ภายใน `BEGIN EXCLUSIVE TRANSACTION;` และตรวจสอบ `PRAGMA foreign_key_check;` ก่อน `COMMIT`
+- **`src/domains/costing_mac.rs` & `src/runtime/sqlite-engine.ts` (`WBS-04`)**:
+  - เชื่อมต่อระบบรับสินค้าเข้าคลัง (`receivePurchaseOrderWithLandedCosts`) และระบบจำลองต้นทุนก่อนรับจริง (`previewPurchaseOrderCosting`) เข้ากับตาราง `purchase_orders`, `purchase_order_items`, `purchase_order_landed_costs`, `inventory_levels`, และ `inventory_transactions`
+  - บังคับใช้ **Negative/Zero Stock Guard** รีเซ็ตค่าเฉลี่ยเคลื่อนที่ (MAC) เป็นต้นทุนล็อตใหม่ทันทีเมื่อสต็อกก่อนรับติดลบหรือเป็นศูนย์
+- **`src/domains/bom_dag.rs` & `src/runtime/sqlite-engine.ts` (`WBS-05`)**:
+  - เพิ่มฟังก์ชัน `compute_multilevel_bom_deductions` (Rust) และ `executeProductionBuildBatch` / `computeLiveRecipePreview` (SQLite Runtime)
+  - รองรับการต้ม/ผลิตวัตถุดิบเตรียมไว้ล่วงหน้า (`PRODUCTION_BUILD` สำหรับสินค้า `use_production = 1`) พร้อมคำนวณต้นทุน MAC ของล็อตที่ผลิตจากวัตถุดิบย่อยและเปอร์เซ็นต์สูญเสีย (`wastage_basis_points`)
+  - บังคับใช้กฎ **Pre-Built Stopping Rule** (หยุดแตกแขนงที่โหนด `use_production = 1`) และ **Role-Based Modifiers** (`ROLE_SCALE_BPS` ปรับสัดส่วนเฉพาะบทบาท เช่น `SWEETENER`)
+
+#### Squad B: Hardware Abstraction Layer (`packages/hal-drivers`)
+- **`src/scanner/mod.ts` (`WBS-07`)**:
+  - เพิ่มอัลกอริทึมคำนวณและตรวจสอบเลขตรวจสอบมาตรฐาน GS1 EAN-13 Modulo-10 (`computeEan13CheckDigit`, `verifyEan13CheckDigit`)
+  - อัปเกรด `parseScaleBarcodeEan13` ให้คืนค่าสถานะ `checkDigitValid` และรองรับโหมดบังคับตรวจเลข Check Digit (`enforceCheckDigit`) สำหรับบาร์โค้ดตราชั่งทั้งแบบฝังน้ำหนัก (`Prefix 20–24`) และแบบฝังราคารวม (`Prefix 25–29`)
+
+#### Squad C: UI Presentation Views (`packages/ui-presentation` — `WBS-12`)
+- **`src/views/inventory/InventoryView.ts` (`INV_VIEW`)**:
+  - สร้าง `InventoryViewController` แปลงข้อมูลคงคลังในหน่วย `Milli-Units` และต้นทุน `Micro-Baht` เป็น ViewModel พร้อมแจ้งเตือนสต็อกต่ำ/ติดลบ และจับคู่บาร์โค้ดตราชั่งจากรหัสปุ่มกายภาพ (`resolveScannedKeyCodes`)
+- **`src/views/inventory/PurchaseOrderView.ts` (`PO_VIEW`)**:
+  - สร้าง `PurchaseOrderViewController` แสดงตัวอย่างการปันส่วนค่าขนส่ง/ค่าธรรมเนียม (Landed Cost Preview) และเปรียบเทียบ `MAC เดิม -> ต้นทุนสุทธิล็อตใหม่ -> MAC ใหม่` ก่อนกดยืนยันรับของเข้าคลัง
+- **`src/views/bom-editor/BomEditorView.ts` (`BOM_VIEW`)**:
+  - สร้าง `BomEditorViewController` สำหรับผูกสูตรการผลิตหลายระดับ (Multi-Level BOM), บล็อกสูตรวนลูปแบบทันที, คำนวณต้นทุนสูตร (Live Recipe COGS & Gross Margin Preview), และสั่งผลิตวัตถุดิบเตรียมขาย (`runPrepBatchBuild`)
+
+#### Squad D: Local IPC Bridge & Phase 1 Assembly Verification (`packages/cluster-gateway` & `tests/e2e-integration`)
+- **`packages/cluster-gateway/src/local-ipc-bridge.ts`**:
+  - สร้าง `LocalIpcBridge` เชื่อมต่อ View Controllers ของ Squad C เข้ากับ `SqliteReadWritePoolEngine` ของ Squad A พร้อมตัวนับสถิติ Read/Write IPC
+- **`tests/e2e-integration/phase1-warehouse-assembly.test.ts`**:
+  - ทดสอบการทำงานร่วมกันของทั้ง 4 ทีมบนฐานข้อมูล SQLite โหมด WAL จริง:
+    1. ทดสอบ Read/Write Split Pool (`1 Writer` + `4 Readers`), ยืนยันว่า Reader บล็อกการเขียนด้วย `PRAGMA query_only = ON`, และยืนยันว่า Immutable Triggers บล็อกการ `UPDATE`/`DELETE` บน `inventory_transactions`
+    2. ทดสอบรับใบสั่งซื้อพร้อมปันส่วน Landed Cost (`FREIGHT` + `HANDLING`) ครบทุกไมโครบาท และทดสอบ Negative Stock Guard เมื่อรับสินค้าเข้าสต็อกที่ติดลบ
+    3. ทดสอบผูกสูตร BOM 2 ระดับ, บล็อกวงจรปิด 3 โหนด (`HTTP 422 Circular BOM Dependency`), สั่งต้มไข่มุก (`PRODUCTION_BUILD`), คำนวณตัดสต็อกชานมหวาน 50% (`MOD-SWEET-50`), สแกนบาร์โค้ดตราชั่ง (`Prefix 20` & `Prefix 25`), และยืนยันสมการอนุรักษ์สต็อก (`verifyLedgerConservationInvariant`)
+- **ผลการทดสอบทั้งหมด (Phase 0 + Phase 1 + Property Invariants)**: ผ่านครบ **13/13 tests (100% pass)**
+
 

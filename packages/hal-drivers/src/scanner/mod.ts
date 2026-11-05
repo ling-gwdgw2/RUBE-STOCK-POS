@@ -84,6 +84,33 @@ export interface ParsedScaleBarcode {
   weightMilliKg?: MilliUnit;
   totalPriceSatang?: Satang;
   computedWeightMilliFromPrice?: MilliUnit;
+  checkDigitValid?: boolean;
+}
+
+/**
+ * Computes the standard GS1 EAN-13 Modulo-10 Check Digit from the first 12 digits.
+ * Odd positions (1-indexed: 1,3,5,7,9,11 -> 0-indexed even: 0,2,4,6,8,10) have weight 1;
+ * Even positions (1-indexed: 2,4,6,8,10,12 -> 0-indexed odd: 1,3,5,7,9,11) have weight 3.
+ */
+export function computeEan13CheckDigit(first12Digits: string): number {
+  if (!/^\d{12}$/.test(first12Digits)) {
+    throw new Error(`E_INVALID_EAN13_PAYLOAD: expected 12 digits, got '${first12Digits}'`);
+  }
+  let sum = 0;
+  for (let i = 0; i < 12; i++) {
+    const digit = Number(first12Digits[i]);
+    sum += i % 2 === 0 ? digit : digit * 3;
+  }
+  return (10 - (sum % 10)) % 10;
+}
+
+/**
+ * Verifies a 13-digit EAN-13 barcode against its Modulo-10 Check Digit.
+ */
+export function verifyEan13CheckDigit(barcode13: string): boolean {
+  if (!/^\d{13}$/.test(barcode13)) return false;
+  const expected = computeEan13CheckDigit(barcode13.slice(0, 12));
+  return Number(barcode13[12]) === expected;
 }
 
 /**
@@ -93,15 +120,21 @@ export interface ParsedScaleBarcode {
  */
 export function parseScaleBarcodeEan13(
   barcode: string,
-  unitPriceSatangPerKg?: Satang
+  unitPriceSatangPerKg?: Satang,
+  options?: { enforceCheckDigit?: boolean }
 ): ParsedScaleBarcode {
   if (!/^\d{13}$/.test(barcode)) {
     return { isScaleBarcode: false };
   }
 
+  const checkDigitValid = verifyEan13CheckDigit(barcode);
+  if (options?.enforceCheckDigit && !checkDigitValid) {
+    return { isScaleBarcode: false, checkDigitValid: false };
+  }
+
   const prefixNum = Number(barcode.slice(0, 2));
   if (prefixNum < 20 || prefixNum > 29) {
-    return { isScaleBarcode: false };
+    return { isScaleBarcode: false, checkDigitValid };
   }
 
   const prefix = barcode.slice(0, 2);
@@ -115,6 +148,7 @@ export function parseScaleBarcodeEan13(
       prefix,
       sku,
       weightMilliKg: embeddedValue, // 1 gram = 1 Milli-Kilogram
+      checkDigitValid,
     };
   }
 
@@ -132,5 +166,6 @@ export function parseScaleBarcodeEan13(
     sku,
     totalPriceSatang,
     computedWeightMilliFromPrice,
+    checkDigitValid,
   };
 }

@@ -1,0 +1,12 @@
+{
+  "name": "@rube-pos/core-engine",
+  "version": "3.1.0",
+  "type": "module",
+  "main": "./src/runtime/sqlite-engine.ts",
+  "exports": {
+    ".": "./src/runtime/sqlite-engine.ts"
+  },
+  "dependencies": {
+    "@rube-pos/shared-contracts": "workspace:*"
+  }
+}

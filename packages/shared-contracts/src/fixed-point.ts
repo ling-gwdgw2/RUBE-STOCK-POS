@@ -177,3 +177,33 @@ export function computeVatSatang(
   return Number(roundDivBigInt(net * rate, SCALE_BASIS_POINTS));
 }
 
+/**
+ * Formatting helpers for UI Presentation Views (`INV_VIEW`, `PO_VIEW`, `BOM_VIEW`, `POS_TERMINAL`)
+ */
+export function formatMilliUnitsToQtyString(milli: MilliUnit, unitName = ''): string {
+  const sign = milli < 0 ? '-' : '';
+  const abs = Math.abs(milli);
+  const whole = Math.floor(abs / 1_000);
+  const frac = String(abs % 1_000).padStart(3, '0');
+  return unitName ? `${sign}${whole}.${frac} ${unitName}` : `${sign}${whole}.${frac}`;
+}
+
+export function formatSatangToThbString(satang: Satang): string {
+  const sign = satang < 0 ? '-' : '';
+  const abs = Math.abs(satang);
+  const whole = Math.floor(abs / 100);
+  const frac = String(abs % 100).padStart(2, '0');
+  return `${sign}${whole.toLocaleString('en-US')}.${frac}`;
+}
+
+export function formatMicroBahtToThbString(microBaht: MicroBaht): string {
+  const sign = microBaht < 0 ? '-' : '';
+  const abs = Math.abs(microBaht);
+  // Display 4 decimal places in Baht (10,000 Micro-Baht = 0.0100 THB, 100 Micro-Baht = 0.0001 THB)
+  const scaled4 = Math.round(abs / 100);
+  const whole = Math.floor(scaled4 / 10_000);
+  const frac = String(scaled4 % 10_000).padStart(4, '0');
+  return `${sign}${whole.toLocaleString('en-US')}.${frac}`;
+}
+
+

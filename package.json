@@ -6,13 +6,16 @@
   "description": "RUBE-STOCK-POS v3.1 Unified Local-First Warehouse & POS System Monorepo",
   "workspaces": [
     "packages/shared-contracts",
+    "packages/core-engine",
     "packages/hal-drivers",
+    "packages/cluster-gateway",
     "packages/ui-presentation"
   ],
   "scripts": {
-    "test": "node --test tests/property-invariants/accounting-invariants.test.ts tests/e2e-integration/phase0-assembly.test.ts",
+    "test": "node --test tests/property-invariants/accounting-invariants.test.ts tests/e2e-integration/phase0-assembly.test.ts tests/e2e-integration/phase1-warehouse-assembly.test.ts",
     "test:invariants": "node --test tests/property-invariants/accounting-invariants.test.ts",
     "test:phase0": "node --test tests/e2e-integration/phase0-assembly.test.ts",
+    "test:phase1": "node --test tests/e2e-integration/phase1-warehouse-assembly.test.ts",
     "verify:schema": "node scripts/verify-schema-checksum.mjs"
   },
   "engines": {

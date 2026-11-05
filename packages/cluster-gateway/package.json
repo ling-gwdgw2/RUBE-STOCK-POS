@@ -1,0 +1,10 @@
+{
+  "name": "@rube-pos/cluster-gateway",
+  "version": "3.1.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@rube-pos/shared-contracts": "workspace:*",
+    "@rube-pos/core-engine": "workspace:*"
+  }
+}

@@ -2,7 +2,7 @@
 
 Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Hardened Blueprint)
 
-[![Phase 0 Tests](https://img.shields.io/badge/Phase%200%20Tests-10%2F10%20Passing-brightgreen)](#automated-testing)
+[![Phase 0 & 1 Tests](https://img.shields.io/badge/Phase%200%20%26%201%20Tests-13%2F13%20Passing-brightgreen)](#automated-testing)
 [![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.0-blue)](#key-architectural-pillars)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Standalone%20%7C%20Local%20LAN-orange)](#overview)
 
@@ -57,7 +57,7 @@ rube-stock-pos/
 │
 └── tests/
     ├── property-invariants/   # Automated Invariants Test Suite (Ledger, MAC, Landed Cost, BOM DAG)
-    └── e2e-integration/       # Phase 0 Integration Assembly Checkpoint Test
+    └── e2e-integration/       # Phase 0 & Phase 1 Integration Assembly Checkpoint Tests
 ```
 
 ---
@@ -70,11 +70,14 @@ rube-stock-pos/
 # ตรวจสอบ SHA-256 Checksum ของ Schema (34 ตาราง + 3 Triggers)
 npm run verify:schema
 
-# รันชุดทดสอบ Phase 0 และ Accounting Invariants ทั้งหมด
+# รันชุดทดสอบเฉพาะเฟสที่ 1 (SQLite WAL Split Pool + Landed Cost + Multi-Level BOM + Scale Barcode)
+npm run test:phase1
+
+# รันชุดทดสอบทั้งหมด (Phase 0 + Phase 1 + Accounting Invariants)
 npm test
 ```
 
-ผลการทดสอบ: **10/10 Tests ผ่านครบ 100%**
+ผลการทดสอบ: **13/13 Tests ผ่านครบ 100%**
 
 ---
 
@@ -83,3 +86,4 @@ npm test
 - [ARCHITECTURE.md](rube_stock_pos_complete_architecture_specification%20(1).md) - สถาปัตยกรรมระบบโดยละเอียด (v3.1)
 - [IMPLEMENTATION_PLAYBOOK.md](rube_stock_pos_team_implementation_assembly_playbook.md) - แผนผังทีมงานและตาราง Master WBS 16 สัปดาห์
 - [Changelog.md](Changelog.md) - รายการอัปเกรดและประวัติการเปลี่ยนแปลง
+
