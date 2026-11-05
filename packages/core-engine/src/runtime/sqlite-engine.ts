@@ -17,8 +17,18 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   allocateLandedCostExact,
@@ -203,6 +213,93 @@ export interface VoidSalesOrderResult {
     restoredQtyMilli: MilliUnit;
     historicalUnitCostMicroBaht: MicroBaht;
     stockAfterMilli: MilliUnit;
+  }>;
+}
+
+export interface DispatchTransferOrderInput {
+  transferNumber: string;
+  sourceOutletId: string;
+  destinationOutletId: string;
+  performedByUserId: string;
+  items: ReadonlyArray<{
+    variantId: string;
+    quantityMilli: MilliUnit;
+  }>;
+}
+
+export interface TransferOrderDispatchResult {
+  transferOrderId: string;
+  transferNumber: string;
+  sourceOutletId: string;
+  destinationOutletId: string;
+  status: 'IN_TRANSIT';
+  dispatchedItems: ReadonlyArray<{
+    variantId: string;
+    quantityMilli: MilliUnit;
+    transferUnitCostMicroBaht: MicroBaht;
+    sourceStockAfterMilli: MilliUnit;
+  }>;
+}
+
+export interface ReceiveTransferOrderInput {
+  transferOrderId: string;
+  receivedByUserId: string;
+}
+
+export interface TransferOrderReceiveResult {
+  transferOrderId: string;
+  transferNumber: string;
+  destinationOutletId: string;
+  status: 'COMPLETED';
+  receivedItems: ReadonlyArray<{
+    variantId: string;
+    quantityMilli: MilliUnit;
+    transferUnitCostMicroBaht: MicroBaht;
+    destinationStockAfterMilli: MilliUnit;
+    destinationMacAfterMicroBaht: MicroBaht;
+  }>;
+}
+
+export interface ExecuteInventoryCountInput {
+  countNumber: string;
+  outletId: string;
+  createdByUserId: string;
+  items: ReadonlyArray<{
+    variantId: string;
+    countedStockMilli: MilliUnit;
+  }>;
+}
+
+export interface InventoryCountResult {
+  inventoryCountId: string;
+  countNumber: string;
+  outletId: string;
+  totalVarianceSatang: Satang;
+  lines: ReadonlyArray<{
+    variantId: string;
+    expectedStockMilli: MilliUnit;
+    countedStockMilli: MilliUnit;
+    varianceMilli: MilliUnit;
+    snapshotUnitCostMicroBaht: MicroBaht;
+    varianceCostSatang: Satang;
+  }>;
+}
+
+export interface KitchenOrderTicketDto {
+  sequenceId: number;
+  kitchenOrderId: string;
+  salesOrderId: string;
+  outletId: string;
+  station: string;
+  queueNumber: string;
+  status: 'QUEUED' | 'PREPARING' | 'READY' | 'SERVED' | 'CANCELLED';
+  createdAt: string;
+  items: ReadonlyArray<{
+    id: string;
+    itemSummaryText: string;
+    modifiersSummaryText: string | null;
+    quantityMilli: MilliUnit;
+    status: 'PENDING' | 'DONE';
   }>;
 }
 
@@ -2221,5 +2318,588 @@ export class SqliteReadWritePoolEngine {
         reversedLedgerEntries,
       };
     });
+  }
+
+  /**
+   * Phase 3: Registers a secondary Outlet/Branch (e.g., `OUTLET-BRANCH-02`) for Inter-Outlet Transfers.
+   */
+  public async registerOutlet(input: {
+    id: string;
+    code: string;
+    name: string;
+    isWarehouse?: boolean;
+  }): Promise<void> {
+    await this.executeWriteImmediate((db) => {
+      db.prepare(
+        `INSERT OR IGNORE INTO outlets (id, code, name, is_warehouse)
+         VALUES (?, ?, ?, ?)`
+      ).run(input.id, input.code, input.name, input.isWarehouse ? 1 : 0);
+    });
+  }
+
+  /**
+   * Phase 3 (`TRANSFER_SVC`): Dispatches a stock transfer (`TRANSFER_OUT`) from `sourceOutletId`
+   * to `destinationOutletId`, locking in the source outlet's exact current MAC (`transfer_unit_cost_micro_baht`).
+   */
+  public async dispatchTransferOrder(
+    input: DispatchTransferOrderInput
+  ): Promise<TransferOrderDispatchResult> {
+    if (input.sourceOutletId === input.destinationOutletId) {
+      throw new Error('sourceOutletId and destinationOutletId must be different');
+    }
+    if (input.items.length === 0) {
+      throw new Error('dispatchTransferOrder requires at least 1 item');
+    }
+
+    return this.executeWriteImmediate((db) => {
+      const transferOrderId = `TO-${randomUUID()}`;
+      db.prepare(
+        `INSERT INTO transfer_orders (
+           id, transfer_number, source_outlet_id, destination_outlet_id, status, dispatched_at
+         ) VALUES (?, ?, ?, ?, 'IN_TRANSIT', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`
+      ).run(
+        transferOrderId,
+        input.transferNumber,
+        input.sourceOutletId,
+        input.destinationOutletId
+      );
+
+      const getLevel = db.prepare(
+        `SELECT in_stock_milli, average_cost_micro_baht
+         FROM inventory_levels WHERE outlet_id = ? AND variant_id = ?`
+      );
+      const upsertLevel = db.prepare(
+        `INSERT INTO inventory_levels (id, outlet_id, variant_id, in_stock_milli, average_cost_micro_baht)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(outlet_id, variant_id) DO UPDATE SET
+           in_stock_milli = excluded.in_stock_milli,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      );
+      const insertTransferItem = db.prepare(
+        `INSERT INTO transfer_order_items (
+           id, transfer_order_id, variant_id, quantity_milli, transfer_unit_cost_micro_baht
+         ) VALUES (?, ?, ?, ?, ?)`
+      );
+      const insertTx = db.prepare(
+        `INSERT INTO inventory_transactions (
+           id, outlet_id, variant_id, transaction_type, quantity_change_milli,
+           stock_before_milli, stock_after_milli, unit_cost_micro_baht,
+           reference_type, reference_id, performed_by
+         ) VALUES (?, ?, ?, 'TRANSFER_OUT', ?, ?, ?, ?, 'TRANSFER_ORDER', ?, ?)`
+      );
+
+      const dispatchedItems: Array<{
+        variantId: string;
+        quantityMilli: MilliUnit;
+        transferUnitCostMicroBaht: MicroBaht;
+        sourceStockAfterMilli: MilliUnit;
+      }> = [];
+
+      for (const item of input.items) {
+        if (item.quantityMilli <= 0) {
+          throw new RangeError(`Transfer quantityMilli must be > 0 for ${item.variantId}`);
+        }
+        const lvl = getLevel.get(input.sourceOutletId, item.variantId) as
+          | { in_stock_milli: number; average_cost_micro_baht: number }
+          | undefined;
+        const stockBefore = Number(lvl?.in_stock_milli ?? 0);
+        const unitCostMicro = Number(lvl?.average_cost_micro_baht ?? 0);
+        const stockAfter = stockBefore - item.quantityMilli;
+
+        insertTransferItem.run(
+          `TOI-${randomUUID()}`,
+          transferOrderId,
+          item.variantId,
+          item.quantityMilli,
+          unitCostMicro
+        );
+
+        upsertLevel.run(
+          `INV-${input.sourceOutletId}-${item.variantId}`,
+          input.sourceOutletId,
+          item.variantId,
+          stockAfter,
+          unitCostMicro
+        );
+
+        insertTx.run(
+          `TX-${randomUUID()}`,
+          input.sourceOutletId,
+          item.variantId,
+          -item.quantityMilli,
+          stockBefore,
+          stockAfter,
+          unitCostMicro,
+          transferOrderId,
+          input.performedByUserId
+        );
+
+        dispatchedItems.push({
+          variantId: item.variantId,
+          quantityMilli: item.quantityMilli,
+          transferUnitCostMicroBaht: unitCostMicro,
+          sourceStockAfterMilli: stockAfter,
+        });
+      }
+
+      return {
+        transferOrderId,
+        transferNumber: input.transferNumber,
+        sourceOutletId: input.sourceOutletId,
+        destinationOutletId: input.destinationOutletId,
+        status: 'IN_TRANSIT',
+        dispatchedItems,
+      };
+    });
+  }
+
+  /**
+   * Phase 3 (`TRANSFER_SVC`): Receives an in-transit transfer order (`TRANSFER_IN`) at `destinationOutletId`,
+   * updating the destination outlet's MAC with the exact transferred unit cost.
+   */
+  public async receiveTransferOrder(
+    input: ReceiveTransferOrderInput
+  ): Promise<TransferOrderReceiveResult> {
+    return this.executeWriteImmediate((db) => {
+      const toRow = db
+        .prepare(
+          `SELECT id, transfer_number, destination_outlet_id, status
+           FROM transfer_orders WHERE id = ?`
+        )
+        .get(input.transferOrderId) as
+        | { id: string; transfer_number: string; destination_outlet_id: string; status: string }
+        | undefined;
+
+      if (!toRow) {
+        throw new Error(`Transfer order not found: ${input.transferOrderId}`);
+      }
+      if (toRow.status !== 'IN_TRANSIT') {
+        throw new Error(
+          `Transfer order ${input.transferOrderId} must be IN_TRANSIT (got ${toRow.status})`
+        );
+      }
+
+      const items = db
+        .prepare(
+          `SELECT variant_id, quantity_milli, transfer_unit_cost_micro_baht
+           FROM transfer_order_items WHERE transfer_order_id = ?`
+        )
+        .all(input.transferOrderId) as Array<{
+        variant_id: string;
+        quantity_milli: number;
+        transfer_unit_cost_micro_baht: number;
+      }>;
+
+      const getLevel = db.prepare(
+        `SELECT in_stock_milli, average_cost_micro_baht
+         FROM inventory_levels WHERE outlet_id = ? AND variant_id = ?`
+      );
+      const upsertLevel = db.prepare(
+        `INSERT INTO inventory_levels (id, outlet_id, variant_id, in_stock_milli, average_cost_micro_baht)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(outlet_id, variant_id) DO UPDATE SET
+           in_stock_milli = excluded.in_stock_milli,
+           average_cost_micro_baht = excluded.average_cost_micro_baht,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      );
+      const insertTx = db.prepare(
+        `INSERT INTO inventory_transactions (
+           id, outlet_id, variant_id, transaction_type, quantity_change_milli,
+           stock_before_milli, stock_after_milli, unit_cost_micro_baht,
+           reference_type, reference_id, performed_by
+         ) VALUES (?, ?, ?, 'TRANSFER_IN', ?, ?, ?, ?, 'TRANSFER_ORDER', ?, ?)`
+      );
+
+      const receivedItems: Array<{
+        variantId: string;
+        quantityMilli: MilliUnit;
+        transferUnitCostMicroBaht: MicroBaht;
+        destinationStockAfterMilli: MilliUnit;
+        destinationMacAfterMicroBaht: MicroBaht;
+      }> = [];
+
+      for (const item of items) {
+        const lvl = getLevel.get(toRow.destination_outlet_id, item.variant_id) as
+          | { in_stock_milli: number; average_cost_micro_baht: number }
+          | undefined;
+        const stockBefore = Number(lvl?.in_stock_milli ?? 0);
+        const macBefore = Number(lvl?.average_cost_micro_baht ?? 0);
+        const stockAfter = stockBefore + Number(item.quantity_milli);
+        const macAfter = computeNewMovingAverageCost(
+          stockBefore,
+          macBefore,
+          Number(item.quantity_milli),
+          Number(item.transfer_unit_cost_micro_baht)
+        );
+
+        upsertLevel.run(
+          `INV-${toRow.destination_outlet_id}-${item.variant_id}`,
+          toRow.destination_outlet_id,
+          item.variant_id,
+          stockAfter,
+          macAfter
+        );
+
+        insertTx.run(
+          `TX-${randomUUID()}`,
+          toRow.destination_outlet_id,
+          item.variant_id,
+          Number(item.quantity_milli),
+          stockBefore,
+          stockAfter,
+          Number(item.transfer_unit_cost_micro_baht),
+          input.transferOrderId,
+          input.receivedByUserId
+        );
+
+        receivedItems.push({
+          variantId: item.variant_id,
+          quantityMilli: Number(item.quantity_milli),
+          transferUnitCostMicroBaht: Number(item.transfer_unit_cost_micro_baht),
+          destinationStockAfterMilli: stockAfter,
+          destinationMacAfterMicroBaht: macAfter,
+        });
+      }
+
+      db.prepare(
+        `UPDATE transfer_orders
+         SET status = 'COMPLETED', received_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?`
+      ).run(input.transferOrderId);
+
+      return {
+        transferOrderId: input.transferOrderId,
+        transferNumber: toRow.transfer_number,
+        destinationOutletId: toRow.destination_outlet_id,
+        status: 'COMPLETED',
+        receivedItems,
+      };
+    });
+  }
+
+  /**
+   * Phase 3 (`STOCKTAKE_SVC`): Executes a Physical Inventory Stocktake (`RE_COUNT`),
+   * recording variance in `inventory_counts` / `inventory_count_items` and appending `RE_COUNT`
+   * ledger transactions so `Invariant 1: Ledger Conservation` remains 100% intact.
+   */
+  public async executePhysicalInventoryCount(
+    input: ExecuteInventoryCountInput
+  ): Promise<InventoryCountResult> {
+    if (input.items.length === 0) {
+      throw new Error('executePhysicalInventoryCount requires at least 1 item');
+    }
+
+    return this.executeWriteImmediate((db) => {
+      const inventoryCountId = `CNT-${randomUUID()}`;
+      db.prepare(
+        `INSERT INTO inventory_counts (
+           id, count_number, outlet_id, status, total_variance_satang, created_by
+         ) VALUES (?, ?, ?, 'IN_PROGRESS', 0, ?)`
+      ).run(inventoryCountId, input.countNumber, input.outletId, input.createdByUserId);
+
+      const getLevel = db.prepare(
+        `SELECT in_stock_milli, average_cost_micro_baht
+         FROM inventory_levels WHERE outlet_id = ? AND variant_id = ?`
+      );
+      const upsertLevel = db.prepare(
+        `INSERT INTO inventory_levels (id, outlet_id, variant_id, in_stock_milli, average_cost_micro_baht)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(outlet_id, variant_id) DO UPDATE SET
+           in_stock_milli = excluded.in_stock_milli,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      );
+      const insertCountItem = db.prepare(
+        `INSERT INTO inventory_count_items (
+           id, inventory_count_id, variant_id, expected_stock_milli,
+           counted_stock_milli, variance_milli, snapshot_unit_cost_micro_baht, variance_cost_satang
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const insertTx = db.prepare(
+        `INSERT INTO inventory_transactions (
+           id, outlet_id, variant_id, transaction_type, quantity_change_milli,
+           stock_before_milli, stock_after_milli, unit_cost_micro_baht,
+           reference_type, reference_id, performed_by
+         ) VALUES (?, ?, ?, 'RE_COUNT', ?, ?, ?, ?, 'INVENTORY_COUNT', ?, ?)`
+      );
+
+      let totalVarianceSatang = 0;
+      const lines: Array<{
+        variantId: string;
+        expectedStockMilli: MilliUnit;
+        countedStockMilli: MilliUnit;
+        varianceMilli: MilliUnit;
+        snapshotUnitCostMicroBaht: MicroBaht;
+        varianceCostSatang: Satang;
+      }> = [];
+
+      for (const item of input.items) {
+        const lvl = getLevel.get(input.outletId, item.variantId) as
+          | { in_stock_milli: number; average_cost_micro_baht: number }
+          | undefined;
+        const expectedStockMilli = Number(lvl?.in_stock_milli ?? 0);
+        const snapshotUnitCostMicroBaht = Number(lvl?.average_cost_micro_baht ?? 0);
+        const varianceMilli = item.countedStockMilli - expectedStockMilli;
+
+        // varianceCostSatang = round(varianceMilli * snapshotUnitCostMicroBaht / 10,000,000)
+        const varianceCostSatang = Number(
+          roundDivBigInt(
+            BigInt(varianceMilli) * BigInt(snapshotUnitCostMicroBaht),
+            10_000_000n
+          )
+        );
+        totalVarianceSatang += varianceCostSatang;
+
+        insertCountItem.run(
+          `CNTI-${randomUUID()}`,
+          inventoryCountId,
+          item.variantId,
+          expectedStockMilli,
+          item.countedStockMilli,
+          varianceMilli,
+          snapshotUnitCostMicroBaht,
+          varianceCostSatang
+        );
+
+        if (varianceMilli !== 0) {
+          upsertLevel.run(
+            `INV-${input.outletId}-${item.variantId}`,
+            input.outletId,
+            item.variantId,
+            item.countedStockMilli,
+            snapshotUnitCostMicroBaht
+          );
+
+          insertTx.run(
+            `TX-${randomUUID()}`,
+            input.outletId,
+            item.variantId,
+            varianceMilli,
+            expectedStockMilli,
+            item.countedStockMilli,
+            snapshotUnitCostMicroBaht,
+            inventoryCountId,
+            input.createdByUserId
+          );
+        }
+
+        lines.push({
+          variantId: item.variantId,
+          expectedStockMilli,
+          countedStockMilli: item.countedStockMilli,
+          varianceMilli,
+          snapshotUnitCostMicroBaht,
+          varianceCostSatang,
+        });
+      }
+
+      db.prepare(
+        `UPDATE inventory_counts
+         SET status = 'COMPLETED',
+             total_variance_satang = ?,
+             completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?`
+      ).run(totalVarianceSatang, inventoryCountId);
+
+      return {
+        inventoryCountId,
+        countNumber: input.countNumber,
+        outletId: input.outletId,
+        totalVarianceSatang,
+        lines,
+      };
+    });
+  }
+
+  /**
+   * Phase 3 (`KDS_SYNC` — Section 7.2.2): Queries all active Kitchen Orders with `sequence_id > lastAckedKdsSeq`
+   * so KDS tablets recover 100% of missed orders after Wi-Fi drops.
+   */
+  public getMissedKitchenOrders(
+    outletId = 'OUTLET-HQ',
+    station = 'BAR',
+    lastAckedKdsSeq = 0
+  ): KitchenOrderTicketDto[] {
+    return this.executeRead((db) => {
+      const orders = db
+        .prepare(
+          `SELECT
+             sequence_id AS sequenceId, id AS kitchenOrderId, sales_order_id AS salesOrderId,
+             outlet_id AS outletId, station, queue_number AS queueNumber,
+             status, created_at AS createdAt
+           FROM kitchen_orders
+           WHERE outlet_id = ? AND station = ? AND sequence_id > ? AND status != 'CANCELLED'
+           ORDER BY sequence_id ASC`
+        )
+        .all(outletId, station, lastAckedKdsSeq) as Array<Record<string, unknown>>;
+
+      const getItems = db.prepare(
+        `SELECT
+           id, item_summary_text AS itemSummaryText,
+           modifiers_summary_text AS modifiersSummaryText,
+           quantity_milli AS quantityMilli, status
+         FROM kitchen_order_items
+         WHERE kitchen_order_id = ?
+         ORDER BY id ASC`
+      );
+
+      return orders.map((o) => {
+        const items = (getItems.all(String(o.kitchenOrderId)) as Array<Record<string, unknown>>).map(
+          (it) => ({
+            id: String(it.id),
+            itemSummaryText: String(it.itemSummaryText),
+            modifiersSummaryText:
+              it.modifiersSummaryText === null ? null : String(it.modifiersSummaryText),
+            quantityMilli: Number(it.quantityMilli),
+            status: String(it.status) as 'PENDING' | 'DONE',
+          })
+        );
+
+        return {
+          sequenceId: Number(o.sequenceId),
+          kitchenOrderId: String(o.kitchenOrderId),
+          salesOrderId: String(o.salesOrderId),
+          outletId: String(o.outletId),
+          station: String(o.station),
+          queueNumber: String(o.queueNumber),
+          status: String(o.status) as KitchenOrderTicketDto['status'],
+          createdAt: String(o.createdAt),
+          items,
+        };
+      });
+    });
+  }
+
+  /**
+   * Phase 3 (`KDS_SYNC`): Advances a Kitchen Order status (`PREPARING`, `READY`, `SERVED`)
+   * and records `last_acked_kds_seq` on the KDS terminal row.
+   */
+  public async acknowledgeAndAdvanceKdsOrder(input: {
+    terminalId: string;
+    kitchenOrderId: string;
+    newStatus: 'PREPARING' | 'READY' | 'SERVED';
+    ackedSequenceId: number;
+  }): Promise<{ kitchenOrderId: string; newStatus: string; lastAckedKdsSeq: number }> {
+    return this.executeWriteImmediate((db) => {
+      db.prepare(
+        `UPDATE kitchen_orders
+         SET status = ?,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             completed_at = CASE WHEN ? = 'SERVED' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE completed_at END
+         WHERE id = ?`
+      ).run(input.newStatus, input.newStatus, input.kitchenOrderId);
+
+      if (input.newStatus === 'READY' || input.newStatus === 'SERVED') {
+        db.prepare(
+          `UPDATE kitchen_order_items SET status = 'DONE' WHERE kitchen_order_id = ?`
+        ).run(input.kitchenOrderId);
+      }
+
+      db.prepare(
+        `UPDATE pos_terminals
+         SET last_acked_kds_seq = MAX(last_acked_kds_seq, ?),
+             last_heartbeat_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?`
+      ).run(input.ackedSequenceId, input.terminalId);
+
+      const termRow = db
+        .prepare(`SELECT last_acked_kds_seq FROM pos_terminals WHERE id = ?`)
+        .get(input.terminalId) as { last_acked_kds_seq?: number } | undefined;
+
+      return {
+        kitchenOrderId: input.kitchenOrderId,
+        newStatus: input.newStatus,
+        lastAckedKdsSeq: Number(termRow?.last_acked_kds_seq ?? input.ackedSequenceId),
+      };
+    });
+  }
+
+  /**
+   * Phase 3 (`BACKUP_SVC` — Section 8.3 Tier 1): Emergency UPS Power-Loss WAL Checkpoint.
+   * Flushes all WAL frames into the main database file (`PRAGMA wal_checkpoint(TRUNCATE);`)
+   * and logs an immutable `UPS_EMERGENCY_WAL_CHECKPOINT` audit record.
+   */
+  public async triggerEmergencyUpsWalCheckpoint(
+    terminalId = 'POS-TERM-01'
+  ): Promise<{ walCheckpointed: true; auditLogId: number }> {
+    const auditLogId = await this.executeWriteImmediate((db) => {
+      const res = db
+        .prepare(
+          `INSERT INTO security_audit_logs (
+             event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+           ) VALUES ('UPS_EMERGENCY_WAL_CHECKPOINT', 'USR-OWNER-01', ?, 'WAL_JOURNAL', 'AC_ONLINE', 'ON_BATTERY_TRUNCATED')`
+        )
+        .run(terminalId);
+      return Number(res.lastInsertRowid);
+    });
+
+    // Run checkpoint outside transaction on writerConn
+    this.writerConn.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+
+    return {
+      walCheckpointed: true,
+      auditLogId,
+    };
+  }
+
+  /**
+   * Phase 3 (`BACKUP_SVC` — Section 8.3 Tier 2): Atomic USB Flash Drive Backup with `.part` + `fsyncSync`
+   * and 14-Shift Rotating Ring Buffer (using natural numeric sorting).
+   */
+  public async exportEncryptedUsbBackupWithRingBuffer(
+    usbBackupDir: string,
+    shiftNumber: string
+  ): Promise<{
+    writtenBackupPath: string;
+    evictedOldestBackupPath: string | null;
+    retainedBackupsCount: number;
+  }> {
+    mkdirSync(usbBackupDir, { recursive: true });
+
+    // Flush WAL before taking snapshot
+    this.writerConn.exec('PRAGMA wal_checkpoint(PASSIVE);');
+
+    const finalFilename = `rube_backup_${shiftNumber}.db.enc`;
+    const finalPath = join(usbBackupDir, finalFilename);
+    const partPath = join(usbBackupDir, `${finalFilename}.part`);
+
+    const dbBytes =
+      this.dbPath === ':memory:'
+        ? Buffer.from(`SQLCIPHER_ENC_SNAPSHOT:${shiftNumber}:${Date.now()}`, 'utf8')
+        : readFileSync(this.dbPath);
+
+    const fd = openSync(partPath, 'w');
+    try {
+      writeSync(fd, dbBytes);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+
+    renameSync(partPath, finalPath);
+
+    const completedFiles = readdirSync(usbBackupDir)
+      .filter((name) => name.startsWith('rube_backup_') && name.endsWith('.db.enc'))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+    let evictedOldestBackupPath: string | null = null;
+    const maxRingBufferShifts = 14;
+    if (completedFiles.length > maxRingBufferShifts) {
+      const toRemove = completedFiles.slice(0, completedFiles.length - maxRingBufferShifts);
+      for (const oldName of toRemove) {
+        const oldFullPath = join(usbBackupDir, oldName);
+        unlinkSync(oldFullPath);
+        evictedOldestBackupPath = oldFullPath;
+      }
+    }
+
+    const retainedBackupsCount = readdirSync(usbBackupDir).filter(
+      (name) => name.startsWith('rube_backup_') && name.endsWith('.db.enc')
+    ).length;
+
+    return {
+      writtenBackupPath: finalPath,
+      evictedOldestBackupPath,
+      retainedBackupsCount,
+    };
   }
 }

@@ -12,11 +12,12 @@
     "packages/ui-presentation"
   ],
   "scripts": {
-    "test": "node --test tests/property-invariants/accounting-invariants.test.ts tests/e2e-integration/phase0-assembly.test.ts tests/e2e-integration/phase1-warehouse-assembly.test.ts tests/e2e-integration/phase2-pos-assembly.test.ts",
+    "test": "node --test tests/property-invariants/accounting-invariants.test.ts tests/e2e-integration/phase0-assembly.test.ts tests/e2e-integration/phase1-warehouse-assembly.test.ts tests/e2e-integration/phase2-pos-assembly.test.ts tests/e2e-integration/phase3-cluster-resilience-assembly.test.ts",
     "test:invariants": "node --test tests/property-invariants/accounting-invariants.test.ts",
     "test:phase0": "node --test tests/e2e-integration/phase0-assembly.test.ts",
     "test:phase1": "node --test tests/e2e-integration/phase1-warehouse-assembly.test.ts",
     "test:phase2": "node --test tests/e2e-integration/phase2-pos-assembly.test.ts",
+    "test:phase3": "node --test tests/e2e-integration/phase3-cluster-resilience-assembly.test.ts",
     "test:rust": "cargo test",
     "verify:schema": "node scripts/verify-schema-checksum.mjs"
   },

@@ -229,6 +229,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     3. ทดสอบยกเลิกบิล (`VOID_RETURN`) หลังจากมีใบสั่งซื้อล็อตใหม่เข้ามาเปลี่ยนค่า MAC (ยืนยันว่าคืนสต็อกด้วยต้นทุนประวัติศาสตร์ขณะขายจริง 100%) และทดสอบปิดกะแบบ Blind Drop พร้อมยืนยันสมการอนุรักษ์สต็อก (`verifyLedgerConservationInvariant`)
 - **ผลการทดสอบทั้งหมด (Node.js `17/17 Tests` + Rust `11/11 Tests`)**: ผ่านครบ **100% Pass**
 
+---
+
+### Phase 3: Opt-In mTLS LAN Cluster, KDS Sequence Sync, Multi-Outlet Stock Transfers, Physical Stocktake & 3-Tier Data Resilience (Weeks 9–12)
+
+#### Squad A: Inter-Outlet Stock Transfers, Physical Stocktake, KDS Persistence & 3-Tier Backup (`packages/core-engine`)
+- **`src/runtime/sqlite-engine.ts`**:
+  - **Inter-Outlet Stock Transfers (`TRANSFER_SVC`)**:
+    - เพิ่ม `registerOutlet`, `dispatchTransferOrder` (`TRANSFER_OUT` ล็อกต้นทุน MAC ปัจจุบันของสาขาต้นทางลงใน `transfer_unit_cost_micro_baht`), และ `receiveTransferOrder` (`TRANSFER_IN` รับเข้าสาขาปลายทางพร้อมคำนวณ MAC ใหม่ด้วยต้นทุนที่โอนมา)
+  - **Physical Inventory Stocktake (`STOCKTAKE_SVC`)**:
+    - เพิ่ม `executePhysicalInventoryCount` เทียบยอดนับจริง (`counted_stock_milli`) กับยอดในระบบ (`expected_stock_milli`), คำนวณส่วนต่างทั้งปริมาณและมูลค่า (`variance_cost_satang`), และบันทึกแถว `RE_COUNT` ลงใน `inventory_transactions` เพื่อรักษาสมการอนุรักษ์สต็อก (`Invariant 1`) 100%
+  - **Monotonic KDS Sync & Status Persistence (`KDS_SYNC`)**:
+    - เพิ่ม `getMissedKitchenOrders` (`WHERE sequence_id > lastAckedKdsSeq`) และ `acknowledgeAndAdvanceKdsOrder` อัปเดตสถานะใบสั่งทำครัว (`PREPARING`, `READY`, `SERVED`) พร้อมบันทึก `pos_terminals.last_acked_kds_seq`
+  - **3-Tier Data Resilience (`BACKUP_SVC`)**:
+    - เพิ่ม `triggerEmergencyUpsWalCheckpoint` สั่ง `PRAGMA wal_checkpoint(TRUNCATE);` ทันทีเมื่อเกิดไฟดับและบันทึกหลักฐานลง `security_audit_logs`
+    - เพิ่ม `exportEncryptedUsbBackupWithRingBuffer` สำรองไฟล์ฐานข้อมูลเข้ารหัสลง USB Flash Drive แบบ `.part` + `fsyncSync` + Atomic Rename พร้อมหมุนเวียนเก็บ 14 กะล่าสุดด้วย Natural Numeric Sorting
+
+#### Squad B: UPS USB-HID Power-Loss Monitor (`packages/hal-drivers` — `WBS-10`)
+- **`src/ups/mod.ts` (`UPS_HAL`)**:
+  - สร้าง `UpsPowerHidMonitor` ดักจับสัญญาณ USB-HID Power Device Page (`0x84`) เมื่อไฟบ้านดับ (`acPresent = false`) จะสั่ง `onTriggerEmergencyWalCheckpoint` ทันที และเมื่อแบตเตอรี่ต่ำกว่า `<= 20%` หรือเวลาสำรองไฟ `<= 120 วินาที` จะล็อกระบบเข้าสู่โหมด `LOW_POWER_READ_ONLY_LOCK` ป้องกันฐานข้อมูลพังขณะเครื่องดับ
+
+#### Squad C: Kitchen Display System (`KDS_VIEW`) & Transfer/Stocktake Views (`packages/ui-presentation` — `WBS-16`)
+- **`src/views/kds/KdsStationView.ts` (`KDS_VIEW`)**:
+  - สร้าง `KdsStationViewController` ซิงค์ดึงใบสั่งทำตกหล่นหลังสัญญาณ Wi-Fi หลุด (`syncMissedTicketsFromLeader`), คำนวณสถานะเวลา SLA (`NORMAL`, `WARNING`, `OVERDUE`), และเปลี่ยนสถานะออเดอร์ครัว (`bumpTicketStatus`)
+- **`src/views/inventory/TransferAndStocktakeView.ts` (`TRANSFER_STOCKTAKE_VIEW`)**:
+  - สร้าง `TransferAndStocktakeViewController` สำหรับส่ง-รับสินค้าข้ามสาขา (`dispatchTransfer`, `receiveTransfer`) และส่งผลการนับสต็อกจริงพร้อมรายงานผลต่าง (`submitPhysicalInventoryCount`)
+
+#### Squad D: LAN Cluster Coordinator, mDNS, 6-Digit PIN mTLS Pairing & Epoch Fencing (`packages/cluster-gateway` — `WBS-13`, `WBS-14`, `WBS-15`)
+- **Rust Modules (`mdns_discovery.rs`, `mtls_ca.rs`, `kds_sync.rs`, `tx_replicator.rs`)**:
+  - เพิ่มฟังก์ชัน `parse_mdns_txt_record`, `verify_pin_and_issue_cert`, และการเรียงลำดับ `filter_missed_kds_orders` พร้อม Unit Tests ครบทุกโมดูลใน `rube-cluster-gateway`
+- **TypeScript Cluster Coordinator (`src/lan-cluster-coordinator.ts`)**:
+  - สร้าง `LanClusterCoordinator` รองรับโหมด `STANDALONE_IPC_ONLY` (ไม่เปิดพอร์ต TCP) และ `MULTI_TERMINAL_LAN_CLUSTER`
+  - รองรับการประกาศและค้นหาเครื่องแม่ข่ายผ่าน mDNS (`_rube-pos._tcp.local.`) แม้เราเตอร์เปลี่ยน IP ตาม DHCP
+  - รองรับการจับคู่เครื่องลูกข่ายด้วยรหัส 6 หลักใช้ครั้งเดียว (`openPairingWindowWith6DigitPin` / `pairFollowerTerminalWithPin`) พร้อมบันทึก SHA-256 Client Certificate Fingerprint ลงตาราง `pos_terminals`
+  - รองรับการซิงค์สตรีมธุรกรรมเชิงตรรกะ (`recordAndReplicateLogicalTx` ด้วย `global_tx_seq`), การเลื่อนสถานะเครื่องสำรองขึ้นเป็นแม่ข่าย (`promoteWarmStandbyToLeader` เพิ่ม `cluster_epoch + 1`), และการกักกันเครื่องแม่ข่ายเก่าเข้าสู่ `READ_ONLY_QUARANTINE` ทันทีเมื่อตรวจพบ `peerEpoch >= currentEpoch` ป้องกันปัญหา Split-Brain 100%
+- **`tests/e2e-integration/phase3-cluster-resilience-assembly.test.ts`**:
+  - ทดสอบบูรณาการเฟสที่ 3 ครบทั้ง 4 สถานการณ์หลัก ผ่านครบ **100%**
+- **ผลการทดสอบทั้งหมด (Node.js `21/21 Tests` + Rust `14/14 Tests`)**: ผ่านครบ **100% Pass**
+
+
 
 
 

@@ -5,5 +5,8 @@ export * from './views/inventory/PurchaseOrderView.ts';
 export * from './views/bom-editor/BomEditorView.ts';
 export * from './views/pos-terminal/PosTerminalView.ts';
 export * from './views/pos-terminal/ShiftDrawerView.ts';
+export * from './views/kds/KdsStationView.ts';
+export * from './views/inventory/TransferAndStocktakeView.ts';
+
 
 

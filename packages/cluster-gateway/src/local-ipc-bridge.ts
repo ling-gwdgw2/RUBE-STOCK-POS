@@ -21,19 +21,37 @@ import type {
   PoReceivePreviewLine,
   PoReceiveResult,
   ProductionBuildResult,
+  ReceiveTransferOrderInput,
   RecordCashDrawerMovementInput,
   SqliteReadWritePoolEngine,
+  TransferOrderDispatchResult,
+  TransferOrderReceiveResult,
   VoidSalesOrderInput,
   VoidSalesOrderResult,
+  DispatchTransferOrderInput,
+  ExecuteInventoryCountInput,
+  InventoryCountResult,
+  KitchenOrderTicketDto,
 } from '../../core-engine/src/runtime/sqlite-engine.ts';
+import type { LanClusterCoordinator } from './lan-cluster-coordinator.ts';
 
 export class LocalIpcBridge {
   private readonly engine: SqliteReadWritePoolEngine;
+  private clusterCoordinator: LanClusterCoordinator | null = null;
   public totalReadsRouted = 0;
   public totalWritesRouted = 0;
 
-  constructor(engine: SqliteReadWritePoolEngine) {
+  constructor(engine: SqliteReadWritePoolEngine, clusterCoordinator?: LanClusterCoordinator) {
     this.engine = engine;
+    this.clusterCoordinator = clusterCoordinator ?? null;
+  }
+
+  public attachClusterCoordinator(coordinator: LanClusterCoordinator): void {
+    this.clusterCoordinator = coordinator;
+  }
+
+  private assertNotQuarantined(): void {
+    this.clusterCoordinator?.assertWriteAllowedOnLeader();
   }
 
   public getInventoryCatalog(outletId = 'OUTLET-HQ'): ItemVariantDto[] {
@@ -154,12 +172,82 @@ export class LocalIpcBridge {
   }
 
   public async checkoutSalesOrder(request: CheckoutOrderRequest): Promise<CheckoutOrderResult> {
+    this.assertNotQuarantined();
     this.totalWritesRouted++;
     return this.engine.checkoutSalesOrder(request);
   }
 
   public async voidSalesOrder(input: VoidSalesOrderInput): Promise<VoidSalesOrderResult> {
+    this.assertNotQuarantined();
     this.totalWritesRouted++;
     return this.engine.voidSalesOrder(input);
+  }
+
+  public async registerOutlet(input: {
+    id: string;
+    code: string;
+    name: string;
+    isWarehouse?: boolean;
+  }): Promise<void> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.registerOutlet(input);
+  }
+
+  public async dispatchTransferOrder(
+    input: DispatchTransferOrderInput
+  ): Promise<TransferOrderDispatchResult> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.dispatchTransferOrder(input);
+  }
+
+  public async receiveTransferOrder(
+    input: ReceiveTransferOrderInput
+  ): Promise<TransferOrderReceiveResult> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.receiveTransferOrder(input);
+  }
+
+  public async executePhysicalInventoryCount(
+    input: ExecuteInventoryCountInput
+  ): Promise<InventoryCountResult> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.executePhysicalInventoryCount(input);
+  }
+
+  public getMissedKitchenOrders(
+    outletId = 'OUTLET-HQ',
+    station = 'BAR',
+    lastAckedKdsSeq = 0
+  ): KitchenOrderTicketDto[] {
+    this.totalReadsRouted++;
+    return this.engine.getMissedKitchenOrders(outletId, station, lastAckedKdsSeq);
+  }
+
+  public async acknowledgeAndAdvanceKdsOrder(input: {
+    terminalId: string;
+    kitchenOrderId: string;
+    newStatus: 'PREPARING' | 'READY' | 'SERVED';
+    ackedSequenceId: number;
+  }) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.acknowledgeAndAdvanceKdsOrder(input);
+  }
+
+  public async triggerEmergencyUpsWalCheckpoint(terminalId = 'POS-TERM-01') {
+    this.totalWritesRouted++;
+    return this.engine.triggerEmergencyUpsWalCheckpoint(terminalId);
+  }
+
+  public async exportEncryptedUsbBackupWithRingBuffer(
+    usbBackupDir: string,
+    shiftNumber: string
+  ) {
+    this.totalWritesRouted++;
+    return this.engine.exportEncryptedUsbBackupWithRingBuffer(usbBackupDir, shiftNumber);
   }
 }
