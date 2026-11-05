@@ -22,6 +22,24 @@ export const SATANG_TO_MICRO_BAHT = 10_000n; // 1 Satang = 10,000 Micro-Baht
 
 export const I64_MAX = 9_223_372_036_854_775_807n;
 export const I64_MIN = -9_223_372_036_854_775_808n;
+export const JS_MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+export const JS_MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
+
+/**
+ * Safely converts a BigInt fixed-point result to a JS `number`, throwing a `RangeError`
+ * if the value exceeds `i64` bounds or `Number.MAX_SAFE_INTEGER` precision limits.
+ */
+export function toSafeFixedPointNumber(value: bigint, context = 'Fixed-point conversion'): number {
+  if (value > I64_MAX || value < I64_MIN) {
+    throw new RangeError(`${context} overflow: ${value.toString()} exceeds i64 bounds`);
+  }
+  if (value > JS_MAX_SAFE_BIGINT || value < JS_MIN_SAFE_BIGINT) {
+    throw new RangeError(
+      `${context} precision overflow: ${value.toString()} exceeds Number.MAX_SAFE_INTEGER`
+    );
+  }
+  return Number(value);
+}
 
 /**
  * 128-bit Intermediate Round-Half-Away-From-Zero Division (`round_div(a, b)` in ARCHITECTURE.md Section 5).
@@ -41,10 +59,7 @@ export function roundDivBigInt(numerator: bigint, denominator: bigint): bigint {
 
 export function roundDiv(numerator: number | bigint, denominator: number | bigint): number {
   const res = roundDivBigInt(BigInt(numerator), BigInt(denominator));
-  if (res > I64_MAX || res < I64_MIN) {
-    throw new RangeError(`Fixed-point overflow: ${res.toString()} exceeds i64 bounds`);
-  }
-  return Number(res);
+  return toSafeFixedPointNumber(res, 'Fixed-point roundDiv');
 }
 
 /**
@@ -67,6 +82,9 @@ export function allocateLandedCostExact(
   items: readonly PoItemForCosting[],
   totalLandedCostSatang: Satang
 ): AllocatedPoItemCost[] {
+  if (totalLandedCostSatang < 0) {
+    throw new RangeError(`totalLandedCostSatang must be >= 0, got ${totalLandedCostSatang}`);
+  }
   const totalLandedMicro = BigInt(totalLandedCostSatang) * SATANG_TO_MICRO_BAHT;
   if (items.length === 0) return [];
 
@@ -75,6 +93,9 @@ export function allocateLandedCostExact(
     const cBase = BigInt(item.baseUnitCostMicroBaht);
     if (qRec <= 0n) {
       throw new RangeError(`Item ${item.id} receivedQtyMilli must be > 0`);
+    }
+    if (cBase < 0n) {
+      throw new RangeError(`Item ${item.id} baseUnitCostMicroBaht must be >= 0`);
     }
     const baseValueMicro = roundDivBigInt(qRec * cBase, SCALE_MILLI);
     return { index, item, qRec, cBase, baseValueMicro };
@@ -87,7 +108,7 @@ export function allocateLandedCostExact(
       id: v.item.id,
       baseValueMicroBaht: v.baseValueMicro,
       allocatedLandedCostMicroBaht: 0n,
-      effectiveUnitCostMicroBaht: Number(v.cBase),
+      effectiveUnitCostMicroBaht: toSafeFixedPointNumber(v.cBase, 'baseUnitCostMicroBaht'),
     }));
   }
 
@@ -122,7 +143,10 @@ export function allocateLandedCostExact(
       id: p.item.id,
       baseValueMicroBaht: p.baseValueMicro,
       allocatedLandedCostMicroBaht: p.floorShare,
-      effectiveUnitCostMicroBaht: Number(effectiveUnitCost),
+      effectiveUnitCostMicroBaht: toSafeFixedPointNumber(
+        effectiveUnitCost,
+        'effectiveUnitCostMicroBaht'
+      ),
     };
   });
 }
@@ -144,15 +168,21 @@ export function computeNewMovingAverageCost(
   if (qRec <= 0n) {
     throw new RangeError('receivedQtyMilli must be > 0');
   }
+  if (cRec < 0n) {
+    throw new RangeError('receivedUnitCostMicroBaht must be >= 0');
+  }
 
   // Negative/Zero Stock Guard: if current stock <= 0, reset MAC to incoming batch unit cost
   if (qCurr <= 0n) {
-    return Number(cRec);
+    return toSafeFixedPointNumber(cRec, 'computeNewMovingAverageCost');
   }
 
   const numerator = qCurr * cCurr + qRec * cRec;
   const denominator = qCurr + qRec;
-  return Number(roundDivBigInt(numerator, denominator));
+  return toSafeFixedPointNumber(
+    roundDivBigInt(numerator, denominator),
+    'computeNewMovingAverageCost'
+  );
 }
 
 /**

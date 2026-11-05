@@ -74,6 +74,33 @@ test('Phase 1 Assembly: Read/Write Split Pool (1 Writer + 4 Readers), WAL Mode, 
       'trg_prevent_inv_tx_delete must block direct DELETE on inventory_transactions'
     );
 
+    // Verify Immutable Audit Triggers block both UPDATE and DELETE on security_audit_logs
+    await engine.executeWriteImmediate((writerDb) => {
+      writerDb.exec(
+        "INSERT INTO security_audit_logs (event_type, actor_user_id, terminal_id, target_key) VALUES ('KEY_UNWRAP', 'USR-OWNER-01', 'POS-TERM-01', 'DEK_SLOT_1');"
+      );
+    });
+
+    await assert.rejects(
+      async () => {
+        await engine.executeWriteImmediate((writerDb) => {
+          writerDb.exec("UPDATE security_audit_logs SET event_type = 'TAMPERED';");
+        });
+      },
+      /Immutable Audit Violation/,
+      'trg_prevent_sec_audit_update must block direct UPDATE on security_audit_logs'
+    );
+
+    await assert.rejects(
+      async () => {
+        await engine.executeWriteImmediate((writerDb) => {
+          writerDb.exec('DELETE FROM security_audit_logs;');
+        });
+      },
+      /Immutable Audit Violation/,
+      'trg_prevent_sec_audit_mutation must block direct DELETE on security_audit_logs'
+    );
+
     // Verify concurrent interleaved writes (BEGIN IMMEDIATE) and round-robin reads across all 4 readers
     const initialCatalog = engine.listInventoryCatalog('OUTLET-HQ');
     const initialWater = initialCatalog.find((v) => v.id === 'VAR-RET-001')!;
@@ -293,6 +320,78 @@ test('Phase 1 Assembly: Multi-Level BOM DAG, Circular Dependency Block, Pre-Buil
     assert.equal(conservation.valid, true);
     assert.equal(conservation.checkedVariantsCount, 9);
     assert.equal(conservation.mismatches.length, 0);
+
+    // 6. Verify Production Build validation guards (rejects non-positive buildQtyMilli and non-production items)
+    await assert.rejects(
+      async () => {
+        await bomView.runPrepBatchBuild({
+          compositeVariantId: 'VAR-RAW-BOBA',
+          buildQtyMilli: 0,
+          performedByUserId: 'USR-WH-01',
+        });
+      },
+      RangeError
+    );
+
+    await assert.rejects(
+      async () => {
+        await bomView.runPrepBatchBuild({
+          compositeVariantId: 'VAR-CAFE-MILKTEA', // use_production = 0
+          buildQtyMilli: 1_000,
+          performedByUserId: 'USR-WH-01',
+        });
+      },
+      /not configured as a pre-built production item/
+    );
+
+    // 7. Verify UPSERT into inventory_levels when a newly added variant has no pre-existing inventory_levels row,
+    //    and verify Scale Barcode SKU resolution prioritizes `isWeightedScale = 1` over colliding retail SKUs
+    await engine.executeWriteImmediate((db) => {
+      db.prepare(
+        `INSERT INTO items (id, name, category_id, unit_name, track_stock, is_composite, use_production, is_weighted_scale)
+         VALUES ('ITM-COLLIDE', 'สินค้าปลีกรหัสลงท้าย 10045', 'CAT-RETAIL', 'ชิ้น', 1, 0, 0, 0)`
+      ).run();
+      // ID 'AAA-COLLIDE' sorts BEFORE 'VAR-RET-002' in ORDER BY v.id, and its SKU ends with '10045'
+      db.prepare(
+        `INSERT INTO item_variants (id, item_id, variant_name, sku, barcode, price_satang, default_purchase_cost_micro_baht)
+         VALUES ('AAA-COLLIDE', 'ITM-COLLIDE', 'ปกติ', '8850000010045', '8850000010045', 1500, 9000000)`
+      ).run();
+
+      // Insert a custom SQLite modifier ('หวาน 25% = -7500 bps') to verify computeLiveRecipePreview reads from SQLite
+      db.prepare(
+        `INSERT INTO modifiers (
+           id, modifier_group_id, name, price_delta_satang, modifier_mode,
+           component_variant_id, quantity_delta_milli, target_component_role, scale_basis_points
+         ) VALUES ('MOD-SWEET-25-DB', 'GRP-SWEETNESS', 'หวานน้อยมาก (25%)', 0, 'ROLE_SCALE_BPS', NULL, 0, 'SWEETENER', -7500)`
+      ).run();
+    });
+
+    // Adjust stock on 'AAA-COLLIDE' which had NO row in `inventory_levels` -> UPSERT must create the row & preserve Ledger Invariant
+    await invView.adjustStock({
+      variantId: 'AAA-COLLIDE',
+      transactionType: 'ADJUSTMENT',
+      quantityDeltaMilli: 5_000,
+      referenceType: 'NEW_SKU_OPENING',
+      referenceId: 'ADJ-NEW-01',
+      performedByUserId: 'USR-WH-01',
+    });
+
+    const postUpsertConservation = ipcBridge.verifyLedgerConservationInvariant('OUTLET-HQ');
+    assert.equal(postUpsertConservation.valid, true);
+    assert.equal(postUpsertConservation.checkedVariantsCount, 10);
+
+    // Scale barcode for SKU 10045 must still match weighted pork ('VAR-RET-002'), NOT 'AAA-COLLIDE' ('8850000010045')
+    const reScannedWeight = invView.resolveScannedKeyCodes(
+      weightBarcode13.split('').map((d) => `Digit${d}`)
+    );
+    assert.equal(reScannedWeight.matchedItem?.id, 'VAR-RET-002');
+
+    // Custom SQLite modifier 'MOD-SWEET-25-DB' (-7500 bps on 30,000 milli syrup -> -7,500 milli)
+    const dbModPreview = bomView.previewRecipeDeductionsAndCogs('VAR-CAFE-MILKTEA', 1_000, [
+      'MOD-SWEET-25-DB',
+    ]);
+    const dbModSyrup = dbModPreview.deductions.find((d) => d.variantId === 'VAR-RAW-SYRUP');
+    assert.equal(dbModSyrup?.quantityChangeMilli, -7_500);
   } finally {
     engine.close();
   }

@@ -32,14 +32,18 @@ impl ClusterEpochGuard {
     }
 
     /// Promotes a Warm Standby node to Active Leader and increments `cluster_epoch + 1`.
-    pub fn promote_standby_to_leader(&mut self) -> u64 {
+    /// Quarantined nodes cannot self-promote without explicit operator recovery.
+    pub fn promote_standby_to_leader(&mut self) -> Result<u64, &'static str> {
+        if self.role_state == NodeRoleState::ReadOnlyQuarantine {
+            return Err("Quarantined node cannot self-promote to ActiveLeader without recovery");
+        }
         self.current_epoch += 1;
         self.role_state = NodeRoleState::ActiveLeader;
-        self.current_epoch
+        Ok(self.current_epoch)
     }
 
-    /// Evaluates an incoming heartbeat or mDNS advertisement from another node.
-    /// If a higher `cluster_epoch` is observed while this node is `ActiveLeader`,
+    /// Evaluates an incoming heartbeat or mDNS advertisement from another Leader node.
+    /// If a higher or colliding `cluster_epoch` is observed from another Leader while this node is `ActiveLeader`,
     /// this node immediately transitions to `ReadOnlyQuarantine` to prevent Split-Brain!
     pub fn observe_peer_epoch(&mut self, peer_epoch: u64) -> NodeRoleState {
         if peer_epoch > self.current_epoch {
@@ -47,8 +51,25 @@ impl ClusterEpochGuard {
             if self.role_state == NodeRoleState::ActiveLeader {
                 self.role_state = NodeRoleState::ReadOnlyQuarantine;
             }
+        } else if peer_epoch == self.current_epoch && self.role_state == NodeRoleState::ActiveLeader {
+            self.role_state = NodeRoleState::ReadOnlyQuarantine;
         }
         self.role_state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_epoch_fencing_blocks_equal_or_higher_leader_and_self_promotion() {
+        let mut leader = ClusterEpochGuard::new_leader("POS-TERM-01".to_string(), 3);
+        assert_eq!(
+            leader.observe_peer_epoch(3),
+            NodeRoleState::ReadOnlyQuarantine
+        );
+        assert!(leader.promote_standby_to_leader().is_err());
     }
 }
 

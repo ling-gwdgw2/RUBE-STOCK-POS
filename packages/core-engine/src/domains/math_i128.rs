@@ -20,6 +20,10 @@ pub enum FixedPointError {
     OverflowI64(i128),
     #[error("Invalid non-positive quantity: {0}")]
     NonPositiveQuantity(i64),
+    #[error("Invalid negative cost or amount: {0}")]
+    NegativeCostOrAmount(i64),
+    #[error("Missing component variant in catalog: {0}")]
+    MissingComponentVariant(String),
 }
 
 /// Computes `round_div(numerator, denominator)` using Round-Half-Away-From-Zero on absolute magnitude in `i128`.

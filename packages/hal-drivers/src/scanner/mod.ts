@@ -60,6 +60,10 @@ const PHYSICAL_CODE_MAP: Readonly<Record<string, string>> = {
   KeyZ: 'Z',
 };
 
+export function isPhysicalBarcodeKeyCode(code: string): boolean {
+  return Object.prototype.hasOwnProperty.call(PHYSICAL_CODE_MAP, code);
+}
+
 /**
  * Maps a sequence of physical `KeyboardEvent.code` values to an ASCII barcode string,
  * completely immune to Windows Thai Kedmanee/Pattachote keyboard layouts.

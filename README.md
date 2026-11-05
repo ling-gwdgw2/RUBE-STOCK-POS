@@ -2,7 +2,7 @@
 
 Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Hardened Blueprint)
 
-[![Phase 0 & 1 Tests](https://img.shields.io/badge/Phase%200%20%26%201%20Tests-13%2F13%20Passing-brightgreen)](#automated-testing)
+[![Phase 0 & 1 Tests](https://img.shields.io/badge/Phase%200%20%26%201%20Tests-14%2F14%20Passing-brightgreen)](#automated-testing)
 [![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.0-blue)](#key-architectural-pillars)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Standalone%20%7C%20Local%20LAN-orange)](#overview)
 
@@ -67,17 +67,17 @@ rube-stock-pos/
 รันคำสั่งตรวจสอบความถูกต้องของโครงสร้างฐานข้อมูลและชุดทดสอบทางบัญชี/ฮาร์ดแวร์:
 
 ```bash
-# ตรวจสอบ SHA-256 Checksum ของ Schema (34 ตาราง + 3 Triggers)
+# ตรวจสอบ SHA-256 Checksum ของ Schema (34 ตาราง + 4 Immutable Triggers)
 npm run verify:schema
 
 # รันชุดทดสอบเฉพาะเฟสที่ 1 (SQLite WAL Split Pool + Landed Cost + Multi-Level BOM + Scale Barcode)
 npm run test:phase1
 
-# รันชุดทดสอบทั้งหมด (Phase 0 + Phase 1 + Accounting Invariants)
+# รันชุดทดสอบทั้งหมด (Phase 0 + Phase 1 + Accounting Invariants + Logic Audit Regressions)
 npm test
 ```
 
-ผลการทดสอบ: **13/13 Tests ผ่านครบ 100%**
+ผลการทดสอบ: **14/14 Tests ผ่านครบ 100%**
 
 ---
 

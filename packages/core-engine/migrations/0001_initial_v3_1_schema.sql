@@ -1,4 +1,4 @@
--- RUBE-STOCK-POS v3.1 Initial Production Schema (26 Tables)
+-- RUBE-STOCK-POS v3.1 Initial Production Schema (34 Tables, 4 Immutable Audit Triggers)
 -- Enforces Fixed-Point Scaled Integer Types, Foreign Keys, Check Constraints & Immutable Audit Triggers
 
 PRAGMA foreign_keys = ON;
@@ -234,6 +234,12 @@ CREATE TRIGGER trg_prevent_inv_tx_delete
 BEFORE DELETE ON inventory_transactions
 BEGIN
     SELECT RAISE(ABORT, 'Immutable Ledger Violation: inventory_transactions cannot be deleted');
+END;
+
+CREATE TRIGGER trg_prevent_sec_audit_update
+BEFORE UPDATE ON security_audit_logs
+BEGIN
+    SELECT RAISE(ABORT, 'Immutable Audit Violation: security_audit_logs cannot be updated');
 END;
 
 CREATE TRIGGER trg_prevent_sec_audit_mutation

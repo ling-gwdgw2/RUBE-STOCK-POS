@@ -165,8 +165,11 @@ export class SqliteReadWritePoolEngine {
       return;
     }
 
-    const sqlPath = resolve('packages/core-engine/migrations/0001_initial_v3_1_schema.sql');
-    const sqlContent = readFileSync(sqlPath, 'utf8');
+    const sqlPath = resolve(
+      import.meta.dirname ?? resolve('packages/core-engine/src/runtime'),
+      '../../migrations/0001_initial_v3_1_schema.sql'
+    );
+    const sqlContent = readFileSync(sqlPath, 'utf8').replace(/\r\n/g, '\n');
     const checksum = createHash('sha256').update(sqlContent).digest('hex');
     const startMs = Date.now();
 
@@ -705,7 +708,8 @@ export class SqliteReadWritePoolEngine {
 
   /**
    * Executes a Pre-Built Sub-Assembly Batch (`PRODUCTION_BUILD`, e.g., cooking a 2,000g pot of Taiwan Boba),
-   * deducting raw ingredients and updating the sub-assembly's stock and MAC in `inventory_levels`.
+   * deducting raw ingredients (recursively expanding any non-prebuilt virtual sub-recipes) and updating
+   * the sub-assembly's stock and MAC in `inventory_levels`.
    */
   public async executeProductionBuildBatch(params: {
     outletId: string;
@@ -713,32 +717,94 @@ export class SqliteReadWritePoolEngine {
     buildQtyMilli: MilliUnit;
     performedByUserId: string;
   }): Promise<ProductionBuildResult> {
-    return this.executeWriteImmediate((db) => {
-      const components = db
-        .prepare(
-          `SELECT component_variant_id, quantity_milli, wastage_basis_points
-           FROM item_components
-           WHERE composite_variant_id = ?`
-        )
-        .all(params.compositeVariantId) as Array<{
-        component_variant_id: string;
-        quantity_milli: number;
-        wastage_basis_points: number;
-      }>;
+    if (params.buildQtyMilli <= 0) {
+      throw new RangeError(
+        `buildQtyMilli must be > 0 for PRODUCTION_BUILD, got ${params.buildQtyMilli}`
+      );
+    }
 
-      if (components.length === 0) {
-        throw new Error(`No BOM components defined for ${params.compositeVariantId}`);
+    return this.executeWriteImmediate((db) => {
+      const targetMeta = db
+        .prepare(
+          `SELECT i.is_composite AS isComposite, i.use_production AS useProduction
+           FROM item_variants v
+           JOIN items i ON i.id = v.item_id
+           WHERE v.id = ?`
+        )
+        .get(params.compositeVariantId) as
+        | { isComposite: number; useProduction: number }
+        | undefined;
+
+      if (!targetMeta) {
+        throw new Error(`Composite variant not found: ${params.compositeVariantId}`);
+      }
+      if (Number(targetMeta.isComposite) !== 1 || Number(targetMeta.useProduction) !== 1) {
+        throw new Error(
+          `Variant ${params.compositeVariantId} is not configured as a pre-built production item (is_composite=1, use_production=1)`
+        );
       }
 
-      const getLevel = db.prepare(
-        `SELECT in_stock_milli, average_cost_micro_baht
-         FROM inventory_levels
-         WHERE outlet_id = ? AND variant_id = ?`
+      const queryEdges = db.prepare(
+        `SELECT
+           ic.component_variant_id,
+           ic.quantity_milli,
+           ic.wastage_basis_points,
+           i.is_composite AS child_is_composite,
+           i.use_production AS child_use_production
+         FROM item_components ic
+         JOIN item_variants v ON v.id = ic.component_variant_id
+         JOIN items i ON i.id = v.item_id
+         WHERE ic.composite_variant_id = ?`
       );
-      const updateLevel = db.prepare(
-        `UPDATE inventory_levels
-         SET in_stock_milli = ?, average_cost_micro_baht = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE outlet_id = ? AND variant_id = ?`
+
+      const leafConsumptions = new Map<string, bigint>();
+      const collectComponents = (parentVariantId: string, parentQtyMilli: bigint): void => {
+        const edges = queryEdges.all(parentVariantId) as Array<{
+          component_variant_id: string;
+          quantity_milli: number;
+          wastage_basis_points: number;
+          child_is_composite: number;
+          child_use_production: number;
+        }>;
+
+        if (edges.length === 0 && parentVariantId === params.compositeVariantId) {
+          throw new Error(`No BOM components defined for ${params.compositeVariantId}`);
+        }
+
+        for (const edge of edges) {
+          const requiredMilli = roundDivBigInt(
+            parentQtyMilli *
+              BigInt(edge.quantity_milli) *
+              (SCALE_BASIS_POINTS + BigInt(edge.wastage_basis_points)),
+            SCALE_MILLI * SCALE_BASIS_POINTS
+          );
+          if (Number(edge.child_is_composite) === 1 && Number(edge.child_use_production) === 0) {
+            collectComponents(edge.component_variant_id, requiredMilli);
+          } else if (requiredMilli > 0n) {
+            const prev = leafConsumptions.get(edge.component_variant_id) ?? 0n;
+            leafConsumptions.set(edge.component_variant_id, prev + requiredMilli);
+          }
+        }
+      };
+
+      const qBuild = BigInt(params.buildQtyMilli);
+      collectComponents(params.compositeVariantId, qBuild);
+
+      const getLevel = db.prepare(
+        `SELECT
+           il.in_stock_milli,
+           COALESCE(il.average_cost_micro_baht, v.default_purchase_cost_micro_baht, 0) AS average_cost_micro_baht
+         FROM item_variants v
+         LEFT JOIN inventory_levels il ON il.variant_id = v.id AND il.outlet_id = ?
+         WHERE v.id = ?`
+      );
+      const upsertLevel = db.prepare(
+        `INSERT INTO inventory_levels (id, outlet_id, variant_id, in_stock_milli, average_cost_micro_baht)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(outlet_id, variant_id) DO UPDATE SET
+           in_stock_milli = excluded.in_stock_milli,
+           average_cost_micro_baht = excluded.average_cost_micro_baht,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
       );
       const insertTx = db.prepare(
         `INSERT INTO inventory_transactions (
@@ -749,7 +815,6 @@ export class SqliteReadWritePoolEngine {
       );
 
       const batchId = `PROD-${randomUUID()}`;
-      const qBuild = BigInt(params.buildQtyMilli);
       let totalBatchCostMicro = 0n;
       const consumedComponents: Array<{
         componentVariantId: string;
@@ -757,27 +822,27 @@ export class SqliteReadWritePoolEngine {
         componentCostMicroBaht: MicroBaht;
       }> = [];
 
-      for (const comp of components) {
-        const consumedMilliBig = roundDivBigInt(
-          qBuild *
-            BigInt(comp.quantity_milli) *
-            (SCALE_BASIS_POINTS + BigInt(comp.wastage_basis_points)),
-          SCALE_MILLI * SCALE_BASIS_POINTS
-        );
+      for (const [componentVariantId, consumedMilliBig] of leafConsumptions.entries()) {
         const consumedMilli = Number(consumedMilliBig);
 
-        const lvl = getLevel.get(params.outletId, comp.component_variant_id) as
-          | { in_stock_milli: number; average_cost_micro_baht: number }
+        const lvl = getLevel.get(params.outletId, componentVariantId) as
+          | { in_stock_milli: number | null; average_cost_micro_baht: number }
           | undefined;
         const stockBefore = Number(lvl?.in_stock_milli ?? 0);
         const unitCostMicro = Number(lvl?.average_cost_micro_baht ?? 0);
         const stockAfter = stockBefore - consumedMilli;
 
-        updateLevel.run(stockAfter, unitCostMicro, params.outletId, comp.component_variant_id);
+        upsertLevel.run(
+          `INV-${params.outletId}-${componentVariantId}`,
+          params.outletId,
+          componentVariantId,
+          stockAfter,
+          unitCostMicro
+        );
         insertTx.run(
           `TX-${randomUUID()}`,
           params.outletId,
-          comp.component_variant_id,
+          componentVariantId,
           -consumedMilli,
           stockBefore,
           stockAfter,
@@ -792,7 +857,7 @@ export class SqliteReadWritePoolEngine {
         );
         totalBatchCostMicro += compTotalCostMicro;
         consumedComponents.push({
-          componentVariantId: comp.component_variant_id,
+          componentVariantId,
           consumedQtyMilli: consumedMilli,
           componentCostMicroBaht: Number(compTotalCostMicro),
         });
@@ -804,7 +869,7 @@ export class SqliteReadWritePoolEngine {
       );
 
       const parentLvl = getLevel.get(params.outletId, params.compositeVariantId) as
-        | { in_stock_milli: number; average_cost_micro_baht: number }
+        | { in_stock_milli: number | null; average_cost_micro_baht: number }
         | undefined;
       const parentStockBefore = Number(parentLvl?.in_stock_milli ?? 0);
       const parentMacBefore = Number(parentLvl?.average_cost_micro_baht ?? 0);
@@ -816,11 +881,12 @@ export class SqliteReadWritePoolEngine {
         batchUnitCostMicroBaht
       );
 
-      updateLevel.run(
-        parentStockAfter,
-        parentMacAfter,
+      upsertLevel.run(
+        `INV-${params.outletId}-${params.compositeVariantId}`,
         params.outletId,
-        params.compositeVariantId
+        params.compositeVariantId,
+        parentStockAfter,
+        parentMacAfter
       );
       insertTx.run(
         `TX-${randomUUID()}`,
@@ -847,7 +913,7 @@ export class SqliteReadWritePoolEngine {
 
   /**
    * Records a direct stock deduction or stock adjustment (`SALE_DIRECT`, `ADJUSTMENT`, etc.)
-   * inside the Single-Writer queue.
+   * inside the Single-Writer queue using an atomic UPSERT on `inventory_levels`.
    */
   public async recordStockDelta(params: {
     outletId: string;
@@ -861,23 +927,38 @@ export class SqliteReadWritePoolEngine {
     return this.executeWriteImmediate((db) => {
       const lvl = db
         .prepare(
-          `SELECT in_stock_milli, average_cost_micro_baht
-           FROM inventory_levels
-           WHERE outlet_id = ? AND variant_id = ?`
+          `SELECT
+             il.in_stock_milli,
+             COALESCE(il.average_cost_micro_baht, v.default_purchase_cost_micro_baht, 0) AS average_cost_micro_baht
+           FROM item_variants v
+           LEFT JOIN inventory_levels il ON il.variant_id = v.id AND il.outlet_id = ?
+           WHERE v.id = ?`
         )
         .get(params.outletId, params.variantId) as
-        | { in_stock_milli: number; average_cost_micro_baht: number }
+        | { in_stock_milli: number | null; average_cost_micro_baht: number }
         | undefined;
 
-      const stockBeforeMilli = Number(lvl?.in_stock_milli ?? 0);
-      const unitCostMicroBaht = Number(lvl?.average_cost_micro_baht ?? 0);
+      if (!lvl) {
+        throw new Error(`Variant not found: ${params.variantId}`);
+      }
+
+      const stockBeforeMilli = Number(lvl.in_stock_milli ?? 0);
+      const unitCostMicroBaht = Number(lvl.average_cost_micro_baht ?? 0);
       const stockAfterMilli = stockBeforeMilli + params.quantityDeltaMilli;
 
       db.prepare(
-        `UPDATE inventory_levels
-         SET in_stock_milli = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE outlet_id = ? AND variant_id = ?`
-      ).run(stockAfterMilli, params.outletId, params.variantId);
+        `INSERT INTO inventory_levels (id, outlet_id, variant_id, in_stock_milli, average_cost_micro_baht)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(outlet_id, variant_id) DO UPDATE SET
+           in_stock_milli = excluded.in_stock_milli,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      ).run(
+        `INV-${params.outletId}-${params.variantId}`,
+        params.outletId,
+        params.variantId,
+        stockAfterMilli,
+        unitCostMicroBaht
+      );
 
       db.prepare(
         `INSERT INTO inventory_transactions (
@@ -972,6 +1053,43 @@ export class SqliteReadWritePoolEngine {
   }
 
   /**
+   * Lists all modifiers currently persisted in SQLite (`modifiers`).
+   */
+  public listModifiers(): ModifierDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT
+             id,
+             modifier_group_id AS modifierGroupId,
+             name,
+             price_delta_satang AS priceDeltaSatang,
+             modifier_mode AS modifierMode,
+             component_variant_id AS componentVariantId,
+             quantity_delta_milli AS quantityDeltaMilli,
+             target_component_role AS targetComponentRole,
+             scale_basis_points AS scaleBasisPoints
+           FROM modifiers
+           ORDER BY sort_order, id`
+        )
+        .all() as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        modifierGroupId: String(r.modifierGroupId),
+        name: String(r.name),
+        priceDeltaSatang: Number(r.priceDeltaSatang),
+        modifierMode: String(r.modifierMode) as ModifierDto['modifierMode'],
+        componentVariantId: r.componentVariantId === null ? null : String(r.componentVariantId),
+        quantityDeltaMilli: Number(r.quantityDeltaMilli),
+        targetComponentRole:
+          r.targetComponentRole === null ? null : (String(r.targetComponentRole) as ComponentRole),
+        scaleBasisPoints: Number(r.scaleBasisPoints),
+      }));
+    });
+  }
+
+  /**
    * Computes live recipe COGS and ingredient deductions for a composite item in `BOM_VIEW`.
    */
   public computeLiveRecipePreview(
@@ -986,7 +1104,9 @@ export class SqliteReadWritePoolEngine {
       throw new Error(`Variant not found: ${compositeVariantId}`);
     }
     const edges = this.listBomEdges();
-    const mods = SEED_MODIFIERS.filter((m) => selectedModifierIds.includes(m.id));
+    const persistedModifiers = this.listModifiers();
+    const modifierSource = persistedModifiers.length > 0 ? persistedModifiers : SEED_MODIFIERS;
+    const mods = modifierSource.filter((m) => selectedModifierIds.includes(m.id));
     const deductions = calculateOrderLineDeductions(rootVariant, qtyMilli, mods, catalog, edges);
     const totalCogsMicroBaht = deductions.reduce((sum, d) => sum + d.lineCogsMicroBaht, 0);
 

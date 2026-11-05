@@ -109,12 +109,11 @@ export class InventoryViewController {
     const initialParse = parseScaleBarcodeEan13(rawBarcode);
     if (initialParse.isScaleBarcode && initialParse.sku) {
       const matchedItem =
-        catalog.find(
-          (item) =>
-            item.sku === initialParse.sku ||
-            item.sku.endsWith(initialParse.sku!) ||
-            item.barcode === rawBarcode
-        ) ?? null;
+        catalog.find((item) => item.isWeightedScale && item.sku === initialParse.sku) ??
+        catalog.find((item) => item.sku === initialParse.sku) ??
+        catalog.find((item) => item.isWeightedScale && item.sku.endsWith(initialParse.sku!)) ??
+        catalog.find((item) => item.barcode === rawBarcode) ??
+        null;
 
       const fullScaleInfo = parseScaleBarcodeEan13(
         rawBarcode,

@@ -191,7 +191,11 @@ export function calculateOrderLineDeductions(
       lineCogsMicroBaht: Number(cogs),
     });
   } else {
-    function expandBom(parentVariantId: string, parentMultiplierMilli: bigint): void {
+    function expandBom(
+      parentVariantId: string,
+      parentMultiplierMilli: bigint,
+      scaledRolesInAncestors: ReadonlySet<ComponentRole>
+    ): void {
       const children = bomEdges.filter((e) => e.compositeVariantId === parentVariantId);
       for (const edge of children) {
         const childVariant = variantCatalog.get(edge.componentVariantId);
@@ -199,7 +203,11 @@ export function calculateOrderLineDeductions(
           throw new Error(`Missing component variant ${edge.componentVariantId}`);
         }
 
-        const roleScaleBps = roleScaleMap.get(edge.componentRole) ?? 0n;
+        const alreadyScaledInAncestor =
+          edge.componentRole !== 'STANDARD' && scaledRolesInAncestors.has(edge.componentRole);
+        const roleScaleBps = alreadyScaledInAncestor
+          ? 0n
+          : (roleScaleMap.get(edge.componentRole) ?? 0n);
         const effectiveFactorBps = SCALE_BASIS_POINTS + roleScaleBps;
         const clampedFactorBps = effectiveFactorBps < 0n ? 0n : effectiveFactorBps;
 
@@ -209,29 +217,43 @@ export function calculateOrderLineDeductions(
         );
 
         const cumulativeQtyMilli = roundDivBigInt(
-          parentMultiplierMilli * scaledRecipeQtyMilli * (SCALE_BASIS_POINTS + BigInt(edge.wastageBasisPoints)),
+          parentMultiplierMilli *
+            scaledRecipeQtyMilli *
+            (SCALE_BASIS_POINTS + BigInt(edge.wastageBasisPoints)),
           SCALE_MILLI * SCALE_BASIS_POINTS
         );
 
         if (childVariant.isComposite && !childVariant.useProduction) {
-          expandBom(childVariant.id, cumulativeQtyMilli);
+          const nextScaledRoles = new Set(scaledRolesInAncestors);
+          if (edge.componentRole !== 'STANDARD' && roleScaleMap.has(edge.componentRole)) {
+            nextScaledRoles.add(edge.componentRole);
+          }
+          expandBom(childVariant.id, cumulativeQtyMilli, nextScaledRoles);
         } else if (cumulativeQtyMilli > 0n) {
           const cogs = roundDivBigInt(
             cumulativeQtyMilli * BigInt(childVariant.averageCostMicroBaht),
             SCALE_MILLI
           );
-          deductions.push({
-            variantId: childVariant.id,
-            transactionType: 'SALE_BOM',
-            quantityChangeMilli: -Number(cumulativeQtyMilli),
-            unitCostMicroBaht: childVariant.averageCostMicroBaht,
-            lineCogsMicroBaht: Number(cogs),
-          });
+          const existingBomEntry = deductions.find(
+            (d) => d.variantId === childVariant.id && d.transactionType === 'SALE_BOM'
+          );
+          if (existingBomEntry) {
+            existingBomEntry.quantityChangeMilli -= Number(cumulativeQtyMilli);
+            existingBomEntry.lineCogsMicroBaht += Number(cogs);
+          } else {
+            deductions.push({
+              variantId: childVariant.id,
+              transactionType: 'SALE_BOM',
+              quantityChangeMilli: -Number(cumulativeQtyMilli),
+              unitCostMicroBaht: childVariant.averageCostMicroBaht,
+              lineCogsMicroBaht: Number(cogs),
+            });
+          }
         }
       }
     }
 
-    expandBom(soldVariant.id, qSold);
+    expandBom(soldVariant.id, qSold, new Set());
   }
 
   for (const mod of selectedModifiers) {
@@ -241,17 +263,22 @@ export function calculateOrderLineDeductions(
       mod.quantityDeltaMilli !== 0
     ) {
       const modVariant = variantCatalog.get(mod.componentVariantId);
-      if (!modVariant) continue;
+      if (!modVariant) {
+        throw new Error(`Missing component variant ${mod.componentVariantId}`);
+      }
       const deltaMilli = roundDivBigInt(qSold * BigInt(mod.quantityDeltaMilli), SCALE_MILLI);
       if (deltaMilli === 0n) continue;
-      const absDelta = deltaMilli < 0n ? -deltaMilli : deltaMilli;
-      const cogs = roundDivBigInt(absDelta * BigInt(modVariant.averageCostMicroBaht), SCALE_MILLI);
+      // Preserve sign on COGS: positive deltaMilli adds COGS; negative deltaMilli (ingredient removal) reduces COGS
+      const signedCogs = roundDivBigInt(
+        deltaMilli * BigInt(modVariant.averageCostMicroBaht),
+        SCALE_MILLI
+      );
       deductions.push({
         variantId: modVariant.id,
         transactionType: 'SALE_MODIFIER',
         quantityChangeMilli: -Number(deltaMilli),
         unitCostMicroBaht: modVariant.averageCostMicroBaht,
-        lineCogsMicroBaht: Number(cogs),
+        lineCogsMicroBaht: Number(signedCogs),
       });
     }
   }

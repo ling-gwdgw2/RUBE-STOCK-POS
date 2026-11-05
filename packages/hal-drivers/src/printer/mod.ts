@@ -37,46 +37,49 @@ export function encodeChunkedRasterGsV0(
   const packets: RasterBandPacket[] = [];
   let y = 0;
 
-  while (y < totalHeightPx) {
-    // Check if the current row is completely white (all 0x00)
-    const rowStart = y * widthBytes;
-    let isWhiteRow = true;
+  const isRowAllWhite = (rowIndex: number): boolean => {
+    const rowStart = rowIndex * widthBytes;
     for (let b = 0; b < widthBytes; b++) {
       if (packedMonochromeBitmap[rowStart + b] !== 0) {
-        isWhiteRow = false;
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const countConsecutiveWhiteRows = (startY: number, maxRows: number): number => {
+    let count = 0;
+    while (startY + count < totalHeightPx && count < maxRows && isRowAllWhite(startY + count)) {
+      count++;
+    }
+    return count;
+  };
+
+  while (y < totalHeightPx) {
+    const whiteHeightAtY = countConsecutiveWhiteRows(y, 255);
+
+    // If >= 16 consecutive white rows start at `y`, emit compact `ESC J n` feed instead of sending 0x00 bytes
+    if (whiteHeightAtY >= 16) {
+      packets.push({
+        type: 'ESC_J_WHITESPACE_FEED',
+        yOffsetDots: y,
+        heightDots: whiteHeightAtY,
+        rawBytes: new Uint8Array([0x1b, 0x4a, whiteHeightAtY]),
+      });
+      y += whiteHeightAtY;
+      continue;
+    }
+
+    // Determine raster band height: stop early if a >= 16 white-row run begins within this band
+    const maxCandidateHeight = Math.min(maxBandHeightDots, totalHeightPx - y);
+    let bandHeight = maxCandidateHeight;
+    for (let offset = 1; offset < maxCandidateHeight; offset++) {
+      if (countConsecutiveWhiteRows(y + offset, 16) >= 16) {
+        bandHeight = offset;
         break;
       }
     }
 
-    if (isWhiteRow) {
-      let whiteHeight = 1;
-      while (y + whiteHeight < totalHeightPx && whiteHeight < 255) {
-        const nextRowStart = (y + whiteHeight) * widthBytes;
-        let nextWhite = true;
-        for (let b = 0; b < widthBytes; b++) {
-          if (packedMonochromeBitmap[nextRowStart + b] !== 0) {
-            nextWhite = false;
-            break;
-          }
-        }
-        if (!nextWhite) break;
-        whiteHeight++;
-      }
-
-      // If >= 16 consecutive white rows, emit compact `ESC J n` feed instead of sending hundreds of 0x00 bytes
-      if (whiteHeight >= 16) {
-        packets.push({
-          type: 'ESC_J_WHITESPACE_FEED',
-          yOffsetDots: y,
-          heightDots: whiteHeight,
-          rawBytes: new Uint8Array([0x1b, 0x4a, whiteHeight]),
-        });
-        y += whiteHeight;
-        continue;
-      }
-    }
-
-    const bandHeight = Math.min(maxBandHeightDots, totalHeightPx - y);
     const dataLength = widthBytes * bandHeight;
     // GS v 0 m xL xH yL yH d1...dk
     const header = new Uint8Array([

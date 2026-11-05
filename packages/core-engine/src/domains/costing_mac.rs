@@ -27,6 +27,9 @@ pub fn allocate_landed_cost_exact(
     lines: &[PoLineInput],
     total_landed_cost_satang: Satang,
 ) -> Result<Vec<PoLineCostAllocation>, FixedPointError> {
+    if total_landed_cost_satang < 0 {
+        return Err(FixedPointError::NegativeCostOrAmount(total_landed_cost_satang));
+    }
     if lines.is_empty() {
         return Ok(Vec::new());
     }
@@ -38,6 +41,11 @@ pub fn allocate_landed_cost_exact(
     for (idx, line) in lines.iter().enumerate() {
         if line.received_qty_milli <= 0 {
             return Err(FixedPointError::NonPositiveQuantity(line.received_qty_milli));
+        }
+        if line.base_unit_cost_micro_baht < 0 {
+            return Err(FixedPointError::NegativeCostOrAmount(
+                line.base_unit_cost_micro_baht,
+            ));
         }
         let q_rec = line.received_qty_milli as i128;
         let c_base = line.base_unit_cost_micro_baht as i128;
@@ -124,6 +132,11 @@ pub fn compute_new_mac(
 ) -> Result<MicroBaht, FixedPointError> {
     if received_qty_milli <= 0 {
         return Err(FixedPointError::NonPositiveQuantity(received_qty_milli));
+    }
+    if received_unit_cost_micro_baht < 0 {
+        return Err(FixedPointError::NegativeCostOrAmount(
+            received_unit_cost_micro_baht,
+        ));
     }
     if current_stock_milli <= 0 {
         return Ok(received_unit_cost_micro_baht);

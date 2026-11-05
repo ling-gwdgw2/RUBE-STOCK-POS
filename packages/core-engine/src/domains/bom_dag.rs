@@ -149,16 +149,25 @@ pub fn compute_multilevel_bom_deductions(
             parent_id: &str,
             parent_multiplier_milli: i128,
             role_scales: &HashMap<ComponentRole, i128>,
+            scaled_roles_in_ancestors: &HashSet<ComponentRole>,
             catalog: &HashMap<String, VariantStockSnapshot>,
             edges: &[BomComponentEdge],
             out: &mut Vec<ComputedBomDeduction>,
         ) -> Result<(), FixedPointError> {
             for edge in edges.iter().filter(|e| e.composite_variant_id == parent_id) {
                 let Some(child) = catalog.get(&edge.component_variant_id) else {
-                    continue;
+                    return Err(FixedPointError::MissingComponentVariant(
+                        edge.component_variant_id.clone(),
+                    ));
                 };
 
-                let scale_delta = role_scales.get(&edge.component_role).copied().unwrap_or(0);
+                let already_scaled = edge.component_role != ComponentRole::Standard
+                    && scaled_roles_in_ancestors.contains(&edge.component_role);
+                let scale_delta = if already_scaled {
+                    0
+                } else {
+                    role_scales.get(&edge.component_role).copied().unwrap_or(0)
+                };
                 let factor_bps = (SCALE_BASIS_POINTS + scale_delta).max(0);
                 let scaled_recipe_qty =
                     round_div_i128((edge.quantity_milli as i128) * factor_bps, SCALE_BASIS_POINTS)?;
@@ -171,10 +180,17 @@ pub fn compute_multilevel_bom_deductions(
                 )?;
 
                 if child.is_composite && !child.use_production {
+                    let mut next_scaled_roles = scaled_roles_in_ancestors.clone();
+                    if edge.component_role != ComponentRole::Standard
+                        && role_scales.contains_key(&edge.component_role)
+                    {
+                        next_scaled_roles.insert(edge.component_role);
+                    }
                     expand_recursive(
                         &child.variant_id,
                         cumulative_qty,
                         role_scales,
+                        &next_scaled_roles,
                         catalog,
                         edges,
                         out,
@@ -186,13 +202,21 @@ pub fn compute_multilevel_bom_deductions(
                         cumulative_qty * (child.average_cost_micro_baht as i128),
                         SCALE_MILLI,
                     )?;
-                    out.push(ComputedBomDeduction {
-                        variant_id: child.variant_id.clone(),
-                        transaction_type: "SALE_BOM",
-                        quantity_change_milli: -qty_i64,
-                        unit_cost_micro_baht: child.average_cost_micro_baht,
-                        line_cogs_micro_baht: cogs,
-                    });
+                    if let Some(existing) = out
+                        .iter_mut()
+                        .find(|d| d.variant_id == child.variant_id && d.transaction_type == "SALE_BOM")
+                    {
+                        existing.quantity_change_milli -= qty_i64;
+                        existing.line_cogs_micro_baht += cogs;
+                    } else {
+                        out.push(ComputedBomDeduction {
+                            variant_id: child.variant_id.clone(),
+                            transaction_type: "SALE_BOM",
+                            quantity_change_milli: -qty_i64,
+                            unit_cost_micro_baht: child.average_cost_micro_baht,
+                            line_cogs_micro_baht: cogs,
+                        });
+                    }
                 }
             }
             Ok(())
@@ -202,6 +226,7 @@ pub fn compute_multilevel_bom_deductions(
             &root_variant.variant_id,
             q_sold,
             &role_scales,
+            &HashSet::new(),
             catalog,
             edges,
             &mut results,
@@ -211,25 +236,25 @@ pub fn compute_multilevel_bom_deductions(
     for m in modifiers {
         if m.modifier_mode == ModifierMode::FixedQtyDelta && m.quantity_delta_milli != 0 {
             if let Some(ref comp_id) = m.component_variant_id {
-                if let Some(comp) = catalog.get(comp_id) {
-                    let delta = round_div_to_i64(
-                        q_sold * (m.quantity_delta_milli as i128),
+                let Some(comp) = catalog.get(comp_id) else {
+                    return Err(FixedPointError::MissingComponentVariant(comp_id.clone()));
+                };
+                let delta = round_div_to_i64(
+                    q_sold * (m.quantity_delta_milli as i128),
+                    SCALE_MILLI,
+                )?;
+                if delta != 0 {
+                    let signed_cogs = round_div_to_i64(
+                        (delta as i128) * (comp.average_cost_micro_baht as i128),
                         SCALE_MILLI,
                     )?;
-                    if delta != 0 {
-                        let abs_delta = (delta as i128).abs();
-                        let cogs = round_div_to_i64(
-                            abs_delta * (comp.average_cost_micro_baht as i128),
-                            SCALE_MILLI,
-                        )?;
-                        results.push(ComputedBomDeduction {
-                            variant_id: comp.variant_id.clone(),
-                            transaction_type: "SALE_MODIFIER",
-                            quantity_change_milli: -delta,
-                            unit_cost_micro_baht: comp.average_cost_micro_baht,
-                            line_cogs_micro_baht: cogs,
-                        });
-                    }
+                    results.push(ComputedBomDeduction {
+                        variant_id: comp.variant_id.clone(),
+                        transaction_type: "SALE_MODIFIER",
+                        quantity_change_milli: -delta,
+                        unit_cost_micro_baht: comp.average_cost_micro_baht,
+                        line_cogs_micro_baht: signed_cogs,
+                    });
                 }
             }
         }

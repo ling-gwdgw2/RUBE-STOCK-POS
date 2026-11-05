@@ -48,6 +48,9 @@ export function generateOfflinePromptPayDynamicQr(
   merchantPromptPayId: string,
   amountSatang: Satang
 ): { payload: string; crcHex: string } {
+  if (!Number.isSafeInteger(amountSatang) || amountSatang <= 0) {
+    throw new RangeError(`amountSatang must be a positive safe integer, got ${amountSatang}`);
+  }
   const cleanId = merchantPromptPayId.replace(/\D/g, '');
   let subTagAccount: string;
   if (cleanId.length === 10) {
@@ -64,7 +67,9 @@ export function generateOfflinePromptPayDynamicQr(
   }
 
   const merchantAccountInfo = formatTlv('00', 'A000000677010111') + subTagAccount;
-  const amountBahtFormatted = (amountSatang / 100).toFixed(2);
+  const wholeBaht = Math.floor(amountSatang / 100);
+  const satangPart = String(amountSatang % 100).padStart(2, '0');
+  const amountBahtFormatted = `${wholeBaht}.${satangPart}`;
 
   const bodyWithoutCrc =
     formatTlv('00', '01') + // Payload Format Indicator
@@ -82,19 +87,41 @@ export function generateOfflinePromptPayDynamicQr(
   };
 }
 
+export interface VerifyBotSlipOptions {
+  /**
+   * When `false`, checks for duplicate hash without mutating `usedSlipHashes` yet
+   * (allowing two-phase cashier visual confirmation before calling `commitVerifiedBotSlipHash`).
+   * Defaults to `true` for single-step callers.
+   */
+  commitSlipHash?: boolean;
+}
+
+export function commitVerifiedBotSlipHash(
+  transRefSha256Hex: string,
+  usedSlipHashes: Set<string>
+): boolean {
+  if (!transRefSha256Hex || usedSlipHashes.has(transRefSha256Hex)) {
+    return false;
+  }
+  usedSlipHashes.add(transRefSha256Hex);
+  return true;
+}
+
 /**
  * Verifies a scanned 2D Mini-QR from a Thai bank transfer slip in 100% Offline Mode:
  * - Validates BOT Slip Mini-QR structure (starts with `00` TLV containing `000001` API ID, Subtag `01` 3-digit Bank Code, Subtag `02` TransRef)
+ * - Enforces exact TLV length matching (`outerTag00Len === 21 + declaredLen` and `transRef.length === declaredLen`)
  * - Computes SHA-256 hash of `senderBankCode:transRef` to block duplicate slip fraud
  * - Returns structured metadata for the Mandatory Visual Amount Confirmation Modal
  */
 export function verifyOfflineBotSlipMiniQr(
   miniQrRaw: string,
   expectedAmountSatang: Satang,
-  usedSlipHashes: Set<string>
+  usedSlipHashes: Set<string>,
+  options?: VerifyBotSlipOptions
 ): BotSlipVerificationResult {
-  // BOT Mini-QR canonical pattern check: Tag 00 + length + 0006000001 + 0103<BankCode> + 02<Len><TransRef>
-  const botMatch = /^00\d{2}00060000010103(\d{3})02(\d{2})([A-Za-z0-9_-]{8,35})/.exec(
+  // BOT Mini-QR canonical header: Tag 00 + 2-digit outer length + 0006000001 + 0103<BankCode> + 02<Len><TransRef...>
+  const botMatch = /^00(\d{2})00060000010103(\d{3})02(\d{2})([A-Za-z0-9_-]+)$/.exec(
     miniQrRaw.trim()
   );
 
@@ -113,32 +140,42 @@ export function verifyOfflineBotSlipMiniQr(
     };
   }
 
-  const senderBankCode = botMatch[1]!;
-  const declaredLen = Number(botMatch[2]!);
-  const transRefFull = botMatch[3]!;
-  const transRef = transRefFull.slice(0, declaredLen);
+  const outerTlvLen = Number(botMatch[1]!);
+  const senderBankCode = botMatch[2]!;
+  const declaredLen = Number(botMatch[3]!);
+  const tailPayload = botMatch[4]!;
 
-  if (transRef.length < 8) {
+  // Validate exact TLV length integrity:
+  // "0006000001" (10) + "0103" (4) + BankCode (3) + "02" (2) + Len (2) + TransRef (declaredLen) = 21 + declaredLen
+  if (
+    declaredLen < 8 ||
+    declaredLen > 64 ||
+    tailPayload.length < declaredLen ||
+    outerTlvLen !== 21 + declaredLen
+  ) {
     return {
       validFormat: false,
       isDuplicate: false,
       senderBankCode,
       senderBankNameThai: THAI_BANK_NAMES[senderBankCode] ?? `รหัสธนาคาร ${senderBankCode}`,
-      transRef,
+      transRef: tailPayload.slice(0, declaredLen),
       transRefLast4: '',
       transRefSha256Hex: '',
       expectedAmountSatang,
       requiresVisualAmountConfirmation: true,
-      errorReason: 'รหัสอ้างอิงธุรกรรม (TransRef) ใน Mini-QR ไม่สมบูรณ์',
+      errorReason: 'ความยาว TLV หรือรหัสอ้างอิงธุรกรรม (TransRef) ใน Mini-QR ไม่สมบูรณ์',
     };
   }
+
+  const transRef = tailPayload.slice(0, declaredLen);
 
   const transRefSha256Hex = createHash('sha256')
     .update(`${senderBankCode}:${transRef}`)
     .digest('hex');
 
   const isDuplicate = usedSlipHashes.has(transRefSha256Hex);
-  if (!isDuplicate) {
+  const shouldCommit = options?.commitSlipHash ?? true;
+  if (!isDuplicate && shouldCommit) {
     usedSlipHashes.add(transRefSha256Hex);
   }
 

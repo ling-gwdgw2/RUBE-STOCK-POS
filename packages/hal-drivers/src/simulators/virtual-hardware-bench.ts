@@ -82,7 +82,12 @@ export class VirtualHardwareBench {
     const tempPartFilename = `rube_backup_${shiftNumber}.db.enc.part`;
     const finalEncryptedFilename = `rube_backup_${shiftNumber}.db.enc`;
 
-    this.usbRingFiles.push(finalEncryptedFilename);
+    if (!this.usbRingFiles.includes(finalEncryptedFilename)) {
+      this.usbRingFiles.push(finalEncryptedFilename);
+    }
+    // Natural numeric sort so `20261105-S2` < `20261105-S10` and `shift2` < `shift10`
+    this.usbRingFiles.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
     let evictedOldestFilename: string | null = null;
     if (this.usbRingFiles.length > this.maxRingSize) {
       evictedOldestFilename = this.usbRingFiles.shift() ?? null;

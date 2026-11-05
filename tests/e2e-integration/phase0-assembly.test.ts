@@ -2,13 +2,13 @@
  * RUBE-STOCK-POS v3.1 Phase 0 Integration Assembly Checkpoint Test (`IMPLEMENTATION_PLAYBOOK.md` Section 4)
  *
  * Verifies:
- * 1. SQL DDL Schema v3.1 has all 26 tables and 3 immutable ledger triggers.
+ * 1. SQL DDL Schema v3.1 has all 34 tables and 4 immutable ledger/audit triggers.
  * 2. Physical Barcode Scanner (`KeyboardEvent.code`) decodes digits accurately while keyboard is in Thai mode,
- *    and rolls back the leaked first character on `< 50ms` inter-key cadence.
+ *    rolls back the leaked first character on `< 50ms` inter-key cadence, and ignores Shift/Ctrl/Alt modifiers.
  * 3. Dual-Mode Supermarket Scale Barcode Parser handles both Prefix `20-24` (Weight) and `25-29` (Price).
- * 4. Chunked 203-DPI Thermal Raster Printer (`GS v 0`) slices bands (`<= 96px`) and skips white rows (`ESC J`).
- * 5. Offline EMVCo PromptPay Dynamic QR CRC16-CCITT (`0x1021`) & BOT Slip Mini-QR deduplication + bank extraction.
- * 6. Virtual UPS Power-Loss (`AC_PRESENT=0`) & 14-Shift USB Flash Drive Ring-Buffer rotation.
+ * 4. Chunked 203-DPI Thermal Raster Printer (`GS v 0`) slices bands (`<= 96px`) and skips mid-band white rows (`ESC J`).
+ * 5. Offline EMVCo PromptPay Dynamic QR CRC16-CCITT (`0x1021`) & BOT Slip Mini-QR TLV length validation + two-phase deduplication.
+ * 6. Virtual UPS Power-Loss (`AC_PRESENT=0`) & 14-Shift USB Flash Drive Ring-Buffer rotation with natural numeric sorting.
  */
 
 import assert from 'node:assert/strict';
@@ -16,6 +16,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import {
+  commitVerifiedBotSlipHash,
+  encodeChunkedRasterGsV0,
   generateOfflinePromptPayDynamicQr,
   parseScaleBarcodeEan13,
   verifyOfflineBotSlipMiniQr,
@@ -25,7 +27,7 @@ import { PhysicalScannerStreamBuffer } from '../../packages/ui-presentation/src/
 import { resolveProfileFeatureFlags } from '../../packages/ui-presentation/src/profiles/profile-config.ts';
 
 describe('Phase 0 Integration Assembly Checkpoint (v3.1)', () => {
-  it('1. Validates 0001_initial_v3_1_schema.sql contains all 34 tables and 3 immutable triggers', () => {
+  it('1. Validates 0001_initial_v3_1_schema.sql contains all 34 tables and 4 immutable triggers', () => {
     const sqlPath = resolve('packages/core-engine/migrations/0001_initial_v3_1_schema.sql');
     const sql = readFileSync(sqlPath, 'utf8');
     const tables = [...sql.matchAll(/CREATE\s+TABLE\s+([a-z_]+)/gi)].map((m) => m[1]);
@@ -34,7 +36,9 @@ describe('Phase 0 Integration Assembly Checkpoint (v3.1)', () => {
     assert.equal(tables.length, 34);
     assert.ok(tables.includes('pos_shifts'));
     assert.ok(tables.includes('cash_drawer_movements'));
-    assert.equal(triggers.length, 3);
+    assert.equal(triggers.length, 4);
+    assert.ok(triggers.includes('trg_prevent_sec_audit_update'));
+    assert.ok(triggers.includes('trg_prevent_sec_audit_mutation'));
   });
 
   it('2. Decodes barcode immune to Thai layout and rolls back leaked first character in search input', () => {
@@ -80,6 +84,20 @@ describe('Phase 0 Integration Assembly Checkpoint (v3.1)', () => {
 
     assert.equal(detectedBarcode, '8851952350161');
     assert.equal(searchInputBoxValue, '', 'Leaked Thai character must be rolled back to empty string');
+
+    // Verify human pressing ShiftLeft + KeyA within 15ms does NOT trigger false scanner rollback
+    let humanInput = 'A';
+    let falseRollbackTriggered = false;
+    scanner.pushKeystroke({ code: 'ShiftLeft', timestampMs: 5_000 }, () => {
+      falseRollbackTriggered = true;
+    });
+    const shiftKeyRes = scanner.pushKeystroke({ code: 'KeyA', timestampMs: 5_015 }, () => {
+      falseRollbackTriggered = true;
+      humanInput = '';
+    });
+    assert.equal(falseRollbackTriggered, false, 'Shift+KeyA must not trigger first-char rollback');
+    assert.equal(shiftKeyRes.shouldPreventDefault, false);
+    assert.equal(humanInput, 'A');
   });
 
   it('3. Parses both Weight-Embedded (Prefix 20-24) and Price-Embedded (Prefix 25-29) Scale Barcodes', () => {
@@ -110,6 +128,19 @@ describe('Phase 0 Integration Assembly Checkpoint (v3.1)', () => {
       printResult.maxPacketBytes <= 7_000,
       `Expected packet size <= 7000 bytes to prevent buffer overflow, got ${printResult.maxPacketBytes}`
     );
+
+    // Verify mid-band whitespace run (rows 200..299) is split cleanly and emitted as ESC_J_WHITESPACE_FEED
+    const widthBytes = 576 / 8;
+    const rawBitmap = new Uint8Array(widthBytes * 600);
+    for (let y = 0; y < 600; y++) {
+      if (y >= 200 && y < 300) continue;
+      rawBitmap[y * widthBytes] = 0xff;
+    }
+    const packets = encodeChunkedRasterGsV0(rawBitmap, 576, 600, 96);
+    const escJPackets = packets.filter((p) => p.type === 'ESC_J_WHITESPACE_FEED');
+    assert.equal(escJPackets.length, 1, 'Rows 200..299 must emit an ESC_J_WHITESPACE_FEED packet');
+    assert.equal(escJPackets[0]?.yOffsetDots, 200);
+    assert.equal(escJPackets[0]?.heightDots, 100);
   });
 
   it('5. Generates Offline EMVCo PromptPay QR and blocks duplicate/invalid slips via BOT Mini-QR', () => {
@@ -121,7 +152,15 @@ describe('Phase 0 Integration Assembly Checkpoint (v3.1)', () => {
     const usedSlips = new Set<string>();
     const validBotSlip = '0041000600000101030040220202611051234567890AB5102TH';
 
-    // 1st scan: valid & fresh, extracts KBANK (004) and last 4 of TransRef for Visual Amount Check
+    // Two-phase preview (commitSlipHash: false) allows re-scanning if cashier cancels modal before committing
+    const previewCheck = verifyOfflineBotSlipMiniQr(validBotSlip, 6_500, usedSlips, {
+      commitSlipHash: false,
+    });
+    assert.equal(previewCheck.validFormat, true);
+    assert.equal(previewCheck.isDuplicate, false);
+    assert.equal(usedSlips.size, 0);
+
+    // 1st commit scan: valid & fresh, extracts KBANK (004) and last 4 of TransRef for Visual Amount Check
     const firstCheck = verifyOfflineBotSlipMiniQr(validBotSlip, 6_500, usedSlips);
     assert.equal(firstCheck.validFormat, true);
     assert.equal(firstCheck.isDuplicate, false);
@@ -134,6 +173,12 @@ describe('Phase 0 Integration Assembly Checkpoint (v3.1)', () => {
     const secondCheck = verifyOfflineBotSlipMiniQr(validBotSlip, 6_500, usedSlips);
     assert.equal(secondCheck.validFormat, true);
     assert.equal(secondCheck.isDuplicate, true);
+    assert.equal(commitVerifiedBotSlipHash(firstCheck.transRefSha256Hex, usedSlips), false);
+
+    // Truncated / mismatched TLV length (declares 25 chars in subtag 02, but outer length is 41) must fail
+    const truncatedSlip = '00410006000001010300402252026110512345';
+    const invalidTlvCheck = verifyOfflineBotSlipMiniQr(truncatedSlip, 6_500, usedSlips);
+    assert.equal(invalidTlvCheck.validFormat, false);
   });
 
   it('6. Simulates UPS Power-Loss checkpoint and 14-Shift USB Ring-Buffer rotation', () => {
@@ -143,13 +188,14 @@ describe('Phase 0 Integration Assembly Checkpoint (v3.1)', () => {
     assert.equal(upsEvent.triggeredWalCheckpoint, true);
     assert.equal(upsEvent.triggeredEmergencyUsbBackup, true);
 
-    // Write 16 shift backups -> ring buffer must retain exactly 14 and evict the oldest
-    let lastEvent = bench.simulateAtomicUsbShiftBackup('20261105_shift01');
+    // Write 16 shift backups using unpadded shift numbers ('20261105-S1'..'20261105-S16')
+    // Natural sort must evict 'S1' then 'S2' (never evicting 'S10' before 'S2'!)
+    let lastEvent = bench.simulateAtomicUsbShiftBackup('20261105-S1');
     for (let s = 2; s <= 16; s++) {
-      lastEvent = bench.simulateAtomicUsbShiftBackup(`20261105_shift${String(s).padStart(2, '0')}`);
+      lastEvent = bench.simulateAtomicUsbShiftBackup(`20261105-S${s}`);
     }
     assert.equal(lastEvent.retainedRingFilesCount, 14);
-    assert.equal(lastEvent.evictedOldestFilename, 'rube_backup_20261105_shift02.db.enc');
+    assert.equal(lastEvent.evictedOldestFilename, 'rube_backup_20261105-S2.db.enc');
 
     // Verify Polymorphic Business Profiles
     assert.equal(resolveProfileFeatureFlags('RETAIL').enableScaleBarcodeParser, true);

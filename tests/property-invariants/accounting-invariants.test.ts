@@ -16,7 +16,9 @@ import {
   allocateLandedCostExact,
   computeNewMovingAverageCost,
   computeVatSatang,
+  JS_MAX_SAFE_BIGINT,
   SATANG_TO_MICRO_BAHT,
+  toSafeFixedPointNumber,
 } from '../../packages/shared-contracts/src/fixed-point.ts';
 import {
   calculateOrderLineDeductions,
@@ -154,14 +156,128 @@ describe('RUBE-STOCK-POS v3.1 Accounting Invariants (Section 9.2)', () => {
     );
     const honeyDed = honeyTeaDeductions.find((d) => d.variantId === 'VAR-RAW-HONEY');
     assert.equal(honeyDed?.quantityChangeMilli, -12_500);
+
+    // 3d. Multi-Level Role-Based Modifier Double-Scaling Guard & Negative FIXED_QTY_DELTA COGS Sign
+    const multiSweetCatalog = new Map(catalog);
+    multiSweetCatalog.set('VAR-SUB-SWEET-MIX', {
+      id: 'VAR-SUB-SWEET-MIX',
+      itemId: 'ITM-SUB-SWEET-MIX',
+      itemName: 'เบสไซรัปผสมน้ำผึ้ง (Virtual Sub-Recipe)',
+      variantName: 'มล.',
+      sku: 'SUB-SWEET-01',
+      barcode: null,
+      unitName: 'มล.',
+      priceSatang: 0,
+      averageCostMicroBaht: 0,
+      inStockMilli: 0,
+      isComposite: true,
+      useProduction: false,
+      isWeightedScale: false,
+    });
+
+    const multiSweetEdges = [
+      {
+        compositeVariantId: 'VAR-CAFE-HONEYTEA',
+        componentVariantId: 'VAR-SUB-SWEET-MIX',
+        componentRole: 'SWEETENER' as const,
+        quantityMilli: 1_000,
+        wastageBasisPoints: 0,
+      },
+      {
+        compositeVariantId: 'VAR-SUB-SWEET-MIX',
+        componentVariantId: 'VAR-RAW-HONEY',
+        componentRole: 'SWEETENER' as const,
+        quantityMilli: 20_000,
+        wastageBasisPoints: 0,
+      },
+    ];
+
+    // Applying -50% SWEETENER must scale once (20,000 -> -10,000 milli), NOT twice (-5,000 milli)
+    const nestedSweetDeductions = calculateOrderLineDeductions(
+      honeyTea,
+      1_000,
+      [lessSweet50],
+      multiSweetCatalog,
+      multiSweetEdges
+    );
+    assert.equal(nestedSweetDeductions[0]?.quantityChangeMilli, -10_000);
+
+    // Negative FIXED_QTY_DELTA modifier (removing 20g of pre-built boba) must produce negative COGS delta
+    const removeBobaMod = {
+      id: 'MOD-NO-BOBA',
+      modifierGroupId: 'GRP-TOPPING',
+      name: 'ไม่ใส่ไข่มุก (-20g)',
+      priceDeltaSatang: 0,
+      modifierMode: 'FIXED_QTY_DELTA' as const,
+      componentVariantId: 'VAR-RAW-BOBA',
+      quantityDeltaMilli: -20_000,
+      targetComponentRole: null,
+      scaleBasisPoints: 0,
+    };
+    const withRemovalDeductions = calculateOrderLineDeductions(
+      milkTea,
+      1_000,
+      [removeBobaMod],
+      catalog,
+      SEED_BOM_EDGES
+    );
+    const modEntry = withRemovalDeductions.find((d) => d.transactionType === 'SALE_MODIFIER')!;
+    assert.equal(modEntry.quantityChangeMilli, 20_000);
+    assert.ok(modEntry.lineCogsMicroBaht < 0, 'Negative FIXED_QTY_DELTA must reduce COGS');
   });
 
-  it('Invariant 4: Thai VAT 7% Inclusive vs Exclusive rounding accuracy', () => {
+  it('Invariant 4: Thai VAT 7% Inclusive vs Exclusive rounding accuracy & Safe Integer Guards', () => {
     // 107.00 THB (10,700 satang) VAT Inclusive at 7% (700 bps) -> VAT is exactly 700 satang (7.00 THB)
     assert.equal(computeVatSatang(10_700, 700, 'INCLUSIVE'), 700);
     // 100.00 THB (10,000 satang) VAT Exclusive at 7% (700 bps) -> VAT is 700 satang
     assert.equal(computeVatSatang(10_000, 700, 'EXCLUSIVE'), 700);
     assert.equal(computeVatSatang(10_000, 700, 'NONE'), 0);
+
+    // Negative landed cost or negative unit cost must throw RangeError
+    assert.throws(
+      () =>
+        allocateLandedCostExact(
+          [{ id: 'ITEM-1', receivedQtyMilli: 1_000, baseUnitCostMicroBaht: 1_000_000 }],
+          -500
+        ),
+      RangeError
+    );
+    assert.throws(
+      () => computeNewMovingAverageCost(1_000, 1_000_000, 1_000, -500_000),
+      RangeError
+    );
+  });
+
+  it('Invariant 5 (Logic Audit Regressions): Precision boundary guard & missing BOM catalog error parity', () => {
+    // Values exceeding Number.MAX_SAFE_INTEGER (but below i64::MAX) must throw RangeError instead of silently losing IEEE-754 precision
+    assert.throws(() => toSafeFixedPointNumber(JS_MAX_SAFE_BIGINT + 1n), RangeError);
+
+    // Missing component variant in BOM edge or FIXED_QTY_DELTA modifier must throw immediately
+    const catalog = new Map(SEED_VARIANTS.map((v) => [v.id, v]));
+    const milkTea = catalog.get('VAR-CAFE-MILKTEA')!;
+    assert.throws(
+      () =>
+        calculateOrderLineDeductions(
+          milkTea,
+          1_000,
+          [
+            {
+              id: 'MOD-MISSING',
+              modifierGroupId: 'GRP-TOPPING',
+              name: 'Missing Variant Modifier',
+              priceDeltaSatang: 1_000,
+              modifierMode: 'FIXED_QTY_DELTA',
+              componentVariantId: 'VAR-NON-EXISTENT',
+              quantityDeltaMilli: 10_000,
+              targetComponentRole: null,
+              scaleBasisPoints: 0,
+            },
+          ],
+          catalog,
+          SEED_BOM_EDGES
+        ),
+      /Missing component variant VAR-NON-EXISTENT/
+    );
   });
 });
 

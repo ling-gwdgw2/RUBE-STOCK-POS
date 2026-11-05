@@ -11,9 +11,26 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 pub fn compute_migration_checksum_hex(sql_script: &str) -> String {
+    let normalized = sql_script.replace("\r\n", "\n");
     let mut hasher = Sha256::new();
-    hasher.update(sql_script.as_bytes());
+    hasher.update(normalized.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Strips connection-level `PRAGMA` statements (such as `journal_mode`, `synchronous`, `foreign_keys`)
+/// so that transactional DDL inside `BEGIN EXCLUSIVE TRANSACTION;` never fails with
+/// `Safety level may not be changed inside a transaction`.
+pub fn strip_connection_level_pragmas(sql_script: &str) -> String {
+    sql_script
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !(trimmed.len() >= 6
+                && trimmed[..6].eq_ignore_ascii_case("PRAGMA")
+                && trimmed.ends_with(';'))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn execute_fk_safe_migration(
@@ -23,6 +40,7 @@ pub fn execute_fk_safe_migration(
     sql_script: &str,
 ) -> Result<String, String> {
     let checksum = compute_migration_checksum_hex(sql_script);
+    let transactional_ddl = strip_connection_level_pragmas(sql_script);
 
     // Step 2: Disable Foreign Keys OUTSIDE transaction
     writer_conn
@@ -35,7 +53,7 @@ pub fn execute_fk_safe_migration(
             .execute_batch("BEGIN EXCLUSIVE TRANSACTION;")
             .map_err(|e| e.to_string())?;
         writer_conn
-            .execute_batch(sql_script)
+            .execute_batch(&transactional_ddl)
             .map_err(|e| format!("Migration DDL error: {e}"))?;
 
         let mut stmt = writer_conn
@@ -73,5 +91,22 @@ pub fn execute_fk_safe_migration(
         .map_err(|e| format!("Failed to re-enable foreign_keys: {e}"))?;
 
     Ok(checksum)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_connection_level_pragmas_and_crlf_normalization() {
+        let script = "PRAGMA foreign_keys = ON;\r\nPRAGMA journal_mode = WAL;\r\nCREATE TABLE t1 (id TEXT PRIMARY KEY);\r\n";
+        let stripped = strip_connection_level_pragmas(script);
+        assert!(!stripped.contains("PRAGMA journal_mode"));
+        assert!(stripped.contains("CREATE TABLE t1"));
+
+        let hash_crlf = compute_migration_checksum_hex("CREATE TABLE a (id INT);\r\n");
+        let hash_lf = compute_migration_checksum_hex("CREATE TABLE a (id INT);\n");
+        assert_eq!(hash_crlf, hash_lf);
+    }
 }
 
