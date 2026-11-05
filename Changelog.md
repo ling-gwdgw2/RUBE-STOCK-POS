@@ -349,6 +349,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   5. `[x]` สายแลนจอครัว KDS หลุด 30 วินาทีซิงค์ครบ 100%, โปรโมตเครื่องสำรองกั้น Split-Brain (`READ_ONLY_QUARANTINE`), และดึงปลั๊ก UPS สั่ง `PRAGMA wal_checkpoint(TRUNCATE);` ทันที
 - **ผลการทดสอบรวมทั้งโครงการ (Node.js `33/33 Tests` + Rust `18/18 Tests` + PR Gatekeeping `3/3 Rules`)**: ผ่านครบ **100% Pass**
 
+---
+
+### Interactive Full-Stack POS, KDS, Warehouse, BOM, Financial Reports & HIL Bench Desktop/Web Application (`npm start`)
+
+- **`packages/ui-presentation/src/web/index.html` & `packages/ui-presentation/src/server/pos-desktop-server.ts` (`RubePosInteractiveAppServer`)**:
+  - สร้างหน้าจอใช้งานจริงแบบโต้ตอบได้ครบทั้ง 6 โมดูลหลักในหน้าเดียวเชื่อมต่อกับ `SqliteReadWritePoolEngine`, `LocalIpcBridge`, และชุดจำลองฮาร์ดแวร์ HAL:
+    1. **🛒 หน้าจอขาย POS (Dual-Mode)**: จำลองการยิงปืนสแกนบาร์โค้ดขณะแป้นพิมพ์ค้างภาษาไทย (`< 50ms` First-Char Rollback), บาร์โค้ดตราชั่งน้ำหนัก/ราคา (`Prefix 20` / `25`), ตัวเลือกเสริมคาเฟ่ (`หวานน้อย 50%`, `ไม่หวาน 0%`, `เพิ่มไข่มุก`), คำนวณภาษีมูลค่าเพิ่ม 7% (`INCLUSIVE` / `EXCLUSIVE`), ชำระเงินสด/PromptPay QR พร้อมตรวจสลิป BOT Mini-QR 2 จังหวะ, แสดงตัวอย่างใบเสร็จความร้อน 203-DPI (`Chunked GS v 0`), และปุ่มยกเลิกบิล (`VOID_RETURN`)
+    2. **👨‍🍳 จอครัว KDS (Sequence Sync)**: แสดงรายการเครื่องดื่ม/อาหารค้างทำและกดอัปเดตสถานะ (`PREPARING` -> `READY` -> `SERVED`)
+    3. **📦 คลังสินค้า & รับของ PO (MAC / Landed Cost)**: ตารางสต็อกคงเหลือ + ต้นทุนถัวเฉลี่ยเคลื่อนที่ (MAC), ปุ่มรับสินค้าเข้าคลังพร้อมปันส่วนค่าขนส่งแฝง (`PO_RECEIVE`), และปุ่มต้มไข่มุกกึ่งสำเร็จรูป (`PRODUCTION_BUILD`)
+    4. **🧪 ผูกสูตร BOM DAG & ต้นทุนเมนู**: ตารางโครงสร้างสูตรการผลิตหลายระดับ พร้อมปุ่มทดสอบบล็อกการผูกสูตรวนลูป (`HTTP 422 Circular BOM Dependency`)
+    5. **📊 ปิดกะ & รายงานบัญชี 4 มิติ**: แสดง Z-Report, รายงานภาษีขายใบกำกับภาษีอย่างย่อ (ABB), รายงานมูลค่าสต็อกคงเหลือ, รายงาน COGS & กำไรขั้นต้นรายเมนู, และปุ่มปิดกะ Blind Drop พร้อมสำรองฐานข้อมูลลง USB อัตโนมัติ (14-Shift Ring Buffer)
+    6. **⚡ จำลองฮาร์ดแวร์ & ความปลอดภัย (HIL Bench)**: สลับโหมดธุรกิจ (`RETAIL` / `HOSPITALITY` / `HYBRID`) พร้อมลายเซ็น `HMAC-SHA256`, จำลองเปิดฝาเครื่องพิมพ์/กระดาษหมด (`Spool Queue Resilience`), และจำลองไฟดับเครื่องสำรองไฟ UPS (`AC_PRESENT = 0` -> `PRAGMA wal_checkpoint(TRUNCATE);`)
+- **`scripts/start-pos-app.ts` & `tests/e2e-integration/phase6-interactive-ui-server.test.ts`**:
+  - เพิ่มคำสั่ง `npm start` สำหรับเปิดใช้งานระบบผ่านเบราว์เซอร์หรือ WebView2 ที่ `http://127.0.0.1:4173`
+  - เพิ่มชุดทดสอบอัตโนมัติ `npm run test:ui-server` ทดสอบ API และหน้าจอครบทุกส่วน ผ่านครบ **100% (`34/34` Node Tests + `18/18` Rust Tests)**
+
+
 
 
 

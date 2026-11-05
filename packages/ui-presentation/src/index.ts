@@ -9,6 +9,8 @@ export * from './views/kds/KdsStationView.ts';
 export * from './views/inventory/TransferAndStocktakeView.ts';
 export * from './views/settings/SystemSecurityAndProfileView.ts';
 export * from './views/reports/FinancialAndBackupReportView.ts';
+export * from './server/pos-desktop-server.ts';
+
 
 
 

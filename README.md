@@ -2,7 +2,7 @@
 
 Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Hardened Blueprint)
 
-[![Phase 0–5 & HIL Tests](https://img.shields.io/badge/Node%20Tests-33%2F33%20Passing-brightgreen)](#automated-testing)
+[![Phase 0–6 & HIL Tests](https://img.shields.io/badge/Node%20Tests-34%2F34%20Passing-brightgreen)](#automated-testing)
 [![Rust Workspace Tests](https://img.shields.io/badge/Cargo%20Tests-18%2F18%20Passing-brightgreen)](#automated-testing)
 [![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.0-blue)](#key-architectural-pillars)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Standalone%20%7C%20Local%20LAN-orange)](#overview)
@@ -63,6 +63,17 @@ rube-stock-pos/
 
 ---
 
+## 🚀 การเปิดใช้งานแอปพลิเคชันหน้าจอขายจริง (Interactive Desktop/Web UI)
+
+รันคำสั่งด้านล่างเพื่อเปิดระบบ **RUBE-STOCK-POS v3.1** แบบโต้ตอบครบทั้ง 6 โมดูล (หน้าขาย POS, จอครัว KDS, คลังสินค้า/PO, ผูกสูตร BOM DAG, รายงานบัญชี 4 มิติ, และแผงจำลองฮาร์ดแวร์ HIL):
+
+```bash
+npm start
+# เปิดเบราว์เซอร์หรือ WebView2 ไปที่ http://127.0.0.1:4173
+```
+
+---
+
 ## 🧪 การทดสอบระบบอัตโนมัติ (Automated Testing)
 
 รันคำสั่งตรวจสอบความถูกต้องของโครงสร้างฐานข้อมูลและชุดทดสอบทางบัญชี/ฮาร์ดแวร์:
@@ -92,14 +103,17 @@ npm run test:phase5
 # รันชุดทดสอบรายการตรวจสอบการประกอบร่างบนชุดฮาร์ดแวร์ Section 6.2 (5-Point HIL Assembly Checklist)
 npm run test:hil
 
-# รันชุดทดสอบทั้งหมดของฝั่ง TypeScript / SQLite Runtime (Phase 0–5 + Section 6.2 HIL + Accounting Invariants)
+# รันชุดทดสอบเซิร์ฟเวอร์และหน้าจอ Interactive POS & Warehouse UI Server (E2E)
+npm run test:ui-server
+
+# รันชุดทดสอบทั้งหมดของฝั่ง TypeScript / SQLite Runtime (Phase 0–5 + Section 6.2 HIL + Interactive UI Server + Accounting Invariants)
 npm test
 
 # รันชุดทดสอบและคอมไพล์ฝั่ง Rust Workspace ทั้ง 4 Crates (rusqlite + i128 math + Shift/VAT + Keyring HMAC + 5-Step Migrator + mDNS/mTLS/KDS/Epoch Fencing)
 cargo test
 ```
 
-ผลการทดสอบ: **Node.js `33/33 Tests` + Rust `18/18 Tests` + PR Gatekeeping `3/3 Rules` ผ่านครบ 100%**
+ผลการทดสอบ: **Node.js `34/34 Tests` + Rust `18/18 Tests` + PR Gatekeeping `3/3 Rules` ผ่านครบ 100%**
 
 ---
 

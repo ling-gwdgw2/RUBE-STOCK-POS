@@ -5,6 +5,7 @@ dist/
 build/
 
 # Database & Keystore Runtime Files
+data/
 *.db
 *.db-wal
 *.db-shm

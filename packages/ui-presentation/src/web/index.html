@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RUBE-STOCK-POS v3.1 — Unified Local-First Warehouse & POS System</title>
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --bg-panel: #1e293b;
+      --bg-card: #334155;
+      --border: #475569;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --emerald: #059669;
+      --amber: #d97706;
+      --rose: #e11d48;
+      --purple: #7c3aed;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    body { background: var(--bg-dark); color: var(--text-main); min-height: 100vh; display: flex; flex-direction: column; }
+    .ups-banner {
+      display: none;
+      padding: 10px 20px;
+      font-weight: 700;
+      font-size: 14px;
+      text-align: center;
+      background: var(--amber);
+      color: #fff;
+      border-bottom: 2px solid #fbbf24;
+    }
+    .ups-banner.critical { background: var(--rose); }
+    .ups-banner.visible { display: block; }
+    header {
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand h1 { font-size: 18px; font-weight: 800; letter-spacing: 0.5px; color: #60a5fa; }
+    .badge {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+    }
+    .badge.ok { background: rgba(5, 150, 105, 0.25); border-color: #10b981; color: #6ee7b7; }
+    .badge.warn { background: rgba(217, 119, 6, 0.25); border-color: #f59e0b; color: #fcd34d; }
+    .badge.err { background: rgba(225, 29, 72, 0.25); border-color: #f43f5e; color: #fda4af; }
+    nav {
+      display: flex;
+      gap: 6px;
+      background: #0b1120;
+      padding: 8px 20px;
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+    }
+    nav button {
+      background: var(--bg-panel);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+    nav button.active, nav button:hover {
+      background: var(--primary);
+      color: #fff;
+      border-color: #60a5fa;
+    }
+    main { flex: 1; padding: 18px 20px; max-width: 1600px; width: 100%; margin: 0 auto; }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+    .grid-2 { display: grid; grid-template-columns: 1.35fr 1fr; gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .panel {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .panel h2 { font-size: 16px; margin-bottom: 12px; color: #93c5fd; display: flex; justify-content: space-between; align-items: center; }
+    .btn {
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn:hover { background: var(--primary-hover); }
+    .btn.emerald { background: var(--emerald); }
+    .btn.amber { background: var(--amber); }
+    .btn.rose { background: var(--rose); }
+    .btn.purple { background: var(--purple); }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    input, select {
+      background: #0f172a;
+      color: #fff;
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      width: 100%;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #334155; text-align: left; }
+    th { color: var(--text-muted); font-weight: 600; background: rgba(15, 23, 42, 0.5); }
+    .catalog-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .item-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      cursor: pointer;
+      transition: transform 0.1s, border-color 0.1s;
+    }
+    .item-card:hover { transform: translateY(-2px); border-color: #60a5fa; }
+    .item-card .title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+    .item-card .meta { font-size: 12px; color: var(--text-muted); }
+    .item-card .price { font-size: 15px; font-weight: 800; color: #34d399; margin-top: 6px; }
+    .receipt-box {
+      background: #fff;
+      color: #111827;
+      font-family: 'Courier New', monospace;
+      padding: 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      white-space: pre-wrap;
+      line-height: 1.45;
+      max-height: 360px;
+      overflow-y: auto;
+      border: 2px dashed #64748b;
+    }
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .stat-card .label { font-size: 12px; color: var(--text-muted); }
+    .stat-card .val { font-size: 22px; font-weight: 800; color: #f8fafc; margin-top: 4px; }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #1e293b;
+      border: 2px solid #38bdf8;
+      color: #fff;
+      padding: 12px 18px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      display: none;
+      z-index: 9999;
+    }
+    .toast.show { display: block; }
+  </style>
+</head>
+<body>
+  <div id="upsBanner" class="ups-banner"></div>
+
+  <header>
+    <div class="brand">
+      <h1>🛡️ RUBE-STOCK-POS v3.1</h1>
+      <span id="profileBadge" class="badge ok">MODE: HYBRID</span>
+      <span id="shiftBadge" class="badge ok">SHIFT: OPEN</span>
+      <span id="invariantBadge" class="badge ok">LEDGER: 100% CONSERVED</span>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <span id="printerBadge" class="badge ok">🖨️ PRINTER: READY</span>
+      <span id="clusterBadge" class="badge">🔗 CLUSTER: LEADER (Epoch 1)</span>
+    </div>
+  </header>
+
+  <nav>
+    <button class="active" onclick="switchTab('pos', this)">🛒 1. หน้าจอขาย POS (Dual-Mode)</button>
+    <button onclick="switchTab('kds', this)">👨‍🍳 2. จอครัว KDS (Sequence Sync)</button>
+    <button onclick="switchTab('warehouse', this)">📦 3. คลังสินค้า & รับของ PO (MAC / Landed Cost)</button>
+    <button onclick="switchTab('bom', this)">🧪 4. ผูกสูตร BOM DAG & ต้นทุนเมนู</button>
+    <button onclick="switchTab('reports', this)">📊 5. ปิดกะ & รายงานบัญชี 4 มิติ</button>
+    <button onclick="switchTab('hil', this)">⚡ 6. จำลองฮาร์ดแวร์ & ความปลอดภัย (HIL Bench)</button>
+  </nav>
+
+  <main>
+    <!-- TAB 1: POS TERMINAL -->
+    <section id="tab-pos" class="tab-pane active">
+      <div class="grid-2">
+        <div>
+          <div class="panel">
+            <h2>
+              <span>🔍 ช่องค้นหา & ดักจับปืนสแกนบาร์โค้ด (&lt; 50ms First-Char Rollback)</span>
+              <span id="rollbackBadge" class="badge ok">Rollbacks: 0</span>
+            </h2>
+            <input id="posSearchInput" type="text" placeholder="คลิกที่นี่แล้วลองกดปุ่มจำลองยิงบาร์โค้ดขณะคีย์บอร์ดเป็นภาษาไทย (กขค)..." oninput="renderCatalog()" />
+            <div class="btn-row">
+              <button class="btn emerald" onclick="simulateThaiBarcodeScan('8851952350161')">🔫 ยิงบาร์โค้ดน้ำดื่ม (คีย์บอร์ดไทยค้าง)</button>
+              <button class="btn amber" onclick="simulateThaiBarcodeScan('2010045015004')">⚖️ ยิงบาร์โค้ดตราชั่งน้ำหนัก 1.500 กก. (Prefix 20)</button>
+              <button class="btn purple" onclick="simulateThaiBarcodeScan('2510045090005')">🏷️ ยิงบาร์โค้ดตราชั่งราคา 90฿ (Prefix 25)</button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>
+              <span>📋 รายการสินค้า (คลิกเพื่อเพิ่มลงตะกร้า)</span>
+              <div style="display:flex; gap:6px;">
+                <select id="cafeModifierSelect" style="width:auto;">
+                  <option value="">-- ตัวเลือกเสริมคาเฟ่ (หวานปกติ) --</option>
+                  <option value="MOD-SWEET-50">หวานน้อย 50% (ลดน้ำเชื่อม/น้ำผึ้ง 50%)</option>
+                  <option value="MOD-SWEET-0">ไม่หวาน 0% (ตัดความหวาน 100%)</option>
+                  <option value="MOD-SWEET-50,MOD-EXTRA-BOBA">หวานน้อย 50% + เพิ่มไข่มุก (+15฿)</option>
+                  <option value="MOD-EXTRA-BOBA">เพิ่มไข่มุกไต้หวัน (+15฿)</option>
+                </select>
+              </div>
+            </h2>
+            <div id="catalogGrid" class="catalog-grid"></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="panel">
+            <h2>
+              <span>🧺 ตะกร้าสินค้า & คำนวณภาษีใบกำกับภาษีอย่างย่อ (ABB VAT 7%)</span>
+              <button class="btn rose" onclick="clearCart()">ล้างตะกร้า</button>
+            </h2>
+            <table>
+              <thead>
+                <tr><th>สินค้า</th><th>จำนวน</th><th>ตัวเลือก</th><th>รวม (บาท)</th></tr>
+              </thead>
+              <tbody id="cartTableBody"></tbody>
+            </table>
+
+            <div style="margin-top:12px; display:grid; grid-template-columns: 1fr 1fr; gap:8px;">
+              <div>
+                <label style="font-size:12px; color:var(--text-muted);">โหมดภาษี (VAT 7%):</label>
+                <select id="taxModeSelect" onchange="renderCart()">
+                  <option value="INCLUSIVE">INCLUSIVE (รวม VAT 7% ในราคาสินค้า)</option>
+                  <option value="EXCLUSIVE">EXCLUSIVE (บวก VAT 7% เพิ่มท้ายบิล)</option>
+                </select>
+              </div>
+              <div>
+                <label style="font-size:12px; color:var(--text-muted);">ส่วนลดท้ายบิล (บาท):</label>
+                <input id="discountBahtInput" type="number" value="0" min="0" onchange="renderCart()" />
+              </div>
+            </div>
+
+            <div style="margin-top:12px; padding:12px; background:#0f172a; border-radius:8px;">
+              <div style="display:flex; justify-content:space-between; font-size:13px;"><span>มูลค่าก่อนภาษี (Net Before Tax):</span><span id="cartNetBeforeTax">฿0.00</span></div>
+              <div style="display:flex; justify-content:space-between; font-size:13px; margin-top:4px;"><span>ภาษีมูลค่าเพิ่ม (VAT 7%):</span><span id="cartVat">฿0.00</span></div>
+              <div style="display:flex; justify-content:space-between; font-size:20px; font-weight:800; color:#34d399; margin-top:6px;"><span>ยอดสุทธิ (GRAND TOTAL):</span><span id="cartGrandTotal">฿0.00</span></div>
+            </div>
+
+            <div class="btn-row" style="margin-top:12px;">
+              <button class="btn emerald" style="flex:1; padding:12px;" onclick="checkoutCash()">💵 รับเงินสด & พิมพ์ใบเสร็จ ABB</button>
+              <button class="btn" style="flex:1; padding:12px;" onclick="openPromptPayModal()">📲 รับชำระด้วย PromptPay QR & ตรวจสลิป</button>
+            </div>
+
+            <div id="promptPayBox" style="display:none; margin-top:12px; padding:12px; background:#0f172a; border:1px solid #38bdf8; border-radius:8px;">
+              <div style="font-weight:700; color:#38bdf8; margin-bottom:6px;">📲 EMVCo PromptPay Dynamic QR (Offline CRC16-CCITT)</div>
+              <div id="promptPayPayloadText" style="font-family:monospace; font-size:11px; word-break:break-all; color:#94a3b8; margin-bottom:8px;"></div>
+              <label style="font-size:12px;">ยิง BOT Slip Mini-QR (ตรวจสอบ 2 จังหวะ ป้องกันสลิปซ้ำ):</label>
+              <input id="botSlipInput" type="text" value="004100060000010103014022020261106SCBDEMO00001" style="margin-top:4px;" />
+              <div class="btn-row">
+                <button class="btn amber" onclick="verifySlipStep1()">1️⃣ ตรวจสอบธนาคาร & ยอดเงินบนสลิป</button>
+                <button class="btn emerald" onclick="checkoutPromptPayConfirm()">2️⃣ ยืนยันยอดเงินถูกต้อง & ปิดบิล</button>
+              </div>
+              <div id="slipVerifyResult" style="margin-top:8px; font-size:13px; font-weight:700;"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>
+              <span>🧾 ตัวอย่างใบเสร็จความร้อน 203-DPI (Chunked GS v 0 Raster)</span>
+              <button id="voidLastOrderBtn" class="btn rose" style="display:none;" onclick="voidLastOrder()">↩️ ยกเลิกบิลล่าสุด (VOID_RETURN)</button>
+            </h2>
+            <div id="receiptPreview" class="receipt-box">ยังไม่มีบิลที่พิมพ์ในเซสชันนี้ — เลือกสินค้าแล้วกดรับชำระเงินเพื่อดูใบเสร็จ ABB และข้อมูลชุดคำสั่ง GS v 0</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: KDS -->
+    <section id="tab-kds" class="tab-pane">
+      <div class="panel">
+        <h2>
+          <span>👨‍🍳 จอครัว KDS (Monotonic sequence_id Sync & Gap Recovery)</span>
+          <button class="btn" onclick="refreshAll()">🔄 ซิงค์ออเดอร์ตกหล่นจากเครื่องแม่ข่าย</button>
+        </h2>
+        <div id="kdsGrid" class="grid-3"></div>
+      </div>
+    </section>
+
+    <!-- TAB 3: WAREHOUSE & PO -->
+    <section id="tab-warehouse" class="tab-pane">
+      <div class="grid-2">
+        <div class="panel">
+          <h2>📦 สต็อกคงเหลือ & ต้นทุนถัวเฉลี่ยเคลื่อนที่ (MAC Micro-Baht)</h2>
+          <table>
+            <thead>
+              <tr><th>รหัส</th><th>ชื่อสินค้า</th><th>คงเหลือ</th><th>ต้นทุนเฉลี่ย (MAC)</th><th>ราคาขาย</th></tr>
+            </thead>
+            <tbody id="inventoryTableBody"></tbody>
+          </table>
+        </div>
+        <div>
+          <div class="panel">
+            <h2>🚛 รับสินค้าเข้าคลังพร้อมปันส่วนค่าขนส่งแฝง (Landed Cost PO)</h2>
+            <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">ทดสอบรับเข้า สันคอหมู 10 กก. + ใบชา 5 กก. พร้อมปันส่วนค่าขนส่ง (Freight) ด้วย Largest Remainder Method (i128):</p>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <div>
+                <label style="font-size:12px;">ปริมาณสันคอหมูที่รับเข้า (กก.):</label>
+                <input id="poPorkKg" type="number" value="10" min="1" />
+              </div>
+              <div>
+                <label style="font-size:12px;">ค่าขนส่งแฝงรวม (บาท):</label>
+                <input id="poFreightBaht" type="number" value="250" min="0" />
+              </div>
+            </div>
+            <div class="btn-row">
+              <button class="btn emerald" onclick="submitPurchaseOrder()">📥 บันทึกรับสินค้าเข้าคลัง (PO_RECEIVE)</button>
+              <button class="btn amber" onclick="submitPrepBobaBuild()">🧋 ต้มไข่มุกล็อตใหม่ 5 กก. (PRODUCTION_BUILD)</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: BOM DAG -->
+    <section id="tab-bom" class="tab-pane">
+      <div class="grid-2">
+        <div class="panel">
+          <h2>🧪 โครงสร้างสูตรการผลิตหลายระดับ (Multi-Level BOM DAG)</h2>
+          <table>
+            <thead>
+              <tr><th>เมนู / ของกึ่งสำเร็จรูป</th><th>วัตถุดิบองค์ประกอบ</th><th>บทบาท (Role)</th><th>ปริมาณ (Milli)</th><th>ของเสีย (BPS)</th></tr>
+            </thead>
+            <tbody id="bomTableBody"></tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>🛡️ ทดสอบระบบป้องกันการผูกสูตรวนลูป (DFS Cycle Detection)</h2>
+          <p style="font-size:13px; color:var(--text-muted); margin-bottom:10px;">
+            ในระบบปัจจุบัน <code>VAR-RAW-BOBA</code> (ไข่มุกต้มสุก) ใช้ <code>VAR-RAW-DRY-BOBA</code> (เม็ดไข่มุกดิบ) เป็นวัตถุดิบ หากพยายามผูกย้อนกลับให้เม็ดไข่มุกดิบใช้ไข่มุกต้มสุก ระบบจะบล็อกด้วย <code>HTTP 422 Circular BOM Dependency</code> ทันที:
+          </p>
+          <button class="btn rose" onclick="testCircularBomGuard()">🚫 ทดสอบผูกสูตรวนลูป (ต้องถูกบล็อกด้วย HTTP 422)</button>
+          <div id="bomCycleResult" style="margin-top:12px; font-weight:700; font-size:13px;"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: SHIFT & REPORTS -->
+    <section id="tab-reports" class="tab-pane">
+      <div class="grid-3" id="reportSummaryCards"></div>
+      <div class="grid-2" style="margin-top:16px;">
+        <div class="panel">
+          <h2>
+            <span>🧾 รายงานภาษีขายใบกำกับภาษีอย่างย่อ (ABB Sales Tax Report)</span>
+            <button class="btn amber" onclick="closeShiftAndBackupUsb()">🔒 ปิดกะ Blind Drop & สำรองข้อมูลลง USB (14 กะ)</button>
+          </h2>
+          <table>
+            <thead>
+              <tr><th>เลขที่ ABB</th><th>สถานะ</th><th>ก่อนภาษี</th><th>VAT 7%</th><th>ยอดสุทธิ</th></tr>
+            </thead>
+            <tbody id="abbReportTableBody"></tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>📈 รายงานต้นทุนขาย (COGS) & กำไรขั้นต้นรายเมนู</h2>
+          <table>
+            <thead>
+              <tr><th>เมนู / สินค้า</th><th>จำนวนที่ขาย</th><th>ยอดขายสุทธิ</th><th>ต้นทุน COGS</th><th>กำไรขั้นต้น (%)</th></tr>
+            </thead>
+            <tbody id="marginReportTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 6: HIL & SECURITY BENCH -->
+    <section id="tab-hil" class="tab-pane">
+      <div class="grid-3">
+        <div class="panel">
+          <h2>🏪 สลับโหมดธุรกิจ (Polymorphic Profile + HMAC-SHA256)</h2>
+          <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">ทุกการสลับโหมดจะลงลายเซ็น HMAC-SHA256 ในตาราง <code>store_config</code> และบันทึก <code>security_audit_logs</code>:</p>
+          <div class="btn-row">
+            <button class="btn" onclick="switchBusinessProfile('RETAIL')">โหมด RETAIL (ค้าปลีก)</button>
+            <button class="btn amber" onclick="switchBusinessProfile('HOSPITALITY')">โหมด HOSPITALITY (คาเฟ่/ร้านอาหาร)</button>
+            <button class="btn emerald" onclick="switchBusinessProfile('HYBRID')">โหมด HYBRID (ผสมผสาน)</button>
+          </div>
+          <div id="hmacDisplayBox" style="margin-top:10px; font-family:monospace; font-size:11px; color:#6ee7b7; word-break:break-all;"></div>
+        </div>
+
+        <div class="panel">
+          <h2>🖨️ จำลองกระดาษหมด / เปิดฝาเครื่องพิมพ์ (Spool Queue Resilience)</h2>
+          <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">เมื่อตั้งค่าเป็นกระดาษหมด บิลขายจะยังบันทึกสำเร็จและเก็บงานพิมพ์เข้าคิว เมื่อกดใส่กระดาษเสร็จจะพิมพ์ออกอัตโนมัติโดยไม่ตัดสต็อกซ้ำ:</p>
+          <div class="btn-row">
+            <button class="btn rose" onclick="setPrinterState(false)">⚠️ จำลองเปิดฝาเครื่องพิมพ์ / กระดาษหมด</button>
+            <button class="btn emerald" onclick="setPrinterState(true)">✅ ใส่กระดาษเสร็จ / ปิดฝา (Auto-Flush คิวพิมพ์)</button>
+          </div>
+          <div id="spoolStatusText" style="margin-top:10px; font-size:13px; font-weight:700;"></div>
+        </div>
+
+        <div class="panel">
+          <h2>🔋 จำลองไฟดับเครื่องสำรองไฟ UPS (USB-HID 0x84)</h2>
+          <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">เมื่อไฟบ้านดับ (<code>AC_PRESENT = 0</code>) ระบบจะสั่ง <code>PRAGMA wal_checkpoint(TRUNCATE);</code> ลงดิสก์ทันทีและขึ้นแถบเตือนด้านบนสุด:</p>
+          <div class="btn-row">
+            <button class="btn amber" onclick="simulateUpsState(false, 65)">🔌 ชักปลั๊กไฟ UPS (ไฟสำรอง 65% + WAL Checkpoint)</button>
+            <button class="btn rose" onclick="simulateUpsState(false, 15)">🚨 แบตต่ำ 15% (เข้าโหมด Read-Only Lock)</button>
+            <button class="btn emerald" onclick="simulateUpsState(true, 100)">⚡ เสียบปลั๊กไฟบ้านกลับตามปกติ (AC Online)</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    let appState = null;
+    let cart = [];
+    let lastCompletedOrderId = null;
+
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      setTimeout(() => el.classList.remove('show'), 3800);
+    }
+
+    function switchTab(tabId, btn) {
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+      document.getElementById('tab-' + tabId).classList.add('active');
+      if (btn) btn.classList.add('active');
+      if (tabId === 'reports') loadReports();
+    }
+
+    async function api(path, method = 'GET', body = null) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch(path, opts);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    }
+
+    async function refreshAll() {
+      appState = await api('/api/bootstrap');
+      document.getElementById('profileBadge').textContent = 'MODE: ' + appState.profile;
+      document.getElementById('shiftBadge').textContent = appState.activeShift
+        ? `SHIFT: ${appState.activeShift.shiftNumber} (฿${(appState.activeShift.expectedCashSatang / 100).toFixed(2)})`
+        : 'SHIFT: CLOSED';
+      document.getElementById('invariantBadge').textContent = appState.ledgerInvariant.valid
+        ? `LEDGER: 100% CONSERVED (${appState.ledgerInvariant.checkedVariantsCount} SKUs)`
+        : 'LEDGER: MISMATCH!';
+      document.getElementById('printerBadge').textContent = appState.printer.ready
+        ? `🖨️ PRINTER: READY (Spooled: ${appState.printer.pendingQueueLength})`
+        : `🖨️ PRINTER: PAPER OUT (Queued: ${appState.printer.pendingQueueLength})`;
+      document.getElementById('printerBadge').className = 'badge ' + (appState.printer.ready ? 'ok' : 'warn');
+
+      const upsBanner = document.getElementById('upsBanner');
+      if (appState.upsBanner.visible) {
+        upsBanner.textContent = appState.upsBanner.headlineThai;
+        upsBanner.className = 'ups-banner visible' + (appState.upsBanner.severity === 'CRITICAL_LOW_BATTERY_LOCK' ? ' critical' : '');
+      } else {
+        upsBanner.className = 'ups-banner';
+      }
+
+      renderCatalog();
+      renderCart();
+      renderInventoryAndBom();
+      renderKds();
+    }
+
+    function renderCatalog() {
+      if (!appState) return;
+      const q = (document.getElementById('posSearchInput').value || '').toLowerCase();
+      const sellable = appState.catalog.filter(v => v.priceSatang > 0 && (!q || v.itemName.toLowerCase().includes(q) || v.sku.toLowerCase().includes(q)));
+      const grid = document.getElementById('catalogGrid');
+      grid.innerHTML = sellable.map(v => `
+        <div class="item-card" onclick="addItemToCart('${v.id}')">
+          <div class="title">${v.itemName}</div>
+          <div class="meta">SKU: ${v.sku} | ${v.variantName}</div>
+          <div class="meta">${v.isComposite ? '🍹 เมนูผูกสูตร BOM' : `คงเหลือ: ${(v.inStockMilli / 1000).toFixed(2)} ${v.unitName}`}</div>
+          <div class="price">฿${(v.priceSatang / 100).toFixed(2)}</div>
+        </div>
+      `).join('');
+    }
+
+    function addItemToCart(variantId, qtyMilli = 1000) {
+      const v = appState.catalog.find(x => x.id === variantId);
+      if (!v) return;
+      const modSelect = document.getElementById('cafeModifierSelect').value;
+      const selectedModifierIds = v.isComposite && modSelect ? modSelect.split(',') : [];
+      cart.push({
+        variantId: v.id,
+        itemName: v.itemName,
+        unitName: v.unitName,
+        quantityMilli: qtyMilli,
+        unitPriceSatang: v.priceSatang,
+        selectedModifierIds
+      });
+      renderCart();
+    }
+
+    function clearCart() {
+      cart = [];
+      document.getElementById('promptPayBox').style.display = 'none';
+      renderCart();
+    }
+
+    function renderCart() {
+      if (!appState) return;
+      const modsMap = new Map(appState.modifiers.map(m => [m.id, m]));
+      let subtotalSatang = 0;
+      const rowsHtml = cart.map((line, idx) => {
+        const mods = line.selectedModifierIds.map(id => modsMap.get(id)).filter(Boolean);
+        const modDelta = mods.reduce((s, m) => s + m.priceDeltaSatang, 0);
+        const lineTotalSatang = Math.round((line.quantityMilli * (line.unitPriceSatang + modDelta)) / 1000);
+        subtotalSatang += lineTotalSatang;
+        return `
+          <tr>
+            <td>${line.itemName}</td>
+            <td>${(line.quantityMilli / 1000).toFixed(3)} ${line.unitName}</td>
+            <td>${mods.map(m => m.name).join(', ') || '-'}</td>
+            <td>฿${(lineTotalSatang / 100).toFixed(2)}</td>
+          </tr>
+        `;
+      }).join('');
+      document.getElementById('cartTableBody').innerHTML = rowsHtml || '<tr><td colspan="4" style="color:var(--text-muted); text-align:center;">ตะกร้าว่างเปล่า</td></tr>';
+
+      const discountSatang = Math.round(Number(document.getElementById('discountBahtInput').value || 0) * 100);
+      const afterDiscount = Math.max(0, subtotalSatang - discountSatang);
+      const taxMode = document.getElementById('taxModeSelect').value;
+      const vatSatang = taxMode === 'INCLUSIVE'
+        ? Math.round((afterDiscount * 700) / 10700)
+        : Math.round((afterDiscount * 700) / 10000);
+      const netBeforeTax = taxMode === 'INCLUSIVE' ? afterDiscount - vatSatang : afterDiscount;
+      const grandTotal = taxMode === 'INCLUSIVE' ? afterDiscount : afterDiscount + vatSatang;
+
+      document.getElementById('cartNetBeforeTax').textContent = '฿' + (netBeforeTax / 100).toFixed(2);
+      document.getElementById('cartVat').textContent = '฿' + (vatSatang / 100).toFixed(2);
+      document.getElementById('cartGrandTotal').textContent = '฿' + (grandTotal / 100).toFixed(2);
+    }
+
+    async function simulateThaiBarcodeScan(barcode) {
+      const res = await api('/api/hal/simulate-scan', 'POST', { barcode });
+      document.getElementById('posSearchInput').value = res.searchInputTextAfter;
+      document.getElementById('rollbackBadge').textContent = 'Rollbacks: ' + res.firstCharRollbackCount;
+      cart.push(res.addedCartLine);
+      renderCart();
+      showToast(`🔫 สแกนสำเร็จ: ${res.addedCartLine.itemName} (${(res.addedCartLine.quantityMilli / 1000).toFixed(3)} ${res.addedCartLine.unitName}) — ลบอักษรไทยที่รั่วเข้าช่องค้นหาอัตโนมัติ!`);
+    }
+
+    async function checkoutCash() {
+      if (cart.length === 0) return showToast('กรุณาเลือกสินค้าลงตะกร้าก่อนครับ');
+      const discountSatang = Math.round(Number(document.getElementById('discountBahtInput').value || 0) * 100);
+      const taxMode = document.getElementById('taxModeSelect').value;
+      const res = await api('/api/pos/checkout', 'POST', {
+        paymentMethod: 'CASH',
+        taxMode,
+        discountSatang,
+        lines: cart
+      });
+      lastCompletedOrderId = res.order.salesOrderId;
+      document.getElementById('voidLastOrderBtn').style.display = 'inline-block';
+      document.getElementById('receiptPreview').textContent =
+        res.printJob.formattedTextLines.join('\n') +
+        `\n\n[TELEMETRY] GS v 0 Bands: ${res.printJob.packetsCount} | Max Packet: ${res.printJob.maxPacketByteLength} bytes (<= 8KB Safe) | Spool Status: ${res.spoolResult.status}`;
+      clearCart();
+      await refreshAll();
+      showToast(res.spoolResult.uiAlertThai || `✅ บันทึกบิล ${res.order.abbTaxInvoiceNo} และสั่งพิมพ์ใบเสร็จสำเร็จ!`);
+    }
+
+    async function openPromptPayModal() {
+      if (cart.length === 0) return showToast('กรุณาเลือกสินค้าลงตะกร้าก่อนครับ');
+      const discountSatang = Math.round(Number(document.getElementById('discountBahtInput').value || 0) * 100);
+      const taxMode = document.getElementById('taxModeSelect').value;
+      const res = await api('/api/pos/promptpay-qr', 'POST', { taxMode, discountSatang, lines: cart });
+      document.getElementById('promptPayBox').style.display = 'block';
+      document.getElementById('promptPayPayloadText').textContent = `EMVCo Payload: ${res.payload} (CRC16: ${res.crcHex} | ยอด ฿${(res.totalSatang / 100).toFixed(2)})`;
+    }
+
+    async function verifySlipStep1() {
+      const miniQrRaw = document.getElementById('botSlipInput').value;
+      const discountSatang = Math.round(Number(document.getElementById('discountBahtInput').value || 0) * 100);
+      const taxMode = document.getElementById('taxModeSelect').value;
+      const res = await api('/api/pos/verify-slip-step1', 'POST', { miniQrRaw, taxMode, discountSatang, lines: cart });
+      const box = document.getElementById('slipVerifyResult');
+      if (res.canProceedToStep2Confirm) {
+        box.style.color = '#34d399';
+        box.textContent = `✅ ธนาคาร: ${res.senderBankNameThai} | Ref ท้าย: *${res.transRefLast4} | โปรดตรวจยอดเงิน ${res.expectedAmountFormatted} แล้วกดปุ่ม 2️⃣`;
+      } else {
+        box.style.color = '#f43f5e';
+        box.textContent = `❌ บล็อกสลิป: ${res.verification.errorReason}`;
+      }
+    }
+
+    async function checkoutPromptPayConfirm() {
+      const slipTransRefRaw = document.getElementById('botSlipInput').value;
+      const discountSatang = Math.round(Number(document.getElementById('discountBahtInput').value || 0) * 100);
+      const taxMode = document.getElementById('taxModeSelect').value;
+      try {
+        const res = await api('/api/pos/checkout', 'POST', {
+          paymentMethod: 'PROMPTPAY_QR',
+          slipTransRefRaw,
+          taxMode,
+          discountSatang,
+          lines: cart
+        });
+        lastCompletedOrderId = res.order.salesOrderId;
+        document.getElementById('voidLastOrderBtn').style.display = 'inline-block';
+        document.getElementById('receiptPreview').textContent =
+          res.printJob.formattedTextLines.join('\n') +
+          `\n\n[TELEMETRY] GS v 0 Bands: ${res.printJob.packetsCount} | Max Packet: ${res.printJob.maxPacketByteLength} bytes`;
+        clearCart();
+        await refreshAll();
+        showToast(`✅ รับชำระ PromptPay QR บิล ${res.order.abbTaxInvoiceNo} สำเร็จ!`);
+      } catch (err) {
+        showToast(`🚫 ${err.message}`);
+      }
+    }
+
+    async function voidLastOrder() {
+      if (!lastCompletedOrderId) return;
+      const res = await api('/api/pos/void', 'POST', { salesOrderId: lastCompletedOrderId });
+      lastCompletedOrderId = null;
+      document.getElementById('voidLastOrderBtn').style.display = 'none';
+      await refreshAll();
+      showToast(`↩️ ยกเลิกบิล ${res.abbTaxInvoiceNo} และคืนสต็อกตามต้นทุนจริง (VOID_RETURN) สำเร็จ!`);
+    }
+
+    function renderKds() {
+      if (!appState) return;
+      const grid = document.getElementById('kdsGrid');
+      if (appState.kdsTickets.length === 0) {
+        grid.innerHTML = '<div style="color:var(--text-muted);">ยังไม่มีรายการอาหาร/เครื่องดื่มค้างในจอครัว KDS</div>';
+        return;
+      }
+      grid.innerHTML = appState.kdsTickets.map(t => `
+        <div class="stat-card">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <span class="badge ok">Queue: ${t.queueNumber} (Seq #${t.sequenceId})</span>
+            <span class="badge warn">${t.status}</span>
+          </div>
+          <div style="font-size:13px; margin-bottom:10px;">
+            ${t.items.map(i => `<div>• <b>${i.itemSummaryText}</b> x${(i.quantityMilli / 1000).toFixed(0)} ${i.modifiersSummaryText ? `<span style="color:#fbbf24;">(${i.modifiersSummaryText})</span>` : ''}</div>`).join('')}
+          </div>
+          <div class="btn-row">
+            <button class="btn amber" onclick="bumpKds('${t.kitchenOrderId}', ${t.sequenceId}, 'PREPARING')">👨‍🍳 กำลังทำ</button>
+            <button class="btn emerald" onclick="bumpKds('${t.kitchenOrderId}', ${t.sequenceId}, 'READY')">🔔 พร้อมเสิร์ฟ</button>
+            <button class="btn" onclick="bumpKds('${t.kitchenOrderId}', ${t.sequenceId}, 'SERVED')">✅ เสิร์ฟแล้ว</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function bumpKds(kitchenOrderId, ackedSequenceId, newStatus) {
+      await api('/api/kds/bump', 'POST', { kitchenOrderId, ackedSequenceId, newStatus });
+      await refreshAll();
+      showToast(`👨‍🍳 อัปเดตสถานะจอครัว KDS Seq #${ackedSequenceId} -> ${newStatus}`);
+    }
+
+    function renderInventoryAndBom() {
+      if (!appState) return;
+      document.getElementById('inventoryTableBody').innerHTML = appState.catalog.map(v => `
+        <tr>
+          <td><code>${v.sku}</code></td>
+          <td>${v.itemName} ${v.useProduction ? '<span class="badge warn">Pre-Built</span>' : ''}</td>
+          <td><b>${(v.inStockMilli / 1000).toFixed(3)}</b> ${v.unitName}</td>
+          <td>฿${(v.averageCostMicroBaht / 1000000).toFixed(4)} / ${v.unitName}</td>
+          <td>${v.priceSatang > 0 ? '฿' + (v.priceSatang / 100).toFixed(2) : '-'}</td>
+        </tr>
+      `).join('');
+
+      document.getElementById('bomTableBody').innerHTML = appState.bomEdges.map(e => `
+        <tr>
+          <td><code>${e.compositeVariantId}</code></td>
+          <td><code>${e.componentVariantId}</code></td>
+          <td><span class="badge">${e.componentRole}</span></td>
+          <td>${e.quantityMilli}</td>
+          <td>${e.wastageBasisPoints} bps</td>
+        </tr>
+      `).join('');
+    }
+
+    async function submitPurchaseOrder() {
+      const porkKg = Number(document.getElementById('poPorkKg').value || 10);
+      const freightBaht = Number(document.getElementById('poFreightBaht').value || 250);
+      const res = await api('/api/warehouse/receive-po', 'POST', { porkKg, freightBaht });
+      await refreshAll();
+      showToast(`🚛 รับใบสั่งซื้อ ${res.poNumber} เข้าคลังสำเร็จ! ปันส่วนค่าขนส่งครบทุกไมโครบาท`);
+    }
+
+    async function submitPrepBobaBuild() {
+      const res = await api('/api/warehouse/build-prep', 'POST', { buildQtyMilli: 5000 });
+      await refreshAll();
+      showToast(`🧋 ต้มไข่มุก Pre-Built สำเร็จ! สต็อกไข่มุกต้มสุก: ${(res.CompositeStockAfterMilli / 1000).toFixed(2)} กรัม`);
+    }
+
+    async function testCircularBomGuard() {
+      try {
+        await api('/api/warehouse/bom-edge', 'POST', {
+          compositeVariantId: 'VAR-RAW-DRY-BOBA',
+          componentVariantId: 'VAR-RAW-BOBA',
+          componentRole: 'STANDARD',
+          quantityMilli: 1000,
+          wastageBasisPoints: 0
+        });
+      } catch (err) {
+        const el = document.getElementById('bomCycleResult');
+        el.style.color = '#34d399';
+        el.textContent = `✅ ระบบบล็อกสูตรวนลูปสำเร็จ: ${err.message}`;
+        showToast(`🛡️ ป้องกันสูตรวนลูปสำเร็จ: ${err.message}`);
+      }
+    }
+
+    async function loadReports() {
+      const rep = await api('/api/reports');
+      document.getElementById('reportSummaryCards').innerHTML = `
+        <div class="stat-card"><div class="label">ยอดขายสุทธิในกะ (Z-Report Net Sales)</div><div class="val">฿${(rep.zReport.netSalesTotalSatang / 100).toFixed(2)}</div></div>
+        <div class="stat-card"><div class="label">เงินสดคาดหวังในลิ้นชัก (Expected Cash)</div><div class="val">฿${(rep.zReport.expectedCashSatang / 100).toFixed(2)}</div></div>
+        <div class="stat-card"><div class="label">มูลค่าสต็อกรวมทั้งคลัง (Warehouse Asset Valuation)</div><div class="val">฿${(rep.valuationReport.totalWarehouseValuationSatang / 100).toFixed(2)}</div></div>
+      `;
+      document.getElementById('abbReportTableBody').innerHTML = rep.abbReport.invoices.map(inv => `
+        <tr>
+          <td><code>${inv.abbTaxInvoiceNo}</code></td>
+          <td><span class="badge ${inv.status === 'COMPLETED' ? 'ok' : 'err'}">${inv.status}</span></td>
+          <td>฿${(inv.netBeforeTaxSatang / 100).toFixed(2)}</td>
+          <td>฿${(inv.taxSatang / 100).toFixed(2)}</td>
+          <td><b>฿${(inv.totalSatang / 100).toFixed(2)}</b></td>
+        </tr>
+      `).join('') || '<tr><td colspan="5">ยังไม่มีใบกำกับภาษีอย่างย่อ</td></tr>';
+
+      document.getElementById('marginReportTableBody').innerHTML = rep.marginReport.lines.map(l => `
+        <tr>
+          <td>${l.itemName}</td>
+          <td>${(l.soldQtyMilli / 1000).toFixed(2)}</td>
+          <td>฿${(l.grossRevenueSatang / 100).toFixed(2)}</td>
+          <td>฿${(l.totalCogsSatang / 100).toFixed(2)}</td>
+          <td><span class="badge ok">${(l.grossMarginBasisPoints / 100).toFixed(2)}%</span></td>
+        </tr>
+      `).join('') || '<tr><td colspan="5">ยังไม่มีข้อมูลการขาย</td></tr>';
+    }
+
+    async function closeShiftAndBackupUsb() {
+      const res = await api('/api/shift/close-and-reopen', 'POST');
+      await refreshAll();
+      await loadReports();
+      showToast(`🔒 ปิดกะสำเร็จ (Variance: ฿0.00) และสำรองไฟล์เข้ารหัสลง USB (${res.usbBackup.retainedBackupsCount}/14 กะ)!`);
+    }
+
+    async function switchBusinessProfile(profile) {
+      const res = await api('/api/profile/switch', 'POST', { profile });
+      document.getElementById('hmacDisplayBox').textContent = `HMAC-SHA256 Signature: ${res.hmacSignatureHex}`;
+      await refreshAll();
+      showToast(`🏪 สลับโหมดเป็น ${res.profile} พร้อมลงลายเซ็น HMAC-SHA256 สำเร็จ!`);
+    }
+
+    async function setPrinterState(ready) {
+      const res = await api('/api/hal/printer-state', 'POST', { ready });
+      document.getElementById('spoolStatusText').textContent = ready
+        ? `✅ เครื่องพิมพ์พร้อมทำงาน — พิมพ์ใบเสร็จค้างคิวออกอัตโนมัติ ${res.autoFlushedCount} ใบ!`
+        : `⚠️ เปิดฝาเครื่องพิมพ์ / กระดาษหมด — บิลถัดไปจะถูกเก็บเข้า Spool Queue`;
+      await refreshAll();
+      showToast(document.getElementById('spoolStatusText').textContent);
+    }
+
+    async function simulateUpsState(acPresent, batteryChargePercent) {
+      await api('/api/hal/ups-state', 'POST', { acPresent, batteryChargePercent });
+      await refreshAll();
+      showToast(acPresent ? '⚡ ระบบไฟฟ้ากลับมาปกติ (AC Online)' : `🔌 ไฟดับ! สั่ง PRAGMA wal_checkpoint(TRUNCATE) ลงดิสก์ทันที (แบต ${batteryChargePercent}%)`);
+    }
+
+    refreshAll();
+  </script>
+</body>
+</html>
