@@ -14,6 +14,15 @@ export type UpsProtectionState =
   | 'ON_BATTERY_CHECKPOINT_TRIGGERED'
   | 'LOW_POWER_READ_ONLY_LOCK';
 
+export interface UpsUiAlertBannerDto {
+  visible: boolean;
+  severity: 'NONE' | 'WARNING_ON_BATTERY' | 'CRITICAL_LOW_BATTERY_LOCK';
+  headlineThai: string;
+  batteryChargePercent: number;
+  estimatedRuntimeSeconds: number;
+  walCheckpointFlushed: boolean;
+}
+
 export interface UpsPowerMonitorCallbacks {
   onTriggerEmergencyWalCheckpoint: (event: UpsPowerStateEvent) => Promise<void> | void;
   onStateChanged?: (newState: UpsProtectionState, event: UpsPowerStateEvent) => void;
@@ -22,6 +31,8 @@ export interface UpsPowerMonitorCallbacks {
 export class UpsPowerHidMonitor {
   private currentState: UpsProtectionState = 'NORMAL_AC_ONLINE';
   private checkpointCount = 0;
+  private lastBatteryChargePercent = 100;
+  private lastEstimatedRuntimeSeconds = 3600;
   private readonly callbacks: UpsPowerMonitorCallbacks;
   private readonly lowBatteryThresholdPct: number;
 
@@ -42,6 +53,39 @@ export class UpsPowerHidMonitor {
     return this.currentState === 'LOW_POWER_READ_ONLY_LOCK';
   }
 
+  public getActiveUiAlertBanner(): UpsUiAlertBannerDto {
+    if (this.currentState === 'NORMAL_AC_ONLINE') {
+      return {
+        visible: false,
+        severity: 'NONE',
+        headlineThai: 'ระบบไฟฟ้าปกติ (AC Online)',
+        batteryChargePercent: this.lastBatteryChargePercent,
+        estimatedRuntimeSeconds: this.lastEstimatedRuntimeSeconds,
+        walCheckpointFlushed: false,
+      };
+    }
+
+    if (this.currentState === 'LOW_POWER_READ_ONLY_LOCK') {
+      return {
+        visible: true,
+        severity: 'CRITICAL_LOW_BATTERY_LOCK',
+        headlineThai: `วิกฤต: แบตเตอรี่ UPS เหลือ ${this.lastBatteryChargePercent}% — ล็อกการบันทึกข้อมูลชั่วคราว (Read-Only) เพื่อป้องกันฐานข้อมูลเสียหาย`,
+        batteryChargePercent: this.lastBatteryChargePercent,
+        estimatedRuntimeSeconds: this.lastEstimatedRuntimeSeconds,
+        walCheckpointFlushed: true,
+      };
+    }
+
+    return {
+      visible: true,
+      severity: 'WARNING_ON_BATTERY',
+      headlineThai: `แจ้งเตือนไฟดับ: กำลังใช้ไฟสำรองจาก UPS (${this.lastBatteryChargePercent}%) — บันทึก WAL Checkpoint ลงดิสก์เรียบร้อยแล้ว`,
+      batteryChargePercent: this.lastBatteryChargePercent,
+      estimatedRuntimeSeconds: this.lastEstimatedRuntimeSeconds,
+      walCheckpointFlushed: true,
+    };
+  }
+
   /**
    * Processes a USB-HID Power Device (`0x84`) report from the UPS.
    */
@@ -52,6 +96,8 @@ export class UpsPowerHidMonitor {
   }): Promise<UpsProtectionState> {
     const previousState = this.currentState;
     const triggeredWalCheckpoint = !report.acPresent;
+    this.lastBatteryChargePercent = report.batteryChargePercent;
+    this.lastEstimatedRuntimeSeconds = report.estimatedRuntimeSeconds;
 
     const event: UpsPowerStateEvent = {
       acPresent: report.acPresent,

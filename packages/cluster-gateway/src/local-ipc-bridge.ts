@@ -33,6 +33,12 @@ import type {
   ExecuteInventoryCountInput,
   InventoryCountResult,
   KitchenOrderTicketDto,
+  SchemaUpgradeInput,
+  SchemaUpgradeResult,
+  ShiftZReportDto,
+  AbbSalesTaxReportDto,
+  InventoryValuationReportDto,
+  MenuGrossMarginReportDto,
 } from '../../core-engine/src/runtime/sqlite-engine.ts';
 import type { LanClusterCoordinator } from './lan-cluster-coordinator.ts';
 
@@ -280,5 +286,33 @@ export class LocalIpcBridge {
   public getVerifiedBusinessProfileMode(): BusinessProfile {
     this.totalReadsRouted++;
     return this.engine.getVerifiedBusinessProfileMode();
+  }
+
+  public async executeFiveStepSchemaUpgrade(
+    input: SchemaUpgradeInput
+  ): Promise<SchemaUpgradeResult> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.executeFiveStepSchemaUpgrade(input);
+  }
+
+  public generateShiftZReport(shiftId: string): ShiftZReportDto {
+    this.totalReadsRouted++;
+    return this.engine.generateShiftZReport(shiftId);
+  }
+
+  public generateAbbSalesTaxReport(outletId = 'OUTLET-HQ'): AbbSalesTaxReportDto {
+    this.totalReadsRouted++;
+    return this.engine.generateAbbSalesTaxReport(outletId);
+  }
+
+  public generateInventoryValuationReport(outletId = 'OUTLET-HQ'): InventoryValuationReportDto {
+    this.totalReadsRouted++;
+    return this.engine.generateInventoryValuationReport(outletId);
+  }
+
+  public generateMenuGrossMarginAndCogsReport(outletId = 'OUTLET-HQ'): MenuGrossMarginReportDto {
+    this.totalReadsRouted++;
+    return this.engine.generateMenuGrossMarginAndCogsReport(outletId);
   }
 }

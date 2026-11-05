@@ -295,6 +295,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ทดสอบ **High-Concurrency Chaos & Soak Stress Test**: รันธุรกรรมพร้อมกันประกอบด้วยใบสั่งขาย POS 50 บิล, ยกเลิกบิลย้อนหลัง (`VOID_RETURN`) 10 บิล, รับสินค้าเข้าคลังพร้อมปันส่วนค่าขนส่ง (`PO_RECEIVE`) 10 ใบ, ต้มไข่มุกกึ่งสำเร็จรูป (`PRODUCTION_BUILD`) 10 รอบ, โอนย้ายสินค้าข้ามสาขา (`TRANSFER_OUT`/`TRANSFER_IN`), นับสต็อกจริง (`RE_COUNT`), คิวรีอ่านข้อมูลพร้อมกัน 120 ครั้งผ่าน Reader Pool (`query_only = ON`), จำลองไฟดับฉุกเฉิน UPS WAL Checkpoint, สำรองข้อมูลลง USB และปิดกะ Blind Drop โดยไม่เกิด `SQLITE_BUSY` แม้แต่ครั้งเดียว และรักษาสมการอนุรักษ์สต็อก (`verifyLedgerConservationInvariant`) รวมถึงสมการเงินสดในลิ้นชักถูกต้อง **100%**
 - **ผลการทดสอบครบทั้ง 4 เฟส (Node.js `24/24 Tests` + Rust `16/16 Tests`)**: ผ่านครบ **100% Pass**
 
+---
+
+### Phase 5: 5-Step FK-Safe Database Upgrade (`MIGRATE_SVC`), Auto USB Backup on Shift Close, UPS Alert Banner, Financial Reports (`REPORT_VIEW`) & EV Code-Signed `.msi` Release Pipeline (Weeks 14–16)
+
+#### Squad A: 5-Step FK-Safe Schema Upgrade (`MIGRATE_SVC`), Yanked USB `.part` Recovery & Financial Reports Engine (`packages/core-engine` — `WBS-15`)
+- **`src/runtime/sqlite-engine.ts` & `src/db/migrator.rs`**:
+  - **`executeFiveStepSchemaUpgrade` (`MIGRATE_SVC`)**:
+    - รันโปรโตคอลอัปเกรดโครงสร้างฐานข้อมูล 5 ขั้นตอน: (1) Quiesce คิวเขียน + `PRAGMA wal_checkpoint(TRUNCATE);` + สร้างไฟล์สำรองก่อนอัปเกรด (`rube_pre_migration_v{N}.db.bak`), (2) สั่ง `PRAGMA foreign_keys = OFF;` นอก Transaction, (3) รัน `BEGIN EXCLUSIVE TRANSACTION;` + DDL + ตรวจ `PRAGMA foreign_key_check;` + บันทึก `schema_migrations`, (4) เปิด `PRAGMA foreign_keys = ON;` คืนใน `finally`, และ (5) บันทึก `SCHEMA_MIGRATION_APPLIED` ลง `security_audit_logs`
+    - หากเกิดข้อผิดพลาดหรือ `foreign_key_check` ไม่ผ่าน ระบบจะสั่ง `ROLLBACK` อัตโนมัติ (`autoRolledBack = true`) พร้อมเปิด `PRAGMA foreign_keys = ON` คืน 100%
+  - **`exportEncryptedUsbBackupWithRingBuffer` (`BACKUP_SVC`)**:
+    - เพิ่มระบบกวาดล้างไฟล์ `.part` ที่ค้างจากการดึง USB Flash Drive ออกกลางคัน (`cleanedOrphanedPartFilesCount`) โดยไม่กระทบไฟล์สำรอง `.db.enc` ทั้ง 14 กะใน Ring Buffer
+  - **Financial & Accounting Reports Engine (`REPORT_SVC`)**:
+    - เพิ่ม `generateShiftZReport` (รายงานปิดกะ Z-Report), `generateAbbSalesTaxReport` (รายงานภาษีขายใบกำกับภาษีอย่างย่อ ABB), `generateInventoryValuationReport` (รายงานมูลค่าสต็อกคงเหลือคำนวณด้วย `roundDivBigInt`), และ `generateMenuGrossMarginAndCogsReport` (รายงานต้นทุนขาย COGS และกำไรขั้นต้นรายเมนูเป็น Basis Points)
+
+#### Squad B: UPS Power-Loss On-Screen Alert Banner (`packages/hal-drivers`)
+- **`src/ups/mod.ts` (`UpsPowerHidMonitor`)**:
+  - เพิ่ม `getActiveUiAlertBanner` สำหรับส่งสถานะแถบแจ้งเตือนภาษาไทยขึ้นหน้าจอ POS ทันทีเมื่อไฟดับ (`WARNING_ON_BATTERY` พร้อมยืนยันการสั่ง `PRAGMA wal_checkpoint(TRUNCATE);` หรือ `CRITICAL_LOW_BATTERY_LOCK` เมื่อแบตเตอรี่ต่ำกว่าเกณฑ์)
+
+#### Squad C: Financial Reports & Auto-Backup / Air-Gapped Upgrade View (`packages/ui-presentation`)
+- **`src/views/reports/FinancialAndBackupReportView.ts` (`FinancialAndBackupReportViewController`)**:
+  - รองรับการดึงรายงานทั้ง 4 ประเภท (`getShiftZReportView`, `getAbbSalesTaxReportView`, `getInventoryValuationReportView`, `getMenuCogsAndMarginReportView`)
+  - เพิ่ม `closeShiftWithAutoUsbBackup` ปิดกะแบบ Blind Drop พร้อมออกใบ Z-Report และสำรองฐานข้อมูลเข้ารหัสลง USB อัตโนมัติในคำสั่งเดียว
+  - เพิ่ม `applyAirGappedSchemaUpgrade` สำหรับอัปเกรดฐานข้อมูลแบบออฟไลน์
+
+#### Squad D: Air-Gapped `.msi` / `.exe` Release Packager & EV Code Signing (`packages/cluster-gateway`)
+- **`src/release-packager.ts` (`AirGappedReleasePackager`)**:
+  - สร้างและตรวจสอบแพ็กเกจติดตั้ง `RubeStockPOS_3.1.0_x64_AirGapped.msi` พร้อมลายเซ็นดิจิทัล **Hardware Token EV Code Signing (`Authenticode SHA-256` + `RFC 3161 Timestamp`)**, ตรวจสอบความครบถ้วนของ WebView2 Evergreen Offline Bootstrapper และ SQLCipher Bundled Runtime, และบล็อกไฟล์ `.msi` ที่ถูกแก้ไขดัดแปลงทันที
+- **`tests/e2e-integration/phase5-production-release-assembly.test.ts`**:
+  - ทดสอบประกอบร่างขั้นสุดท้ายครบทั้ง 4 สถานการณ์หลักของเฟสที่ 5 ผ่านครบ **100%**
+- **ผลการทดสอบครบสมบูรณ์ทุกเฟส (Phase 0–5: Node.js `28/28 Tests` + Rust `17/17 Tests`)**: ผ่านครบ **100% Pass**
+
+
 
 
 

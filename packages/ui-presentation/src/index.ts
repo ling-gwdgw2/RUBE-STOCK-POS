@@ -8,6 +8,8 @@ export * from './views/pos-terminal/ShiftDrawerView.ts';
 export * from './views/kds/KdsStationView.ts';
 export * from './views/inventory/TransferAndStocktakeView.ts';
 export * from './views/settings/SystemSecurityAndProfileView.ts';
+export * from './views/reports/FinancialAndBackupReportView.ts';
+
 
 
 

@@ -108,5 +108,56 @@ mod tests {
         let hash_lf = compute_migration_checksum_hex("CREATE TABLE a (id INT);\n");
         assert_eq!(hash_crlf, hash_lf);
     }
+
+    #[test]
+    fn test_five_step_migration_executes_and_rolls_back_on_fk_violation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE schema_migrations (
+                 version INTEGER PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 checksum TEXT NOT NULL,
+                 execution_ms INTEGER NOT NULL
+             );
+             CREATE TABLE parent_outlets (id TEXT PRIMARY KEY);
+             INSERT INTO parent_outlets (id) VALUES ('OUTLET-HQ');",
+        )
+        .unwrap();
+
+        // Valid v2 migration succeeds
+        let v2_sql = "
+            CREATE TABLE child_counters (
+                id TEXT PRIMARY KEY,
+                outlet_id TEXT NOT NULL REFERENCES parent_outlets(id)
+            );
+            INSERT INTO child_counters (id, outlet_id) VALUES ('CNT-01', 'OUTLET-HQ');
+        ";
+        let checksum = execute_fk_safe_migration(&conn, 2, "0002_add_counters.sql", v2_sql).unwrap();
+        assert_eq!(checksum.len(), 64);
+
+        // Broken v3 migration with an orphan FK reference must fail `PRAGMA foreign_key_check`
+        // and automatically roll back while re-enabling `PRAGMA foreign_keys = ON`!
+        let v3_bad_fk_sql = "
+            INSERT INTO child_counters (id, outlet_id) VALUES ('CNT-ORPHAN', 'NON-EXISTENT-OUTLET');
+        ";
+        let err = execute_fk_safe_migration(&conn, 3, "0003_bad_fk.sql", v3_bad_fk_sql)
+            .expect_err("Expected FK check failure");
+        assert!(err.contains("Foreign key check failed"));
+
+        let fk_on: i64 = conn
+            .query_row("PRAGMA foreign_keys;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk_on, 1);
+
+        let orphan_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM child_counters WHERE id = 'CNT-ORPHAN'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_count, 0);
+    }
 }
 

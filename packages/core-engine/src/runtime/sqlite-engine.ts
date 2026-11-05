@@ -304,6 +304,109 @@ export interface KitchenOrderTicketDto {
   }>;
 }
 
+export interface SchemaUpgradeInput {
+  version: number;
+  name: string;
+  sqlDdl: string;
+  snapshotDir?: string;
+}
+
+export interface SchemaUpgradeResult {
+  applied: boolean;
+  autoRolledBack: boolean;
+  version: number;
+  name: string;
+  checksum: string;
+  snapshotPath: string | null;
+  foreignKeysEnabledAfter: boolean;
+  errorMessage?: string;
+}
+
+export interface ShiftZReportDto {
+  shiftId: string;
+  shiftNumber: string;
+  outletId: string;
+  terminalId: string;
+  status: 'OPEN' | 'CLOSED';
+  openedAt: string;
+  closedAt: string | null;
+  openingCashSatang: Satang;
+  cashSalesSatang: Satang;
+  promptPayQrSalesSatang: Satang;
+  cardSalesSatang: Satang;
+  voucherSalesSatang: Satang;
+  paidInSatang: Satang;
+  paidOutSatang: Satang;
+  cashDropSatang: Satang;
+  voidedOrdersCount: number;
+  voidedTotalSatang: Satang;
+  completedOrdersCount: number;
+  grossSalesSatang: Satang;
+  discountTotalSatang: Satang;
+  netBeforeTaxSatang: Satang;
+  vatTotalSatang: Satang;
+  netSalesTotalSatang: Satang;
+  expectedCashSatang: Satang;
+  countedCashSatang: Satang | null;
+  cashVarianceSatang: Satang | null;
+}
+
+export interface AbbSalesTaxReportDto {
+  outletId: string;
+  activeInvoiceCount: number;
+  voidedInvoiceCount: number;
+  totalNetBeforeTaxSatang: Satang;
+  totalVatSatang: Satang;
+  totalGrossAmountSatang: Satang;
+  invoices: ReadonlyArray<{
+    salesOrderId: string;
+    abbTaxInvoiceNo: string;
+    receiptNumber: string;
+    orderType: string;
+    taxMode: string;
+    status: string;
+    subtotalSatang: Satang;
+    discountSatang: Satang;
+    netBeforeTaxSatang: Satang;
+    taxSatang: Satang;
+    totalSatang: Satang;
+    createdAt: string;
+  }>;
+}
+
+export interface InventoryValuationReportDto {
+  outletId: string;
+  totalWarehouseValuationSatang: Satang;
+  lines: ReadonlyArray<{
+    variantId: string;
+    sku: string;
+    itemName: string;
+    variantName: string;
+    unitName: string;
+    inStockMilli: MilliUnit;
+    averageCostMicroBaht: MicroBaht;
+    totalValuationSatang: Satang;
+  }>;
+}
+
+export interface MenuGrossMarginReportDto {
+  outletId: string;
+  totalRevenueSatang: Satang;
+  totalCogsSatang: Satang;
+  totalGrossProfitSatang: Satang;
+  lines: ReadonlyArray<{
+    variantId: string;
+    itemName: string;
+    variantName: string;
+    soldQtyMilli: MilliUnit;
+    grossRevenueSatang: Satang;
+    totalCogsMicroBaht: MicroBaht;
+    totalCogsSatang: Satang;
+    grossProfitSatang: Satang;
+    grossMarginBasisPoints: BasisPoints;
+  }>;
+}
+
 export class SqliteReadWritePoolEngine {
   private readonly dbPath: string;
   private readonly rawHexKey64: string;
@@ -2851,8 +2954,8 @@ export class SqliteReadWritePoolEngine {
   }
 
   /**
-   * Phase 3 (`BACKUP_SVC` — Section 8.3 Tier 2): Atomic USB Flash Drive Backup with `.part` + `fsyncSync`
-   * and 14-Shift Rotating Ring Buffer (using natural numeric sorting).
+   * Phase 3 & 5 (`BACKUP_SVC` — Section 8.3 Tier 2): Atomic USB Flash Drive Backup with `.part` + `fsyncSync`,
+   * Orphaned `.part` File Cleanup (recovering from yanked USB drives mid-write), and 14-Shift Rotating Ring Buffer.
    */
   public async exportEncryptedUsbBackupWithRingBuffer(
     usbBackupDir: string,
@@ -2861,8 +2964,17 @@ export class SqliteReadWritePoolEngine {
     writtenBackupPath: string;
     evictedOldestBackupPath: string | null;
     retainedBackupsCount: number;
+    cleanedOrphanedPartFilesCount: number;
   }> {
     mkdirSync(usbBackupDir, { recursive: true });
+
+    // Clean up any orphaned `.part` files left behind if a USB drive was yanked during a prior backup
+    const orphanedParts = readdirSync(usbBackupDir).filter((name) => name.endsWith('.part'));
+    let cleanedOrphanedPartFilesCount = 0;
+    for (const partName of orphanedParts) {
+      unlinkSync(join(usbBackupDir, partName));
+      cleanedOrphanedPartFilesCount++;
+    }
 
     // Flush WAL before taking snapshot
     this.writerConn.exec('PRAGMA wal_checkpoint(PASSIVE);');
@@ -2909,6 +3021,7 @@ export class SqliteReadWritePoolEngine {
       writtenBackupPath: finalPath,
       evictedOldestBackupPath,
       retainedBackupsCount,
+      cleanedOrphanedPartFilesCount,
     };
   }
 
@@ -3048,5 +3161,390 @@ export class SqliteReadWritePoolEngine {
       throw new Error(`Invalid stored business_profile value: ${val}`);
     }
     return val;
+  }
+
+  /**
+   * Phase 5 (`MIGRATE_SVC` — Section 8.2 & `WBS-15`): 5-Step Foreign-Key Safe Atomic Schema Upgrade
+   * with Pre-Upgrade Cold Snapshot and Automatic Rollback on DDL or `PRAGMA foreign_key_check` failure.
+   */
+  public async executeFiveStepSchemaUpgrade(
+    input: SchemaUpgradeInput
+  ): Promise<SchemaUpgradeResult> {
+    const normalizedSql = input.sqlDdl.replace(/\r\n/g, '\n');
+    const checksum = createHash('sha256').update(normalizedSql).digest('hex');
+    const transactionalDdl = normalizedSql.replace(/^\s*PRAGMA\s+[^;]+;\s*$/gim, '');
+    const startMs = Date.now();
+
+    const nextTask = this.writerQueue.then((): SchemaUpgradeResult => {
+      // Step 1: Quiesce & Cold Snapshot (`PRAGMA wal_checkpoint(TRUNCATE);`)
+      this.writerConn.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+
+      let snapshotPath: string | null = null;
+      if (input.snapshotDir) {
+        mkdirSync(input.snapshotDir, { recursive: true });
+        snapshotPath = join(
+          input.snapshotDir,
+          `rube_pre_migration_v${input.version}.db.bak`
+        );
+        const partPath = `${snapshotPath}.part`;
+        const dbBytes =
+          this.dbPath === ':memory:'
+            ? Buffer.from(`PRE_MIGRATION_V${input.version}:${Date.now()}`, 'utf8')
+            : readFileSync(this.dbPath);
+        const fd = openSync(partPath, 'w');
+        try {
+          writeSync(fd, dbBytes);
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+        renameSync(partPath, snapshotPath);
+      }
+
+      // Step 2: Disable Foreign Keys OUTSIDE transaction
+      this.writerConn.exec('PRAGMA foreign_keys = OFF;');
+
+      let applied = false;
+      let autoRolledBack = false;
+      let errorMessage: string | undefined;
+
+      try {
+        // Step 3: Execute Transactional DDL & Foreign Key Check
+        this.writerConn.exec('BEGIN EXCLUSIVE TRANSACTION;');
+        this.writerConn.exec(transactionalDdl);
+
+        const fkViolations = this.writerConn.prepare('PRAGMA foreign_key_check;').all();
+        if (fkViolations.length > 0) {
+          throw new Error(
+            `Foreign key check failed during schema upgrade v${input.version}: ${JSON.stringify(fkViolations)}`
+          );
+        }
+
+        const elapsedMs = Date.now() - startMs;
+        this.writerConn
+          .prepare(
+            `INSERT INTO schema_migrations (version, name, checksum, execution_ms)
+             VALUES (?, ?, ?, ?)`
+          )
+          .run(input.version, input.name, checksum, elapsedMs);
+
+        this.writerConn
+          .prepare(
+            `INSERT INTO security_audit_logs (
+               event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+             ) VALUES ('SCHEMA_MIGRATION_APPLIED', 'USR-OWNER-01', 'POS-TERM-01', ?, 'PREV_SCHEMA', ?)`
+          )
+          .run(input.name, `v${input.version}:${checksum.slice(0, 16)}`);
+
+        this.writerConn.exec('COMMIT;');
+        applied = true;
+      } catch (err) {
+        try {
+          this.writerConn.exec('ROLLBACK;');
+        } catch {
+          // ignore if already rolled back
+        }
+        autoRolledBack = true;
+        errorMessage = err instanceof Error ? err.message : String(err);
+      } finally {
+        // Step 4: Re-enable Foreign Keys unconditionally
+        this.writerConn.exec('PRAGMA foreign_keys = ON;');
+      }
+
+      const fkStatusRow = this.writerConn.prepare('PRAGMA foreign_keys;').get() as
+        | { foreign_keys?: number }
+        | undefined;
+      const foreignKeysEnabledAfter = Number(fkStatusRow?.foreign_keys ?? 0) === 1;
+
+      return {
+        applied,
+        autoRolledBack,
+        version: input.version,
+        name: input.name,
+        checksum,
+        snapshotPath,
+        foreignKeysEnabledAfter,
+        ...(errorMessage ? { errorMessage } : {}),
+      };
+    });
+
+    this.writerQueue = nextTask.catch(() => undefined);
+    return nextTask;
+  }
+
+  /**
+   * Phase 5 (`REPORT_SVC`): Generates the End-of-Shift Z-Report (`ShiftZReportDto`)
+   * reconciling cash/QR/card/voucher sales, drawer movements, voids, VAT, and blind drop variance.
+   */
+  public generateShiftZReport(shiftId: string): ShiftZReportDto {
+    return this.executeRead((db) => {
+      const shiftRow = db
+        .prepare(
+          `SELECT
+             id, shift_number, outlet_id, terminal_id, status,
+             opening_cash_satang, expected_cash_satang, counted_cash_satang,
+             cash_variance_satang, opened_at, closed_at
+           FROM pos_shifts
+           WHERE id = ?`
+        )
+        .get(shiftId) as Record<string, unknown> | undefined;
+
+      if (!shiftRow) {
+        throw new Error(`Shift not found: ${shiftId}`);
+      }
+
+      const orderSummary = db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END), 0) AS completedCount,
+             COALESCE(SUM(CASE WHEN status = 'VOIDED' THEN 1 ELSE 0 END), 0) AS voidedCount,
+             COALESCE(SUM(CASE WHEN status = 'VOIDED' THEN total_satang ELSE 0 END), 0) AS voidedTotalSatang,
+             COALESCE(SUM(CASE WHEN status = 'COMPLETED' THEN subtotal_satang ELSE 0 END), 0) AS grossSalesSatang,
+             COALESCE(SUM(CASE WHEN status = 'COMPLETED' THEN discount_satang ELSE 0 END), 0) AS discountTotalSatang,
+             COALESCE(SUM(CASE WHEN status = 'COMPLETED' THEN tax_satang ELSE 0 END), 0) AS vatTotalSatang,
+             COALESCE(SUM(CASE WHEN status = 'COMPLETED' THEN total_satang ELSE 0 END), 0) AS netSalesTotalSatang
+           FROM sales_orders
+           WHERE shift_id = ?`
+        )
+        .get(shiftId) as Record<string, unknown>;
+
+      const paymentSummary = db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(CASE WHEN pt.payment_method = 'CASH' AND so.status = 'COMPLETED' THEN so.total_satang ELSE 0 END), 0) AS cashSalesSatang,
+             COALESCE(SUM(CASE WHEN pt.payment_method = 'PROMPTPAY_QR' AND so.status = 'COMPLETED' THEN so.total_satang ELSE 0 END), 0) AS promptPayQrSalesSatang,
+             COALESCE(SUM(CASE WHEN pt.payment_method = 'CARD' AND so.status = 'COMPLETED' THEN so.total_satang ELSE 0 END), 0) AS cardSalesSatang,
+             COALESCE(SUM(CASE WHEN pt.payment_method = 'VOUCHER' AND so.status = 'COMPLETED' THEN so.total_satang ELSE 0 END), 0) AS voucherSalesSatang
+           FROM payment_transactions pt
+           JOIN sales_orders so ON so.id = pt.sales_order_id
+           WHERE so.shift_id = ?`
+        )
+        .get(shiftId) as Record<string, unknown>;
+
+      const drawerSummary = db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(CASE WHEN movement_type = 'PAID_IN' THEN amount_satang ELSE 0 END), 0) AS paidInSatang,
+             COALESCE(SUM(CASE WHEN movement_type = 'PAID_OUT' THEN amount_satang ELSE 0 END), 0) AS paidOutSatang,
+             COALESCE(SUM(CASE WHEN movement_type = 'CASH_DROP' THEN amount_satang ELSE 0 END), 0) AS cashDropSatang
+           FROM cash_drawer_movements
+           WHERE shift_id = ?`
+        )
+        .get(shiftId) as Record<string, unknown>;
+
+      const netSalesTotalSatang = Number(orderSummary.netSalesTotalSatang ?? 0);
+      const vatTotalSatang = Number(orderSummary.vatTotalSatang ?? 0);
+
+      return {
+        shiftId: String(shiftRow.id),
+        shiftNumber: String(shiftRow.shift_number),
+        outletId: String(shiftRow.outlet_id),
+        terminalId: String(shiftRow.terminal_id),
+        status: String(shiftRow.status) as 'OPEN' | 'CLOSED',
+        openedAt: String(shiftRow.opened_at),
+        closedAt: shiftRow.closed_at === null ? null : String(shiftRow.closed_at),
+        openingCashSatang: Number(shiftRow.opening_cash_satang),
+        cashSalesSatang: Number(paymentSummary.cashSalesSatang ?? 0),
+        promptPayQrSalesSatang: Number(paymentSummary.promptPayQrSalesSatang ?? 0),
+        cardSalesSatang: Number(paymentSummary.cardSalesSatang ?? 0),
+        voucherSalesSatang: Number(paymentSummary.voucherSalesSatang ?? 0),
+        paidInSatang: Number(drawerSummary.paidInSatang ?? 0),
+        paidOutSatang: Number(drawerSummary.paidOutSatang ?? 0),
+        cashDropSatang: Number(drawerSummary.cashDropSatang ?? 0),
+        voidedOrdersCount: Number(orderSummary.voidedCount ?? 0),
+        voidedTotalSatang: Number(orderSummary.voidedTotalSatang ?? 0),
+        completedOrdersCount: Number(orderSummary.completedCount ?? 0),
+        grossSalesSatang: Number(orderSummary.grossSalesSatang ?? 0),
+        discountTotalSatang: Number(orderSummary.discountTotalSatang ?? 0),
+        netBeforeTaxSatang: netSalesTotalSatang - vatTotalSatang,
+        vatTotalSatang,
+        netSalesTotalSatang,
+        expectedCashSatang: Number(shiftRow.expected_cash_satang),
+        countedCashSatang:
+          shiftRow.counted_cash_satang === null ? null : Number(shiftRow.counted_cash_satang),
+        cashVarianceSatang:
+          shiftRow.cash_variance_satang === null ? null : Number(shiftRow.cash_variance_satang),
+      };
+    });
+  }
+
+  /**
+   * Phase 5 (`REPORT_SVC`): Generates the Thai Simplified Tax Invoice (ABB) Sales Tax Report.
+   */
+  public generateAbbSalesTaxReport(outletId = 'OUTLET-HQ'): AbbSalesTaxReportDto {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT
+             id AS salesOrderId,
+             COALESCE(abb_tax_invoice_no, receipt_number) AS abbTaxInvoiceNo,
+             receipt_number AS receiptNumber,
+             order_type AS orderType,
+             tax_mode AS taxMode,
+             status,
+             subtotal_satang AS subtotalSatang,
+             discount_satang AS discountSatang,
+             tax_satang AS taxSatang,
+             total_satang AS totalSatang,
+             created_at AS createdAt
+           FROM sales_orders
+           WHERE outlet_id = ?
+           ORDER BY created_at ASC, id ASC`
+        )
+        .all(outletId) as Array<Record<string, unknown>>;
+
+      let activeInvoiceCount = 0;
+      let voidedInvoiceCount = 0;
+      let totalNetBeforeTaxSatang = 0;
+      let totalVatSatang = 0;
+      let totalGrossAmountSatang = 0;
+
+      const invoices = rows.map((r) => {
+        const status = String(r.status);
+        const subtotalSatang = Number(r.subtotalSatang);
+        const discountSatang = Number(r.discountSatang);
+        const taxSatang = Number(r.taxSatang);
+        const totalSatang = Number(r.totalSatang);
+        const netBeforeTaxSatang = totalSatang - taxSatang;
+
+        if (status === 'COMPLETED') {
+          activeInvoiceCount++;
+          totalNetBeforeTaxSatang += netBeforeTaxSatang;
+          totalVatSatang += taxSatang;
+          totalGrossAmountSatang += totalSatang;
+        } else if (status === 'VOIDED') {
+          voidedInvoiceCount++;
+        }
+
+        return {
+          salesOrderId: String(r.salesOrderId),
+          abbTaxInvoiceNo: String(r.abbTaxInvoiceNo),
+          receiptNumber: String(r.receiptNumber),
+          orderType: String(r.orderType),
+          taxMode: String(r.taxMode),
+          status,
+          subtotalSatang,
+          discountSatang,
+          netBeforeTaxSatang,
+          taxSatang,
+          totalSatang,
+          createdAt: String(r.createdAt),
+        };
+      });
+
+      return {
+        outletId,
+        activeInvoiceCount,
+        voidedInvoiceCount,
+        totalNetBeforeTaxSatang,
+        totalVatSatang,
+        totalGrossAmountSatang,
+        invoices,
+      };
+    });
+  }
+
+  /**
+   * Phase 5 (`REPORT_SVC`): Generates the Warehouse Inventory Valuation Report using `i128` (`BigInt`)
+   * intermediate math: `roundDivBigInt(inStockMilli * averageCostMicroBaht, 10_000_000n)`.
+   */
+  public generateInventoryValuationReport(outletId = 'OUTLET-HQ'): InventoryValuationReportDto {
+    const catalog = this.listInventoryCatalog(outletId);
+    let totalWarehouseValuationSatang = 0;
+
+    const lines = catalog.map((v) => {
+      const valuationSatang = Number(
+        roundDivBigInt(BigInt(v.inStockMilli) * BigInt(v.averageCostMicroBaht), 10_000_000n)
+      );
+      totalWarehouseValuationSatang += valuationSatang;
+
+      return {
+        variantId: v.id,
+        sku: v.sku,
+        itemName: v.itemName,
+        variantName: v.variantName,
+        unitName: v.unitName,
+        inStockMilli: v.inStockMilli,
+        averageCostMicroBaht: v.averageCostMicroBaht,
+        totalValuationSatang: valuationSatang,
+      };
+    });
+
+    return {
+      outletId,
+      totalWarehouseValuationSatang,
+      lines,
+    };
+  }
+
+  /**
+   * Phase 5 (`REPORT_SVC`): Generates the Menu / Item COGS & Gross Margin Report across completed orders.
+   */
+  public generateMenuGrossMarginAndCogsReport(outletId = 'OUTLET-HQ'): MenuGrossMarginReportDto {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT
+             v.id AS variantId,
+             i.name AS itemName,
+             v.variant_name AS variantName,
+             COALESCE(SUM(soi.quantity_milli), 0) AS soldQtyMilli,
+             COALESCE(SUM(soi.line_total_satang), 0) AS grossRevenueSatang,
+             COALESCE(SUM(soi.line_cogs_micro_baht), 0) AS totalCogsMicroBaht
+           FROM sales_order_items soi
+           JOIN sales_orders so ON so.id = soi.sales_order_id
+           JOIN item_variants v ON v.id = soi.variant_id
+           JOIN items i ON i.id = v.item_id
+           WHERE so.outlet_id = ? AND so.status = 'COMPLETED'
+           GROUP BY v.id, i.name, v.variant_name
+           ORDER BY grossRevenueSatang DESC, v.id ASC`
+        )
+        .all(outletId) as Array<Record<string, unknown>>;
+
+      let totalRevenueSatang = 0;
+      let totalCogsSatang = 0;
+      let totalGrossProfitSatang = 0;
+
+      const lines = rows.map((r) => {
+        const soldQtyMilli = Number(r.soldQtyMilli);
+        const grossRevenueSatang = Number(r.grossRevenueSatang);
+        const totalCogsMicroBaht = Number(r.totalCogsMicroBaht);
+        const lineCogsSatang = Number(roundDivBigInt(BigInt(totalCogsMicroBaht), 10_000n));
+        const grossProfitSatang = grossRevenueSatang - lineCogsSatang;
+        const grossMarginBasisPoints =
+          grossRevenueSatang > 0
+            ? Number(
+                roundDivBigInt(
+                  BigInt(grossProfitSatang) * SCALE_BASIS_POINTS,
+                  BigInt(grossRevenueSatang)
+                )
+              )
+            : 0;
+
+        totalRevenueSatang += grossRevenueSatang;
+        totalCogsSatang += lineCogsSatang;
+        totalGrossProfitSatang += grossProfitSatang;
+
+        return {
+          variantId: String(r.variantId),
+          itemName: String(r.itemName),
+          variantName: String(r.variantName),
+          soldQtyMilli,
+          grossRevenueSatang,
+          totalCogsMicroBaht,
+          totalCogsSatang: lineCogsSatang,
+          grossProfitSatang,
+          grossMarginBasisPoints,
+        };
+      });
+
+      return {
+        outletId,
+        totalRevenueSatang,
+        totalCogsSatang,
+        totalGrossProfitSatang,
+        lines,
+      };
+    });
   }
 }
