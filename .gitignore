@@ -1,0 +1,21 @@
+# Dependencies & Build Artifacts
+node_modules/
+target/
+dist/
+build/
+
+# Database & Keystore Runtime Files
+*.db
+*.db-wal
+*.db-shm
+*.db.enc
+*.db.enc.part
+*.recovery-kit
+keystore.manifest.json
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

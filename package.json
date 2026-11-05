@@ -1,0 +1,21 @@
+{
+  "name": "rube-stock-pos-monorepo",
+  "version": "3.1.0",
+  "type": "module",
+  "private": true,
+  "description": "RUBE-STOCK-POS v3.1 Unified Local-First Warehouse & POS System Monorepo",
+  "workspaces": [
+    "packages/shared-contracts",
+    "packages/hal-drivers",
+    "packages/ui-presentation"
+  ],
+  "scripts": {
+    "test": "node --test tests/property-invariants/accounting-invariants.test.ts tests/e2e-integration/phase0-assembly.test.ts",
+    "test:invariants": "node --test tests/property-invariants/accounting-invariants.test.ts",
+    "test:phase0": "node --test tests/e2e-integration/phase0-assembly.test.ts",
+    "verify:schema": "node scripts/verify-schema-checksum.mjs"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  }
+}

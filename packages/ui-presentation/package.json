@@ -1,0 +1,11 @@
+{
+  "name": "@rube-pos/ui-presentation",
+  "version": "3.1.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@rube-pos/shared-contracts": "workspace:*",
+    "@rube-pos/hal-drivers": "workspace:*"
+  }
+}
+

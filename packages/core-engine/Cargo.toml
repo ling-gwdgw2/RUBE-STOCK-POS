@@ -1,0 +1,19 @@
+[package]
+name = "rube-core-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rube-shared-contracts = { path = "../shared-contracts" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+hex.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+argon2.workspace = true
+aes-gcm.workspace = true
+
