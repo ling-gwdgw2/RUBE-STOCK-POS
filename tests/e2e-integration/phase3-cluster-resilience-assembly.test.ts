@@ -416,3 +416,4 @@ test('Phase 3 Assembly 4: 3-Tier Data Resilience — UPS Power-Loss WAL Checkpoi
     engine.close();
   }
 });
+

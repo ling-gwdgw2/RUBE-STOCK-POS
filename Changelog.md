@@ -267,6 +267,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ทดสอบบูรณาการเฟสที่ 3 ครบทั้ง 4 สถานการณ์หลัก ผ่านครบ **100%**
 - **ผลการทดสอบทั้งหมด (Node.js `21/21 Tests` + Rust `14/14 Tests`)**: ผ่านครบ **100% Pass**
 
+---
+
+### Phase 4: Dual-KEK Keystore Recovery Kit, Polymorphic Business Profile HMAC Guard & Chaos/Soak Testing (Weeks 13–16)
+
+#### Squad A: Dual-KEK External Keystore Envelope Manager & Protected `store_config` HMAC (`packages/core-engine` — `WBS-18` & `WBS-19`)
+- **`src/runtime/keystore-envelope.ts` (`KeystoreEnvelopeManager`)**:
+  - สร้างระบบจัดการไฟล์กุญแจภายนอก `keystore.manifest.json` แบบ Atomic (`.part` + `fsyncSync` + `renameSync`) เพื่อขจัดปัญหา Bootstrap Paradox ของฐานข้อมูลเข้ารหัส SQLCipher
+  - รองรับการห่อหุ้มกุญแจหลัก 256-bit (`rawHexKey64`) ด้วย AES-256-GCM 2 ช่องสัญญาณ (Dual-KEK Envelope Encryption):
+    1. **Slot 1 (`dpapiSlot`)**: ปลดล็อกอัตโนมัติในกะเช้าด้วย Machine DPAPI (`unlockWithMachineDpapi`)
+    2. **Slot 2 (`argon2RecoverySlot`)**: กู้คืนข้ามเครื่องเมื่อเมนบอร์ดพังหรือเมื่อรหัสผ่าน Windows ถูกรีเซ็ตด้วยรหัสกู้คืนของเจ้าของร้าน (`unlockWithRecoveryPassphraseAndResealDpapi`) พร้อมผนึก `dpapiSlot` ใหม่เข้ากับเครื่องทดแทนให้อัตโนมัติ
+- **`src/runtime/sqlite-engine.ts` & `src/db/keyring.rs`**:
+  - เพิ่ม `computeProtectedConfigHmacHex`, `setProtectedStoreConfig`, `getVerifiedProtectedStoreConfig`, `setBusinessProfileMode`, และ `getVerifiedBusinessProfileMode` (รวมถึง `compute_protected_config_hmac_hex` และ `verify_protected_config_hmac` ใน Rust)
+  - ป้องกันการแอบแก้ไขตาราง `store_config` (`business_profile`, `rd_pos_reg_no`, ฯลฯ) ผ่านโปรแกรมแก้ไข SQLite ภายนอกด้วยการตรวจสอบลายเซ็น `hmac_signature_hex` แบบ Constant-Time (`timingSafeEqual`) และบันทึกประวัติลงตารางนิรภัย `security_audit_logs`
+
+#### Squad C & D: Polymorphic Profile Switcher & Recovery Kit Wizard (`packages/ui-presentation` & `packages/cluster-gateway` — `WBS-18`)
+- **`packages/cluster-gateway/src/local-ipc-bridge.ts`**:
+  - เชื่อมต่อคำสั่ง IPC สำหรับ `setProtectedStoreConfig`, `getVerifiedProtectedStoreConfig`, `setBusinessProfileMode`, และ `getVerifiedBusinessProfileMode`
+- **`packages/ui-presentation/src/views/settings/SystemSecurityAndProfileView.ts` (`SystemSecurityAndProfileViewController`)**:
+  - รองรับการสลับโหมดธุรกิจ (`RETAIL` / `HOSPITALITY` / `HYBRID`) พร้อมอัปเดต `ProfileFeatureFlags` ทันทีหลังจากตรวจสอบลายเซ็น HMAC-SHA256
+  - รองรับหน้าจอตั้งค่าและกู้คืนกุญแจ `initializeKeystoreManifest`, `bootUnattendedWithDpapi`, และ `recoverAndResealKeystoreWithPassphrase`
+
+#### End-to-End Security, Chaos & High-Concurrency Soak Test Suite (`WBS-19` & `WBS-20`)
+- **`tests/e2e-integration/phase4-security-chaos-soak-assembly.test.ts`**:
+  - ทดสอบการเปิดเครื่องกะเช้าอัตโนมัติผ่าน DPAPI, การจำลองเมนบอร์ดพัง/เปลี่ยนเครื่องใหม่, การปลดล็อกด้วยรหัสกู้คืนของเจ้าของร้าน และการ Re-seal DPAPI อัตโนมัติบนเครื่องใหม่
+  - ทดสอบการสลับโหมด `RETAIL` -> `HOSPITALITY` -> `HYBRID` และการตรวจจับการปลอมแปลงข้อมูลใน `store_config` ด้วย HMAC-SHA256
+  - ทดสอบ **High-Concurrency Chaos & Soak Stress Test**: รันธุรกรรมพร้อมกันประกอบด้วยใบสั่งขาย POS 50 บิล, ยกเลิกบิลย้อนหลัง (`VOID_RETURN`) 10 บิล, รับสินค้าเข้าคลังพร้อมปันส่วนค่าขนส่ง (`PO_RECEIVE`) 10 ใบ, ต้มไข่มุกกึ่งสำเร็จรูป (`PRODUCTION_BUILD`) 10 รอบ, โอนย้ายสินค้าข้ามสาขา (`TRANSFER_OUT`/`TRANSFER_IN`), นับสต็อกจริง (`RE_COUNT`), คิวรีอ่านข้อมูลพร้อมกัน 120 ครั้งผ่าน Reader Pool (`query_only = ON`), จำลองไฟดับฉุกเฉิน UPS WAL Checkpoint, สำรองข้อมูลลง USB และปิดกะ Blind Drop โดยไม่เกิด `SQLITE_BUSY` แม้แต่ครั้งเดียว และรักษาสมการอนุรักษ์สต็อก (`verifyLedgerConservationInvariant`) รวมถึงสมการเงินสดในลิ้นชักถูกต้อง **100%**
+- **ผลการทดสอบครบทั้ง 4 เฟส (Node.js `24/24 Tests` + Rust `16/16 Tests`)**: ผ่านครบ **100% Pass**
+
+
 
 
 

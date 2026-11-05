@@ -16,7 +16,7 @@
  *    - Multi-Level BOM Recipe COGS Rollup & Deduction with Role-Based Modifiers (`ROLE_SCALE_BPS`)
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   closeSync,
   fsyncSync,
@@ -47,6 +47,7 @@ import {
   calculateOrderLineDeductions,
   validateBomDagAcyclic,
   type BomEdgeDto,
+  type BusinessProfile,
   type CheckoutOrderRequest,
   type ComponentRole,
   type ItemVariantDto,
@@ -305,6 +306,7 @@ export interface KitchenOrderTicketDto {
 
 export class SqliteReadWritePoolEngine {
   private readonly dbPath: string;
+  private readonly rawHexKey64: string;
   private readonly writerConn: DatabaseSync;
   private readonly readerConns: DatabaseSync[] = [];
   private nextReaderIndex = 0;
@@ -319,6 +321,7 @@ export class SqliteReadWritePoolEngine {
       throw new Error('SQLCipher Raw Hex Key must be exactly 64 hexadecimal characters');
     }
     this.dbPath = dbPath;
+    this.rawHexKey64 = rawHexKey64.toUpperCase();
 
     // 1. Open Dedicated Single-Writer Connection
     this.writerConn = new DatabaseSync(dbPath);
@@ -480,6 +483,12 @@ export class SqliteReadWritePoolEngine {
            ('USR-CASHIER-01', 'cashier1', 'แคชเชียร์กะเช้า', 'CASHIER', 'sha256:cashier_pin'),
            ('USR-WH-01', 'warehouse1', 'หัวหน้าคลังสินค้า', 'WAREHOUSE', 'sha256:wh_pin')`
       ).run();
+
+      const defaultProfileHmac = this.computeProtectedConfigHmacHex('business_profile', 'HYBRID');
+      db.prepare(
+        `INSERT OR IGNORE INTO store_config (key, value, is_protected, hmac_signature_hex, updated_by)
+         VALUES ('business_profile', 'HYBRID', 1, ?, 'USR-OWNER-01')`
+      ).run(defaultProfileHmac);
 
       db.prepare(
         `INSERT OR IGNORE INTO suppliers (id, code, name, tax_id, phone)
@@ -2901,5 +2910,143 @@ export class SqliteReadWritePoolEngine {
       evictedOldestBackupPath,
       retainedBackupsCount,
     };
+  }
+
+  /**
+   * Phase 4 (`SEC_SVC` — Section 7.2 & `WBS-18`): Computes an HMAC-SHA256 signature for protected
+   * `store_config` keys (`business_profile`, `tax_id`, `rd_pos_reg_no`, etc.) using the SQLCipher DEK.
+   */
+  public computeProtectedConfigHmacHex(key: string, value: string): string {
+    return createHmac('sha256', Buffer.from(this.rawHexKey64, 'utf8'))
+      .update(`RUBE-PROTECTED-CONFIG-V1:${key}:${value}`, 'utf8')
+      .digest('hex');
+  }
+
+  /**
+   * Phase 4 (`SEC_SVC` — `WBS-18`): Writes a protected configuration key-value pair into `store_config`
+   * with an HMAC-SHA256 tamper-detection signature and records an immutable row in `security_audit_logs`.
+   */
+  public async setProtectedStoreConfig(input: {
+    key: string;
+    value: string;
+    updatedByUserId: string;
+    terminalId?: string;
+  }): Promise<{ key: string; value: string; hmacSignatureHex: string; auditLogId: number }> {
+    const hmacSignatureHex = this.computeProtectedConfigHmacHex(input.key, input.value);
+
+    return this.executeWriteImmediate((db) => {
+      const existing = db
+        .prepare(`SELECT value FROM store_config WHERE key = ?`)
+        .get(input.key) as { value?: string } | undefined;
+
+      db.prepare(
+        `INSERT INTO store_config (key, value, is_protected, hmac_signature_hex, updated_by, updated_at)
+         VALUES (?, ?, 1, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET
+           value = excluded.value,
+           is_protected = 1,
+           hmac_signature_hex = excluded.hmac_signature_hex,
+           updated_by = excluded.updated_by,
+           updated_at = excluded.updated_at`
+      ).run(input.key, input.value, hmacSignatureHex, input.updatedByUserId);
+
+      const auditRes = db
+        .prepare(
+          `INSERT INTO security_audit_logs (
+             event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+           ) VALUES ('PROTECTED_STORE_CONFIG_UPDATED', ?, ?, ?, ?, ?)`
+        )
+        .run(
+          input.updatedByUserId,
+          input.terminalId ?? 'POS-TERM-01',
+          input.key,
+          existing?.value ?? 'NULL',
+          input.value
+        );
+
+      return {
+        key: input.key,
+        value: input.value,
+        hmacSignatureHex,
+        auditLogId: Number(auditRes.lastInsertRowid),
+      };
+    });
+  }
+
+  /**
+   * Phase 4 (`SEC_SVC` — `WBS-18`): Reads a protected configuration value from `store_config`
+   * and verifies its `hmac_signature_hex` in constant time. Throws if tampered via unauthorized SQL.
+   */
+  public getVerifiedProtectedStoreConfig(key: string): string | null {
+    return this.executeRead((db) => {
+      const row = db
+        .prepare(
+          `SELECT value, is_protected, hmac_signature_hex
+           FROM store_config
+           WHERE key = ?`
+        )
+        .get(key) as
+        | { value: string; is_protected: number; hmac_signature_hex: string | null }
+        | undefined;
+
+      if (!row) {
+        return null;
+      }
+
+      if (Number(row.is_protected) === 1) {
+        if (!row.hmac_signature_hex) {
+          throw new Error(
+            `Security Tamper Alert: Missing HMAC-SHA256 signature on protected store_config key '${key}'`
+          );
+        }
+        const expectedHmacHex = this.computeProtectedConfigHmacHex(key, row.value);
+        const actualBuf = Buffer.from(row.hmac_signature_hex, 'hex');
+        const expectedBuf = Buffer.from(expectedHmacHex, 'hex');
+        if (
+          actualBuf.length !== expectedBuf.length ||
+          !timingSafeEqual(actualBuf, expectedBuf)
+        ) {
+          throw new Error(
+            `Security Tamper Alert: HMAC signature mismatch on store_config key '${key}'`
+          );
+        }
+      }
+
+      return row.value;
+    });
+  }
+
+  /**
+   * Phase 4 (`WBS-18`): Switches the Polymorphic Business Profile (`RETAIL`, `HOSPITALITY`, `HYBRID`)
+   * with HMAC-SHA256 protection and audit logging.
+   */
+  public async setBusinessProfileMode(
+    profile: BusinessProfile,
+    updatedByUserId = 'USR-OWNER-01'
+  ): Promise<{ profile: BusinessProfile; hmacSignatureHex: string; auditLogId: number }> {
+    if (profile !== 'RETAIL' && profile !== 'HOSPITALITY' && profile !== 'HYBRID') {
+      throw new Error(`Invalid BusinessProfile mode: ${String(profile)}`);
+    }
+    const res = await this.setProtectedStoreConfig({
+      key: 'business_profile',
+      value: profile,
+      updatedByUserId,
+    });
+    return {
+      profile,
+      hmacSignatureHex: res.hmacSignatureHex,
+      auditLogId: res.auditLogId,
+    };
+  }
+
+  /**
+   * Phase 4 (`WBS-18`): Reads and cryptographically verifies the active Polymorphic Business Profile.
+   */
+  public getVerifiedBusinessProfileMode(): BusinessProfile {
+    const val = this.getVerifiedProtectedStoreConfig('business_profile') ?? 'HYBRID';
+    if (val !== 'RETAIL' && val !== 'HOSPITALITY' && val !== 'HYBRID') {
+      throw new Error(`Invalid stored business_profile value: ${val}`);
+    }
+    return val;
   }
 }

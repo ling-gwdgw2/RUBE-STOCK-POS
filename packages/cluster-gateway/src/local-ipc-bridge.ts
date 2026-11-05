@@ -7,6 +7,7 @@
 
 import type {
   BomEdgeDto,
+  BusinessProfile,
   CheckoutOrderRequest,
   ItemVariantDto,
   ModifierDto,
@@ -249,5 +250,35 @@ export class LocalIpcBridge {
   ) {
     this.totalWritesRouted++;
     return this.engine.exportEncryptedUsbBackupWithRingBuffer(usbBackupDir, shiftNumber);
+  }
+
+  public async setProtectedStoreConfig(input: {
+    key: string;
+    value: string;
+    updatedByUserId: string;
+    terminalId?: string;
+  }) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.setProtectedStoreConfig(input);
+  }
+
+  public getVerifiedProtectedStoreConfig(key: string): string | null {
+    this.totalReadsRouted++;
+    return this.engine.getVerifiedProtectedStoreConfig(key);
+  }
+
+  public async setBusinessProfileMode(
+    profile: BusinessProfile,
+    updatedByUserId = 'USR-OWNER-01'
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.setBusinessProfileMode(profile, updatedByUserId);
+  }
+
+  public getVerifiedBusinessProfileMode(): BusinessProfile {
+    this.totalReadsRouted++;
+    return this.engine.getVerifiedBusinessProfileMode();
   }
 }

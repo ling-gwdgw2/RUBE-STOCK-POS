@@ -358,3 +358,4 @@ export class LanClusterCoordinator {
     return this.roleState;
   }
 }
+

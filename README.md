@@ -2,8 +2,8 @@
 
 Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Hardened Blueprint)
 
-[![Phase 0, 1, 2 & 3 Tests](https://img.shields.io/badge/Node%20Tests-21%2F21%20Passing-brightgreen)](#automated-testing)
-[![Rust Workspace Tests](https://img.shields.io/badge/Cargo%20Tests-14%2F14%20Passing-brightgreen)](#automated-testing)
+[![Phase 0, 1, 2, 3 & 4 Tests](https://img.shields.io/badge/Node%20Tests-24%2F24%20Passing-brightgreen)](#automated-testing)
+[![Rust Workspace Tests](https://img.shields.io/badge/Cargo%20Tests-16%2F16%20Passing-brightgreen)](#automated-testing)
 [![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.0-blue)](#key-architectural-pillars)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Standalone%20%7C%20Local%20LAN-orange)](#overview)
 
@@ -80,14 +80,17 @@ npm run test:phase2
 # รันชุดทดสอบเฉพาะเฟสที่ 3 (LAN Cluster + KDS Sync + Multi-Outlet Transfer + UPS & 14-Shift USB Backup)
 npm run test:phase3
 
-# รันชุดทดสอบทั้งหมดของฝั่ง TypeScript / SQLite Runtime (Phase 0 + Phase 1 + Phase 2 + Phase 3 + Accounting Invariants)
+# รันชุดทดสอบเฉพาะเฟสที่ 4 (Dual-KEK Keystore Recovery + Polymorphic HMAC Guard + High-Concurrency Chaos Soak)
+npm run test:phase4
+
+# รันชุดทดสอบทั้งหมดของฝั่ง TypeScript / SQLite Runtime (Phase 0–4 + Accounting Invariants)
 npm test
 
-# รันชุดทดสอบและคอมไพล์ฝั่ง Rust Workspace ทั้ง 4 Crates (rusqlite + i128 math + Shift/VAT + mDNS/mTLS/KDS/Epoch Fencing)
+# รันชุดทดสอบและคอมไพล์ฝั่ง Rust Workspace ทั้ง 4 Crates (rusqlite + i128 math + Shift/VAT + Keyring HMAC + mDNS/mTLS/KDS/Epoch Fencing)
 cargo test
 ```
 
-ผลการทดสอบ: **Node.js `21/21 Tests` + Rust `14/14 Tests` ผ่านครบ 100%**
+ผลการทดสอบ: **Node.js `24/24 Tests` + Rust `16/16 Tests` ผ่านครบ 100%**
 
 ---
 

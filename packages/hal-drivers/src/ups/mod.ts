@@ -83,3 +83,4 @@ export class UpsPowerHidMonitor {
     return this.currentState;
   }
 }
+
