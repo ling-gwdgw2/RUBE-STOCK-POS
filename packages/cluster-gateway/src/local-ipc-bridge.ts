@@ -7,14 +7,24 @@
 
 import type {
   BomEdgeDto,
+  CheckoutOrderRequest,
   ItemVariantDto,
+  ModifierDto,
+  PosShiftDto,
 } from '../../shared-contracts/src/ipc-commands.ts';
 import type {
+  CashDrawerMovementRecord,
+  CheckoutOrderResult,
+  ClosePosShiftBlindDropInput,
   CreatePurchaseOrderInput,
+  OpenPosShiftInput,
   PoReceivePreviewLine,
   PoReceiveResult,
   ProductionBuildResult,
+  RecordCashDrawerMovementInput,
   SqliteReadWritePoolEngine,
+  VoidSalesOrderInput,
+  VoidSalesOrderResult,
 } from '../../core-engine/src/runtime/sqlite-engine.ts';
 
 export class LocalIpcBridge {
@@ -107,5 +117,49 @@ export class LocalIpcBridge {
   public verifyLedgerConservationInvariant(outletId = 'OUTLET-HQ') {
     this.totalReadsRouted++;
     return this.engine.verifyLedgerConservationInvariant(outletId);
+  }
+
+  public listModifiers(): ModifierDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listModifiers();
+  }
+
+  public async openPosShift(input: OpenPosShiftInput): Promise<PosShiftDto> {
+    this.totalWritesRouted++;
+    return this.engine.openPosShift(input);
+  }
+
+  public getActiveShift(outletId = 'OUTLET-HQ', terminalId = 'POS-TERM-01'): PosShiftDto | null {
+    this.totalReadsRouted++;
+    return this.engine.getActiveShift(outletId, terminalId);
+  }
+
+  public getShiftById(shiftId: string): PosShiftDto | null {
+    this.totalReadsRouted++;
+    return this.engine.getShiftById(shiftId);
+  }
+
+  public async recordCashDrawerMovement(
+    input: RecordCashDrawerMovementInput
+  ): Promise<CashDrawerMovementRecord> {
+    this.totalWritesRouted++;
+    return this.engine.recordCashDrawerMovement(input);
+  }
+
+  public async closePosShiftBlindDrop(
+    input: ClosePosShiftBlindDropInput
+  ): Promise<PosShiftDto> {
+    this.totalWritesRouted++;
+    return this.engine.closePosShiftBlindDrop(input);
+  }
+
+  public async checkoutSalesOrder(request: CheckoutOrderRequest): Promise<CheckoutOrderResult> {
+    this.totalWritesRouted++;
+    return this.engine.checkoutSalesOrder(request);
+  }
+
+  public async voidSalesOrder(input: VoidSalesOrderInput): Promise<VoidSalesOrderResult> {
+    this.totalWritesRouted++;
+    return this.engine.voidSalesOrder(input);
   }
 }

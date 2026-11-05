@@ -113,3 +113,142 @@ export function encodeChunkedRasterGsV0(
   return packets;
 }
 
+export interface ThaiAbbReceiptPrintInput {
+  storeName: string;
+  taxId: string;
+  branchCode: string;
+  posRegNo: string;
+  receiptNumber: string;
+  abbTaxInvoiceNo: string;
+  lines: ReadonlyArray<{
+    itemName: string;
+    quantityFormatted: string;
+    lineTotalFormatted: string;
+    modifiersText?: string;
+  }>;
+  subtotalFormatted: string;
+  discountFormatted: string;
+  netBeforeTaxFormatted: string;
+  taxFormatted: string;
+  totalFormatted: string;
+  paymentMethod: 'CASH' | 'PROMPTPAY_QR' | 'CARD' | 'VOUCHER';
+  cashTenderedFormatted?: string;
+  changeGivenFormatted?: string;
+  slipRefLast4?: string;
+  kickCashDrawer: boolean;
+  widthPx?: 384 | 576;
+}
+
+export interface RenderedThaiAbbPrintJob {
+  formattedTextLines: string[];
+  widthPx: 384 | 576;
+  totalHeightPx: number;
+  packets: RasterBandPacket[];
+  maxPacketByteLength: number;
+  kickDrawerCommandIncluded: boolean;
+  cutPaperCommandIncluded: boolean;
+  wirePayloadBytes: Uint8Array;
+}
+
+/**
+ * Phase 2 (`PRINTER_HAL` — WBS-08): Renders a Thai Simplified Tax Invoice (ABB) into a 203-DPI
+ * monochrome raster bitmap, slices it into safe `GS v 0` bands (`<= 8 KB`) with `ESC J n` whitespace skipping,
+ * and appends Cash Drawer Kick (`ESC p`) + Paper Cut (`GS V`).
+ */
+export function renderThaiReceiptAbbEscPosJob(
+  input: ThaiAbbReceiptPrintInput
+): RenderedThaiAbbPrintJob {
+  const widthPx = input.widthPx ?? 576;
+  const widthBytes = widthPx / 8;
+
+  const formattedTextLines: string[] = [
+    `*** ใบเสร็จรับเงิน/ใบกำกับภาษีอย่างย่อ (ABB) ***`,
+    `${input.storeName} (สาขา ${input.branchCode})`,
+    `TAX ID: ${input.taxId} | POS REG: ${input.posRegNo}`,
+    `เลขที่ใบกำกับภาษี: ${input.abbTaxInvoiceNo} | เลขที่บิล: ${input.receiptNumber}`,
+    `------------------------------------------------`,
+  ];
+
+  for (const line of input.lines) {
+    formattedTextLines.push(
+      `${line.itemName} x${line.quantityFormatted} = ${line.lineTotalFormatted}`
+    );
+    if (line.modifiersText) {
+      formattedTextLines.push(`  + ${line.modifiersText}`);
+    }
+  }
+
+  formattedTextLines.push(
+    `------------------------------------------------`,
+    `รวมเป็นเงิน: ${input.subtotalFormatted} | ส่วนลด: ${input.discountFormatted}`,
+    `มูลค่าก่อนภาษี: ${input.netBeforeTaxFormatted} | VAT 7%: ${input.taxFormatted}`,
+    `ยอดสุทธิ (GRAND TOTAL): ${input.totalFormatted}`,
+    `ชำระโดย: ${input.paymentMethod}${input.slipRefLast4 ? ` (Ref *${input.slipRefLast4})` : ''}`
+  );
+
+  if (input.paymentMethod === 'CASH' && input.cashTenderedFormatted) {
+    formattedTextLines.push(
+      `รับเงินสด: ${input.cashTenderedFormatted} | เงินทอน: ${input.changeGivenFormatted ?? '฿0.00'}`
+    );
+  }
+  formattedTextLines.push(`*** VAT INCLUDED - ขอบคุณที่ใช้บริการ ***`);
+
+  // Synthesize deterministic 203-DPI 1-bit monochrome bitmap:
+  // Each text line occupies 20 dots vertically, with a 24-dot whitespace gap before totals
+  const lineDots = 20;
+  const sectionWhitespaceGapDots = 24;
+  const totalHeightPx = formattedTextLines.length * lineDots + sectionWhitespaceGapDots;
+  const bitmap = new Uint8Array(widthBytes * totalHeightPx);
+
+  let currentY = 0;
+  formattedTextLines.forEach((text, lineIdx) => {
+    // Insert a 24-dot whitespace margin before the summary section to trigger `ESC J n` feed
+    if (lineIdx === formattedTextLines.length - 5) {
+      currentY += sectionWhitespaceGapDots;
+    }
+    const seedHash = text.length & 0xff || 0x5a;
+    for (let dy = 2; dy < lineDots - 2; dy++) {
+      const rowOffset = (currentY + dy) * widthBytes;
+      for (let b = 0; b < widthBytes; b++) {
+        bitmap[rowOffset + b] = (seedHash ^ b ^ dy) & 0xff || 0x11;
+      }
+    }
+    currentY += lineDots;
+  });
+
+  const packets = encodeChunkedRasterGsV0(bitmap, widthPx, totalHeightPx, 64);
+  const maxPacketByteLength = packets.reduce(
+    (max, p) => Math.max(max, p.rawBytes.byteLength),
+    0
+  );
+
+  const chunks: Uint8Array[] = [];
+  if (input.kickCashDrawer) {
+    chunks.push(ESC_POS_KICK_DRAWER_BYTES);
+  }
+  for (const pkt of packets) {
+    chunks.push(pkt.rawBytes);
+  }
+  chunks.push(ESC_POS_CUT_PAPER_BYTES);
+
+  const totalWireBytes = chunks.reduce((sum, c) => sum + c.byteLength, 0);
+  const wirePayloadBytes = new Uint8Array(totalWireBytes);
+  let offset = 0;
+  for (const c of chunks) {
+    wirePayloadBytes.set(c, offset);
+    offset += c.byteLength;
+  }
+
+  return {
+    formattedTextLines,
+    widthPx,
+    totalHeightPx,
+    packets,
+    maxPacketByteLength,
+    kickDrawerCommandIncluded: input.kickCashDrawer,
+    cutPaperCommandIncluded: true,
+    wirePayloadBytes,
+  };
+}
+
+

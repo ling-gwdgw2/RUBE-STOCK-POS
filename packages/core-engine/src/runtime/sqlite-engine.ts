@@ -23,10 +23,12 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   allocateLandedCostExact,
   computeNewMovingAverageCost,
+  computeVatSatang,
   type BasisPoints,
   type MicroBaht,
   type MilliUnit,
   type Satang,
+  type TaxMode,
   roundDivBigInt,
   SCALE_BASIS_POINTS,
   SCALE_MILLI,
@@ -35,9 +37,12 @@ import {
   calculateOrderLineDeductions,
   validateBomDagAcyclic,
   type BomEdgeDto,
+  type CheckoutOrderRequest,
   type ComponentRole,
   type ItemVariantDto,
   type ModifierDto,
+  type PosShiftDto,
+  type StockDeductionEntry,
 } from '../../../shared-contracts/src/ipc-commands.ts';
 import {
   SEED_BOM_EDGES,
@@ -98,6 +103,106 @@ export interface ProductionBuildResult {
     componentVariantId: string;
     consumedQtyMilli: MilliUnit;
     componentCostMicroBaht: MicroBaht;
+  }>;
+}
+
+export interface OpenPosShiftInput {
+  outletId: string;
+  terminalId: string;
+  openedByUserId: string;
+  shiftNumber: string;
+  openingCashSatang: Satang;
+  notes?: string;
+}
+
+export interface RecordCashDrawerMovementInput {
+  shiftId: string;
+  movementType: 'PAID_IN' | 'PAID_OUT' | 'CASH_DROP';
+  amountSatang: Satang;
+  reason: string;
+  performedByUserId: string;
+}
+
+export interface CashDrawerMovementRecord {
+  id: string;
+  shiftId: string;
+  movementType: 'OPENING_FLOAT' | 'PAID_IN' | 'PAID_OUT' | 'CASH_DROP';
+  amountSatang: Satang;
+  reason: string;
+  performedByUserId: string;
+  expectedCashAfterSatang: Satang;
+}
+
+export interface ClosePosShiftBlindDropInput {
+  shiftId: string;
+  closedByUserId: string;
+  countedCashSatang: Satang;
+  notes?: string;
+}
+
+export interface CheckoutOrderLineSummary {
+  salesOrderItemId: string;
+  variantId: string;
+  itemName: string;
+  quantityMilli: MilliUnit;
+  unitPriceSatang: Satang;
+  modifiersTotalSatang: Satang;
+  lineTotalSatang: Satang;
+  lineCogsMicroBaht: MicroBaht;
+  selectedModifiers: ReadonlyArray<{
+    modifierId: string;
+    name: string;
+    priceDeltaSatang: Satang;
+  }>;
+}
+
+export interface CheckoutOrderResult {
+  salesOrderId: string;
+  idempotencyKey: string;
+  replayedFromIdempotencyKey: boolean;
+  receiptNumber: string;
+  abbTaxInvoiceNo: string;
+  outletId: string;
+  terminalId: string;
+  shiftId: string;
+  cashierId: string;
+  orderType: CheckoutOrderRequest['orderType'];
+  taxMode: TaxMode;
+  subtotalSatang: Satang;
+  discountSatang: Satang;
+  netBeforeTaxSatang: Satang;
+  taxSatang: Satang;
+  totalSatang: Satang;
+  totalCogsMicroBaht: MicroBaht;
+  paymentMethod: CheckoutOrderRequest['paymentMethod'];
+  cashTenderedSatang: Satang | null;
+  changeGivenSatang: Satang | null;
+  senderBankCode: string | null;
+  slipTransRefLast4: string | null;
+  slipTransRefHash: string | null;
+  kitchenOrderSequenceId: number | null;
+  lines: CheckoutOrderLineSummary[];
+  stockDeductions: StockDeductionEntry[];
+  createdAt: string;
+}
+
+export interface VoidSalesOrderInput {
+  salesOrderId: string;
+  voidedByUserId: string;
+  voidReason: string;
+}
+
+export interface VoidSalesOrderResult {
+  salesOrderId: string;
+  receiptNumber: string;
+  abbTaxInvoiceNo: string;
+  refundedTotalSatang: Satang;
+  paymentMethod: string;
+  reversedLedgerEntries: ReadonlyArray<{
+    variantId: string;
+    restoredQtyMilli: MilliUnit;
+    historicalUnitCostMicroBaht: MicroBaht;
+    stockAfterMilli: MilliUnit;
   }>;
 }
 
@@ -1119,5 +1224,1002 @@ export class SqliteReadWritePoolEngine {
         rootVariant.priceSatang - Number(roundDivBigInt(BigInt(totalCogsMicroBaht), 10_000n)),
       deductions,
     };
+  }
+
+  /**
+   * Phase 2 (`SHIFT_SVC`): Opens a new Cashier Shift and records the initial `OPENING_FLOAT` cash movement.
+   */
+  public async openPosShift(input: OpenPosShiftInput): Promise<PosShiftDto> {
+    if (input.openingCashSatang < 0) {
+      throw new RangeError('openingCashSatang must be >= 0');
+    }
+
+    return this.executeWriteImmediate((db) => {
+      const existingOpen = db
+        .prepare(
+          `SELECT id FROM pos_shifts WHERE outlet_id = ? AND terminal_id = ? AND status = 'OPEN' LIMIT 1`
+        )
+        .get(input.outletId, input.terminalId) as { id?: string } | undefined;
+
+      if (existingOpen?.id) {
+        throw new Error(`Shift ${existingOpen.id} is already OPEN on terminal ${input.terminalId}`);
+      }
+
+      const shiftId = `SHIFT-${randomUUID()}`;
+      const openedAt = new Date().toISOString();
+
+      db.prepare(
+        `INSERT INTO pos_shifts (
+           id, shift_number, outlet_id, terminal_id, opened_by, status,
+           opening_cash_satang, expected_cash_satang, notes, opened_at
+         ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)`
+      ).run(
+        shiftId,
+        input.shiftNumber,
+        input.outletId,
+        input.terminalId,
+        input.openedByUserId,
+        input.openingCashSatang,
+        input.openingCashSatang,
+        input.notes ?? null,
+        openedAt
+      );
+
+      if (input.openingCashSatang > 0) {
+        db.prepare(
+          `INSERT INTO cash_drawer_movements (
+             id, shift_id, movement_type, amount_satang, reason, performed_by
+           ) VALUES (?, ?, 'OPENING_FLOAT', ?, 'เงินทอนตั้งต้นเปิดกะ', ?)`
+        ).run(`CDM-${randomUUID()}`, shiftId, input.openingCashSatang, input.openedByUserId);
+      }
+
+      return {
+        id: shiftId,
+        shiftNumber: input.shiftNumber,
+        outletId: input.outletId,
+        terminalId: input.terminalId,
+        openedBy: input.openedByUserId,
+        status: 'OPEN',
+        openingCashSatang: input.openingCashSatang,
+        expectedCashSatang: input.openingCashSatang,
+        countedCashSatang: null,
+        cashVarianceSatang: null,
+        openedAt,
+      };
+    });
+  }
+
+  /**
+   * Reads a shift by ID from the Reader Pool.
+   */
+  public getShiftById(shiftId: string): PosShiftDto | null {
+    return this.executeRead((db) => {
+      const row = db
+        .prepare(
+          `SELECT
+             id, shift_number AS shiftNumber, outlet_id AS outletId, terminal_id AS terminalId,
+             opened_by AS openedBy, status, opening_cash_satang AS openingCashSatang,
+             expected_cash_satang AS expectedCashSatang, counted_cash_satang AS countedCashSatang,
+             cash_variance_satang AS cashVarianceSatang, opened_at AS openedAt
+           FROM pos_shifts WHERE id = ?`
+        )
+        .get(shiftId) as Record<string, unknown> | undefined;
+
+      if (!row) return null;
+      return {
+        id: String(row.id),
+        shiftNumber: String(row.shiftNumber),
+        outletId: String(row.outletId),
+        terminalId: String(row.terminalId),
+        openedBy: String(row.openedBy),
+        status: String(row.status) as 'OPEN' | 'CLOSED',
+        openingCashSatang: Number(row.openingCashSatang),
+        expectedCashSatang: Number(row.expectedCashSatang),
+        countedCashSatang: row.countedCashSatang === null ? null : Number(row.countedCashSatang),
+        cashVarianceSatang: row.cashVarianceSatang === null ? null : Number(row.cashVarianceSatang),
+        openedAt: String(row.openedAt),
+      };
+    });
+  }
+
+  /**
+   * Reads the currently active (`OPEN`) shift for an outlet and terminal.
+   */
+  public getActiveShift(outletId = 'OUTLET-HQ', terminalId = 'POS-TERM-01'): PosShiftDto | null {
+    return this.executeRead((db) => {
+      const row = db
+        .prepare(
+          `SELECT id FROM pos_shifts
+           WHERE outlet_id = ? AND terminal_id = ? AND status = 'OPEN'
+           ORDER BY opened_at DESC LIMIT 1`
+        )
+        .get(outletId, terminalId) as { id?: string } | undefined;
+
+      if (!row?.id) return null;
+      return this.getShiftById(row.id);
+    });
+  }
+
+  /**
+   * Phase 2 (`SHIFT_SVC`): Records a `PAID_IN`, `PAID_OUT`, or `CASH_DROP` movement and updates `expected_cash_satang`.
+   */
+  public async recordCashDrawerMovement(
+    input: RecordCashDrawerMovementInput
+  ): Promise<CashDrawerMovementRecord> {
+    if (input.amountSatang <= 0) {
+      throw new RangeError('amountSatang must be > 0');
+    }
+
+    return this.executeWriteImmediate((db) => {
+      const shift = db
+        .prepare(`SELECT status, expected_cash_satang FROM pos_shifts WHERE id = ?`)
+        .get(input.shiftId) as { status: string; expected_cash_satang: number } | undefined;
+
+      if (!shift) {
+        throw new Error(`Shift not found: ${input.shiftId}`);
+      }
+      if (shift.status !== 'OPEN') {
+        throw new Error(`Cannot record drawer movement on a CLOSED shift (${input.shiftId})`);
+      }
+
+      const delta =
+        input.movementType === 'PAID_IN' ? input.amountSatang : -input.amountSatang;
+      const expectedCashAfterSatang = Number(shift.expected_cash_satang) + delta;
+      const movementId = `CDM-${randomUUID()}`;
+
+      db.prepare(
+        `INSERT INTO cash_drawer_movements (
+           id, shift_id, movement_type, amount_satang, reason, performed_by
+         ) VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(
+        movementId,
+        input.shiftId,
+        input.movementType,
+        input.amountSatang,
+        input.reason,
+        input.performedByUserId
+      );
+
+      db.prepare(`UPDATE pos_shifts SET expected_cash_satang = ? WHERE id = ?`).run(
+        expectedCashAfterSatang,
+        input.shiftId
+      );
+
+      return {
+        id: movementId,
+        shiftId: input.shiftId,
+        movementType: input.movementType,
+        amountSatang: input.amountSatang,
+        reason: input.reason,
+        performedByUserId: input.performedByUserId,
+        expectedCashAfterSatang,
+      };
+    });
+  }
+
+  /**
+   * Phase 2 (`SHIFT_SVC`): Closes a shift using Blind Drop reconciliation against the Cash Conservation Equation.
+   */
+  public async closePosShiftBlindDrop(input: ClosePosShiftBlindDropInput): Promise<PosShiftDto> {
+    if (input.countedCashSatang < 0) {
+      throw new RangeError('countedCashSatang must be >= 0');
+    }
+
+    await this.executeWriteImmediate((db) => {
+      const shift = db
+        .prepare(
+          `SELECT status, opening_cash_satang, expected_cash_satang
+           FROM pos_shifts WHERE id = ?`
+        )
+        .get(input.shiftId) as
+        | { status: string; opening_cash_satang: number; expected_cash_satang: number }
+        | undefined;
+
+      if (!shift) {
+        throw new Error(`Shift not found: ${input.shiftId}`);
+      }
+      if (shift.status !== 'OPEN') {
+        throw new Error(`Shift ${input.shiftId} is already CLOSED`);
+      }
+
+      // Re-verify expected cash directly from the ledger (Section 5.4.1 Cash Conservation Equation)
+      const cashSalesRow = db
+        .prepare(
+          `SELECT COALESCE(SUM(so.total_satang), 0) AS netCashSalesSatang
+           FROM sales_orders so
+           JOIN payment_transactions pt ON pt.sales_order_id = so.id
+           WHERE so.shift_id = ? AND so.status = 'COMPLETED' AND pt.payment_method = 'CASH'`
+        )
+        .get(input.shiftId) as { netCashSalesSatang: number };
+
+      const movementsRows = db
+        .prepare(
+          `SELECT movement_type, COALESCE(SUM(amount_satang), 0) AS sumSatang
+           FROM cash_drawer_movements
+           WHERE shift_id = ?
+           GROUP BY movement_type`
+        )
+        .all(input.shiftId) as Array<{ movement_type: string; sumSatang: number }>;
+
+      let paidInSatang = 0;
+      let paidOutSatang = 0;
+      let cashDropSatang = 0;
+      for (const m of movementsRows) {
+        if (m.movement_type === 'PAID_IN') paidInSatang += Number(m.sumSatang);
+        if (m.movement_type === 'PAID_OUT') paidOutSatang += Number(m.sumSatang);
+        if (m.movement_type === 'CASH_DROP') cashDropSatang += Number(m.sumSatang);
+      }
+
+      const computedExpectedCashSatang =
+        Number(shift.opening_cash_satang) +
+        Number(cashSalesRow.netCashSalesSatang) +
+        paidInSatang -
+        paidOutSatang -
+        cashDropSatang;
+
+      const cashVarianceSatang = input.countedCashSatang - computedExpectedCashSatang;
+
+      db.prepare(
+        `UPDATE pos_shifts
+         SET status = 'CLOSED',
+             closed_by = ?,
+             expected_cash_satang = ?,
+             counted_cash_satang = ?,
+             cash_variance_satang = ?,
+             notes = COALESCE(?, notes),
+             closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?`
+      ).run(
+        input.closedByUserId,
+        computedExpectedCashSatang,
+        input.countedCashSatang,
+        cashVarianceSatang,
+        input.notes ?? null,
+        input.shiftId
+      );
+    });
+
+    return this.getShiftById(input.shiftId)!;
+  }
+
+  /**
+   * Phase 2 (`CHECKOUT_SVC` — WBS-06): Atomic Idempotent POS Checkout inside `BEGIN IMMEDIATE TRANSACTION;`.
+   *
+   * - Idempotent on `request.idempotencyKey`
+   * - Enforces BOT Slip Mini-QR format & SHA-256 uniqueness across all historical `payment_transactions`
+   * - Generates Thai Revenue Department Simplified Tax Invoice (`abb_tax_invoice_no`)
+   * - Deducts Multi-Level BOM + Role-Based Modifiers and appends immutable `inventory_transactions`
+   * - Enqueues Kitchen Display System (`kitchen_orders` with `sequence_id`) for hospitality items
+   */
+  public async checkoutSalesOrder(request: CheckoutOrderRequest): Promise<CheckoutOrderResult> {
+    if (!request.idempotencyKey || request.idempotencyKey.trim() === '') {
+      throw new Error('idempotencyKey is required for checkoutSalesOrder');
+    }
+    if (request.lines.length === 0) {
+      throw new Error('checkoutSalesOrder requires at least 1 order line');
+    }
+
+    return this.executeWriteImmediate((db) => {
+      // 1. Check Idempotency-Key first
+      const existingOrder = db
+        .prepare(
+          `SELECT
+             so.id, so.idempotency_key, so.receipt_number, so.abb_tax_invoice_no,
+             so.outlet_id, so.terminal_id, so.shift_id, so.cashier_id,
+             so.order_type, so.tax_mode, so.subtotal_satang, so.discount_satang,
+             so.tax_satang, so.total_satang, so.total_cogs_micro_baht, so.created_at,
+             pt.payment_method, pt.cash_tendered_satang, pt.change_given_satang,
+             pt.sender_bank_code, pt.slip_trans_ref_last4, pt.slip_trans_ref_hash,
+             ko.sequence_id AS kitchen_seq_id
+           FROM sales_orders so
+           LEFT JOIN payment_transactions pt ON pt.sales_order_id = so.id
+           LEFT JOIN kitchen_orders ko ON ko.sales_order_id = so.id
+           WHERE so.idempotency_key = ?`
+        )
+        .get(request.idempotencyKey) as Record<string, unknown> | undefined;
+
+      if (existingOrder) {
+        const subtotalSatang = Number(existingOrder.subtotal_satang);
+        const discountSatang = Number(existingOrder.discount_satang);
+        const taxSatang = Number(existingOrder.tax_satang);
+        const totalSatang = Number(existingOrder.total_satang);
+        const taxMode = String(existingOrder.tax_mode) as TaxMode;
+        const afterDiscount = Math.max(0, subtotalSatang - discountSatang);
+        const netBeforeTaxSatang =
+          taxMode === 'INCLUSIVE' ? afterDiscount - taxSatang : afterDiscount;
+
+        return {
+          salesOrderId: String(existingOrder.id),
+          idempotencyKey: String(existingOrder.idempotency_key),
+          replayedFromIdempotencyKey: true,
+          receiptNumber: String(existingOrder.receipt_number),
+          abbTaxInvoiceNo: String(existingOrder.abb_tax_invoice_no),
+          outletId: String(existingOrder.outlet_id),
+          terminalId: String(existingOrder.terminal_id),
+          shiftId: String(existingOrder.shift_id),
+          cashierId: String(existingOrder.cashier_id),
+          orderType: String(existingOrder.order_type) as CheckoutOrderRequest['orderType'],
+          taxMode,
+          subtotalSatang,
+          discountSatang,
+          netBeforeTaxSatang,
+          taxSatang,
+          totalSatang,
+          totalCogsMicroBaht: Number(existingOrder.total_cogs_micro_baht),
+          paymentMethod: String(
+            existingOrder.payment_method
+          ) as CheckoutOrderRequest['paymentMethod'],
+          cashTenderedSatang:
+            existingOrder.cash_tendered_satang === null
+              ? null
+              : Number(existingOrder.cash_tendered_satang),
+          changeGivenSatang:
+            existingOrder.change_given_satang === null
+              ? null
+              : Number(existingOrder.change_given_satang),
+          senderBankCode:
+            existingOrder.sender_bank_code === null
+              ? null
+              : String(existingOrder.sender_bank_code),
+          slipTransRefLast4:
+            existingOrder.slip_trans_ref_last4 === null
+              ? null
+              : String(existingOrder.slip_trans_ref_last4),
+          slipTransRefHash:
+            existingOrder.slip_trans_ref_hash === null
+              ? null
+              : String(existingOrder.slip_trans_ref_hash),
+          kitchenOrderSequenceId:
+            existingOrder.kitchen_seq_id === null || existingOrder.kitchen_seq_id === undefined
+              ? null
+              : Number(existingOrder.kitchen_seq_id),
+          lines: [],
+          stockDeductions: [],
+          createdAt: String(existingOrder.created_at),
+        };
+      }
+
+      // 2. Verify Shift is OPEN
+      const shiftRow = db
+        .prepare(`SELECT status, expected_cash_satang FROM pos_shifts WHERE id = ?`)
+        .get(request.shiftId) as { status: string; expected_cash_satang: number } | undefined;
+
+      if (!shiftRow || shiftRow.status !== 'OPEN') {
+        throw new Error(`Active OPEN shift required for checkout (shiftId=${request.shiftId})`);
+      }
+
+      // 3. Load current Catalog, BOM edges, and Modifiers inside the transaction
+      const catalogRows = db
+        .prepare(
+          `SELECT
+             v.id, v.item_id AS itemId, i.name AS itemName, v.variant_name AS variantName,
+             v.sku, v.barcode, i.unit_name AS unitName, v.price_satang AS priceSatang,
+             COALESCE(il.average_cost_micro_baht, v.default_purchase_cost_micro_baht) AS averageCostMicroBaht,
+             COALESCE(il.in_stock_milli, 0) AS inStockMilli,
+             i.is_composite AS isComposite, i.use_production AS useProduction,
+             i.is_weighted_scale AS isWeightedScale,
+             COALESCE(c.kitchen_station, 'NONE') AS kitchenStation
+           FROM item_variants v
+           JOIN items i ON i.id = v.item_id
+           LEFT JOIN categories c ON c.id = i.category_id
+           LEFT JOIN inventory_levels il ON il.variant_id = v.id AND il.outlet_id = ?`
+        )
+        .all(request.outletId) as Array<Record<string, unknown>>;
+
+      const catalogMap = new Map<string, ItemVariantDto & { kitchenStation: string }>();
+      for (const r of catalogRows) {
+        catalogMap.set(String(r.id), {
+          id: String(r.id),
+          itemId: String(r.itemId),
+          itemName: String(r.itemName),
+          variantName: String(r.variantName),
+          sku: String(r.sku),
+          barcode: r.barcode === null ? null : String(r.barcode),
+          unitName: String(r.unitName),
+          priceSatang: Number(r.priceSatang),
+          averageCostMicroBaht: Number(r.averageCostMicroBaht),
+          inStockMilli: Number(r.inStockMilli),
+          isComposite: Number(r.isComposite) === 1,
+          useProduction: Number(r.useProduction) === 1,
+          isWeightedScale: Number(r.isWeightedScale) === 1,
+          kitchenStation: String(r.kitchenStation),
+        });
+      }
+
+      const bomEdges = (
+        db
+          .prepare(
+            `SELECT
+               composite_variant_id AS compositeVariantId,
+               component_variant_id AS componentVariantId,
+               component_role AS componentRole,
+               quantity_milli AS quantityMilli,
+               wastage_basis_points AS wastageBasisPoints
+             FROM item_components`
+          )
+          .all() as Array<Record<string, unknown>>
+      ).map((r) => ({
+        compositeVariantId: String(r.compositeVariantId),
+        componentVariantId: String(r.componentVariantId),
+        componentRole: String(r.componentRole) as ComponentRole,
+        quantityMilli: Number(r.quantityMilli),
+        wastageBasisPoints: Number(r.wastageBasisPoints),
+      }));
+
+      const modifierRows = (
+        db
+          .prepare(
+            `SELECT
+               id, modifier_group_id AS modifierGroupId, name,
+               price_delta_satang AS priceDeltaSatang, modifier_mode AS modifierMode,
+               component_variant_id AS componentVariantId, quantity_delta_milli AS quantityDeltaMilli,
+               target_component_role AS targetComponentRole, scale_basis_points AS scaleBasisPoints
+             FROM modifiers`
+          )
+          .all() as Array<Record<string, unknown>>
+      ).map((r) => ({
+        id: String(r.id),
+        modifierGroupId: String(r.modifierGroupId),
+        name: String(r.name),
+        priceDeltaSatang: Number(r.priceDeltaSatang),
+        modifierMode: String(r.modifierMode) as ModifierDto['modifierMode'],
+        componentVariantId: r.componentVariantId === null ? null : String(r.componentVariantId),
+        quantityDeltaMilli: Number(r.quantityDeltaMilli),
+        targetComponentRole:
+          r.targetComponentRole === null ? null : (String(r.targetComponentRole) as ComponentRole),
+        scaleBasisPoints: Number(r.scaleBasisPoints),
+      }));
+      const modifierMap = new Map(modifierRows.map((m) => [m.id, m]));
+
+      // 4. Calculate Line Totals, Modifiers, Stock Deductions, and COGS
+      let subtotalSatang = 0;
+      let totalCogsMicroBaht = 0;
+      const lineSummaries: CheckoutOrderLineSummary[] = [];
+      const allDeductions: StockDeductionEntry[] = [];
+      const lineModifierRecords: Array<{
+        salesOrderItemId: string;
+        modifier: ModifierDto;
+        deductedQtyMilli: MilliUnit;
+        modifierCogsMicroBaht: MicroBaht;
+      }> = [];
+
+      for (const reqLine of request.lines) {
+        const variant = catalogMap.get(reqLine.variantId);
+        if (!variant) {
+          throw new Error(`Variant not found in catalog: ${reqLine.variantId}`);
+        }
+        const selectedMods = reqLine.selectedModifierIds.map((mId) => {
+          const mod = modifierMap.get(mId);
+          if (!mod) throw new Error(`Modifier not found: ${mId}`);
+          return mod;
+        });
+
+        const baseLinePriceSatang = Number(
+          roundDivBigInt(
+            BigInt(reqLine.quantityMilli) * BigInt(reqLine.unitPriceSatang),
+            SCALE_MILLI
+          )
+        );
+        const singleUnitModPriceSatang = selectedMods.reduce(
+          (acc, m) => acc + m.priceDeltaSatang,
+          0
+        );
+        const modifiersTotalSatang = Number(
+          roundDivBigInt(
+            BigInt(reqLine.quantityMilli) * BigInt(singleUnitModPriceSatang),
+            SCALE_MILLI
+          )
+        );
+        const lineTotalSatang = baseLinePriceSatang + modifiersTotalSatang;
+        subtotalSatang += lineTotalSatang;
+
+        const lineDeductions = calculateOrderLineDeductions(
+          variant,
+          reqLine.quantityMilli,
+          selectedMods,
+          catalogMap,
+          bomEdges
+        );
+        const lineCogsMicroBaht = Math.max(
+          0,
+          lineDeductions.reduce((acc, d) => acc + d.lineCogsMicroBaht, 0)
+        );
+        totalCogsMicroBaht += lineCogsMicroBaht;
+        allDeductions.push(...lineDeductions);
+
+        const salesOrderItemId = `SOI-${randomUUID()}`;
+        for (const mod of selectedMods) {
+          let deductedQtyMilli = 0;
+          let modifierCogsMicroBaht = 0;
+          if (mod.modifierMode === 'FIXED_QTY_DELTA' && mod.componentVariantId) {
+            const modComp = catalogMap.get(mod.componentVariantId);
+            deductedQtyMilli = Number(
+              roundDivBigInt(
+                BigInt(reqLine.quantityMilli) * BigInt(mod.quantityDeltaMilli),
+                SCALE_MILLI
+              )
+            );
+            if (modComp) {
+              modifierCogsMicroBaht = Number(
+                roundDivBigInt(
+                  BigInt(deductedQtyMilli) * BigInt(modComp.averageCostMicroBaht),
+                  SCALE_MILLI
+                )
+              );
+            }
+          }
+          lineModifierRecords.push({
+            salesOrderItemId,
+            modifier: mod,
+            deductedQtyMilli,
+            modifierCogsMicroBaht,
+          });
+        }
+
+        lineSummaries.push({
+          salesOrderItemId,
+          variantId: variant.id,
+          itemName: variant.itemName,
+          quantityMilli: reqLine.quantityMilli,
+          unitPriceSatang: reqLine.unitPriceSatang,
+          modifiersTotalSatang,
+          lineTotalSatang,
+          lineCogsMicroBaht,
+          selectedModifiers: selectedMods.map((m) => ({
+            modifierId: m.id,
+            name: m.name,
+            priceDeltaSatang: m.priceDeltaSatang,
+          })),
+        });
+      }
+
+      const discountSatang = Math.max(0, request.discountSatang);
+      const afterDiscountSatang = Math.max(0, subtotalSatang - discountSatang);
+      const taxSatang = computeVatSatang(afterDiscountSatang, 700, request.taxMode);
+      const netBeforeTaxSatang =
+        request.taxMode === 'INCLUSIVE' ? afterDiscountSatang - taxSatang : afterDiscountSatang;
+      const totalSatang =
+        request.taxMode === 'EXCLUSIVE'
+          ? afterDiscountSatang + taxSatang
+          : afterDiscountSatang;
+
+      // 5. Validate Payment Method (Cash vs PromptPay QR with BOT Slip Mini-QR Anti-Fraud)
+      let cashTenderedSatang: Satang | null = null;
+      let changeGivenSatang: Satang | null = null;
+      let senderBankCode: string | null = null;
+      let slipTransRefLast4: string | null = null;
+      let slipTransRefHash: string | null = null;
+
+      if (request.paymentMethod === 'CASH') {
+        const tendered = request.cashTenderedSatang ?? totalSatang;
+        if (tendered < totalSatang) {
+          throw new Error(
+            `Insufficient cash tendered: tendered=${tendered}, total=${totalSatang}`
+          );
+        }
+        cashTenderedSatang = tendered;
+        changeGivenSatang = tendered - totalSatang;
+      } else if (request.paymentMethod === 'PROMPTPAY_QR' && request.slipTransRefRaw) {
+        const botMatch = /^00(\d{2})00060000010103(\d{3})02(\d{2})([A-Za-z0-9_-]+)$/.exec(
+          request.slipTransRefRaw.trim()
+        );
+        if (!botMatch) {
+          throw new Error('HTTP 422 Invalid BOT Slip Mini-QR format');
+        }
+        const outerTlvLen = Number(botMatch[1]!);
+        senderBankCode = botMatch[2]!;
+        const declaredLen = Number(botMatch[3]!);
+        const tailPayload = botMatch[4]!;
+        if (
+          declaredLen < 8 ||
+          declaredLen > 64 ||
+          tailPayload.length < declaredLen ||
+          outerTlvLen !== 21 + declaredLen
+        ) {
+          throw new Error('HTTP 422 Invalid BOT Slip Mini-QR TLV length');
+        }
+        const transRef = tailPayload.slice(0, declaredLen);
+        slipTransRefLast4 = transRef.slice(-4);
+        slipTransRefHash = createHash('sha256')
+          .update(`${senderBankCode}:${transRef}`)
+          .digest('hex');
+
+        const dupRow = db
+          .prepare(`SELECT id FROM payment_transactions WHERE slip_trans_ref_hash = ? LIMIT 1`)
+          .get(slipTransRefHash) as { id?: string } | undefined;
+
+        if (dupRow?.id) {
+          throw new Error(
+            `HTTP 409 Duplicate Slip TransRef detected (hash=${slipTransRefHash.slice(0, 12)}...)`
+          );
+        }
+      }
+
+      // 6. Generate sequential Receipt Number & Thai ABB Tax Invoice Number
+      const orderCountRow = db
+        .prepare(`SELECT COUNT(*) AS cnt FROM sales_orders WHERE outlet_id = ?`)
+        .get(request.outletId) as { cnt: number };
+      const nextSeq = Number(orderCountRow.cnt) + 1;
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const seqPadded = String(nextSeq).padStart(6, '0');
+      const receiptNumber = `RCP-${dateStr}-${seqPadded}`;
+      const abbTaxInvoiceNo = `ABB-${dateStr}-${seqPadded}`;
+      const salesOrderId = `SO-${randomUUID()}`;
+      const createdAt = new Date().toISOString();
+
+      // 7. Insert sales_orders, sales_order_items, sales_order_item_modifiers, payment_transactions
+      db.prepare(
+        `INSERT INTO sales_orders (
+           id, idempotency_key, receipt_number, abb_tax_invoice_no,
+           outlet_id, terminal_id, shift_id, cashier_id, order_type, status,
+           tax_mode, subtotal_satang, discount_satang, tax_satang, total_satang,
+           total_cogs_micro_baht, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        salesOrderId,
+        request.idempotencyKey,
+        receiptNumber,
+        abbTaxInvoiceNo,
+        request.outletId,
+        request.terminalId,
+        request.shiftId,
+        request.cashierId,
+        request.orderType,
+        request.taxMode,
+        subtotalSatang,
+        discountSatang,
+        taxSatang,
+        totalSatang,
+        totalCogsMicroBaht,
+        createdAt
+      );
+
+      const insertOrderItem = db.prepare(
+        `INSERT INTO sales_order_items (
+           id, sales_order_id, variant_id, quantity_milli, unit_price_satang,
+           modifiers_total_satang, discount_satang, line_total_satang, line_cogs_micro_baht
+         ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
+      );
+      for (const line of lineSummaries) {
+        insertOrderItem.run(
+          line.salesOrderItemId,
+          salesOrderId,
+          line.variantId,
+          line.quantityMilli,
+          line.unitPriceSatang,
+          line.modifiersTotalSatang,
+          line.lineTotalSatang,
+          line.lineCogsMicroBaht
+        );
+      }
+
+      const insertOrderMod = db.prepare(
+        `INSERT INTO sales_order_item_modifiers (
+           id, sales_order_item_id, modifier_id, modifier_name_snapshot,
+           price_delta_satang, component_variant_id, deducted_qty_milli, modifier_cogs_micro_baht
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      for (const rec of lineModifierRecords) {
+        insertOrderMod.run(
+          `SOIM-${randomUUID()}`,
+          rec.salesOrderItemId,
+          rec.modifier.id,
+          rec.modifier.name,
+          rec.modifier.priceDeltaSatang,
+          rec.modifier.componentVariantId,
+          rec.deductedQtyMilli,
+          rec.modifierCogsMicroBaht
+        );
+      }
+
+      db.prepare(
+        `INSERT INTO payment_transactions (
+           id, sales_order_id, payment_method, amount_satang,
+           cash_tendered_satang, change_given_satang,
+           sender_bank_code, slip_trans_ref_last4, slip_trans_ref_hash, verified_by_user_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        `PAY-${randomUUID()}`,
+        salesOrderId,
+        request.paymentMethod,
+        totalSatang,
+        cashTenderedSatang,
+        changeGivenSatang,
+        senderBankCode,
+        slipTransRefLast4,
+        slipTransRefHash,
+        request.cashierId
+      );
+
+      if (request.paymentMethod === 'CASH') {
+        db.prepare(
+          `UPDATE pos_shifts SET expected_cash_satang = expected_cash_satang + ? WHERE id = ?`
+        ).run(totalSatang, request.shiftId);
+      }
+
+      // 8. Deduct Stock in inventory_levels and record immutable inventory_transactions
+      const getLevel = db.prepare(
+        `SELECT in_stock_milli, average_cost_micro_baht
+         FROM inventory_levels WHERE outlet_id = ? AND variant_id = ?`
+      );
+      const upsertLevel = db.prepare(
+        `INSERT INTO inventory_levels (id, outlet_id, variant_id, in_stock_milli, average_cost_micro_baht)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(outlet_id, variant_id) DO UPDATE SET
+           in_stock_milli = excluded.in_stock_milli,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      );
+      const insertInvTx = db.prepare(
+        `INSERT INTO inventory_transactions (
+           id, outlet_id, variant_id, transaction_type, quantity_change_milli,
+           stock_before_milli, stock_after_milli, unit_cost_micro_baht,
+           reference_type, reference_id, performed_by
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SALES_ORDER', ?, ?)`
+      );
+
+      for (const ded of allDeductions) {
+        if (ded.quantityChangeMilli === 0) continue;
+        const lvl = getLevel.get(request.outletId, ded.variantId) as
+          | { in_stock_milli: number; average_cost_micro_baht: number }
+          | undefined;
+        const stockBefore = Number(lvl?.in_stock_milli ?? 0);
+        const currentMac = Number(lvl?.average_cost_micro_baht ?? ded.unitCostMicroBaht);
+        const stockAfter = stockBefore + ded.quantityChangeMilli;
+
+        upsertLevel.run(
+          `INV-${request.outletId}-${ded.variantId}`,
+          request.outletId,
+          ded.variantId,
+          stockAfter,
+          currentMac
+        );
+
+        insertInvTx.run(
+          `TX-${randomUUID()}`,
+          request.outletId,
+          ded.variantId,
+          ded.transactionType,
+          ded.quantityChangeMilli,
+          stockBefore,
+          stockAfter,
+          ded.unitCostMicroBaht,
+          salesOrderId,
+          request.cashierId
+        );
+      }
+
+      // 9. Enqueue Kitchen Order (KDS) if any item belongs to a kitchen station (e.g. BAR / PREP)
+      let kitchenOrderSequenceId: number | null = null;
+      const kitchenLines = lineSummaries.filter((l) => {
+        const v = catalogMap.get(l.variantId);
+        return v && v.kitchenStation !== 'NONE';
+      });
+
+      if (kitchenLines.length > 0) {
+        const koId = `KO-${randomUUID()}`;
+        const queueNumber = `Q-${String(nextSeq).padStart(3, '0')}`;
+        const koResult = db
+          .prepare(
+            `INSERT INTO kitchen_orders (id, sales_order_id, outlet_id, station, queue_number, status)
+             VALUES (?, ?, ?, 'BAR', ?, 'QUEUED')`
+          )
+          .run(koId, salesOrderId, request.outletId, queueNumber);
+
+        kitchenOrderSequenceId = Number(koResult.lastInsertRowid);
+
+        const insertKoItem = db.prepare(
+          `INSERT INTO kitchen_order_items (
+             id, kitchen_order_id, sales_order_item_id, item_summary_text,
+             modifiers_summary_text, quantity_milli, status
+           ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`
+        );
+        for (const kl of kitchenLines) {
+          const modText =
+            kl.selectedModifiers.length > 0
+              ? kl.selectedModifiers.map((m) => m.name).join(', ')
+              : null;
+          insertKoItem.run(
+            `KOI-${randomUUID()}`,
+            koId,
+            kl.salesOrderItemId,
+            kl.itemName,
+            modText,
+            kl.quantityMilli
+          );
+        }
+      }
+
+      return {
+        salesOrderId,
+        idempotencyKey: request.idempotencyKey,
+        replayedFromIdempotencyKey: false,
+        receiptNumber,
+        abbTaxInvoiceNo,
+        outletId: request.outletId,
+        terminalId: request.terminalId,
+        shiftId: request.shiftId,
+        cashierId: request.cashierId,
+        orderType: request.orderType,
+        taxMode: request.taxMode,
+        subtotalSatang,
+        discountSatang,
+        netBeforeTaxSatang,
+        taxSatang,
+        totalSatang,
+        totalCogsMicroBaht,
+        paymentMethod: request.paymentMethod,
+        cashTenderedSatang,
+        changeGivenSatang,
+        senderBankCode,
+        slipTransRefLast4,
+        slipTransRefHash,
+        kitchenOrderSequenceId,
+        lines: lineSummaries,
+        stockDeductions: allDeductions,
+        createdAt,
+      };
+    });
+  }
+
+  /**
+   * Phase 2 (`VOID_RETURN` — Section 5.3.1): Voids a completed sales order by reversing every
+   * historical `inventory_transactions` row with its exact historical `unit_cost_micro_baht`.
+   */
+  public async voidSalesOrder(input: VoidSalesOrderInput): Promise<VoidSalesOrderResult> {
+    return this.executeWriteImmediate((db) => {
+      const order = db
+        .prepare(
+          `SELECT
+             so.id, so.outlet_id, so.shift_id, so.receipt_number, so.abb_tax_invoice_no,
+             so.status, so.total_satang, pt.payment_method
+           FROM sales_orders so
+           LEFT JOIN payment_transactions pt ON pt.sales_order_id = so.id
+           WHERE so.id = ?`
+        )
+        .get(input.salesOrderId) as Record<string, unknown> | undefined;
+
+      if (!order) {
+        throw new Error(`Sales order not found: ${input.salesOrderId}`);
+      }
+      if (String(order.status) === 'VOIDED') {
+        throw new Error(`Sales order ${input.salesOrderId} is already VOIDED`);
+      }
+
+      const outletId = String(order.outlet_id);
+      const shiftId = String(order.shift_id);
+      const totalSatang = Number(order.total_satang);
+      const paymentMethod = String(order.payment_method ?? 'CASH');
+
+      // Query exact historical inventory_transactions for this sales order
+      const origTxRows = db
+        .prepare(
+          `SELECT variant_id, quantity_change_milli, unit_cost_micro_baht
+           FROM inventory_transactions
+           WHERE reference_type = 'SALES_ORDER' AND reference_id = ?
+           ORDER BY created_at ASC, id ASC`
+        )
+        .all(input.salesOrderId) as Array<{
+        variant_id: string;
+        quantity_change_milli: number;
+        unit_cost_micro_baht: number;
+      }>;
+
+      const getLevel = db.prepare(
+        `SELECT in_stock_milli, average_cost_micro_baht
+         FROM inventory_levels WHERE outlet_id = ? AND variant_id = ?`
+      );
+      const upsertLevel = db.prepare(
+        `INSERT INTO inventory_levels (id, outlet_id, variant_id, in_stock_milli, average_cost_micro_baht)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(outlet_id, variant_id) DO UPDATE SET
+           in_stock_milli = excluded.in_stock_milli,
+           average_cost_micro_baht = excluded.average_cost_micro_baht,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      );
+      const insertVoidTx = db.prepare(
+        `INSERT INTO inventory_transactions (
+           id, outlet_id, variant_id, transaction_type, quantity_change_milli,
+           stock_before_milli, stock_after_milli, unit_cost_micro_baht,
+           reference_type, reference_id, performed_by
+         ) VALUES (?, ?, ?, 'VOID_RETURN', ?, ?, ?, ?, 'VOID_SALES_ORDER', ?, ?)`
+      );
+
+      const reversedLedgerEntries: Array<{
+        variantId: string;
+        restoredQtyMilli: MilliUnit;
+        historicalUnitCostMicroBaht: MicroBaht;
+        stockAfterMilli: MilliUnit;
+      }> = [];
+
+      for (const orig of origTxRows) {
+        const restoredQtyMilli = -Number(orig.quantity_change_milli);
+        if (restoredQtyMilli === 0) continue;
+
+        const historicalUnitCostMicroBaht = Number(orig.unit_cost_micro_baht);
+        const lvl = getLevel.get(outletId, orig.variant_id) as
+          | { in_stock_milli: number; average_cost_micro_baht: number }
+          | undefined;
+
+        const stockBefore = Number(lvl?.in_stock_milli ?? 0);
+        const macBefore = Number(lvl?.average_cost_micro_baht ?? historicalUnitCostMicroBaht);
+        const stockAfter = stockBefore + restoredQtyMilli;
+        const macAfter =
+          restoredQtyMilli > 0
+            ? computeNewMovingAverageCost(
+                stockBefore,
+                macBefore,
+                restoredQtyMilli,
+                historicalUnitCostMicroBaht
+              )
+            : macBefore;
+
+        upsertLevel.run(
+          `INV-${outletId}-${orig.variant_id}`,
+          outletId,
+          orig.variant_id,
+          stockAfter,
+          macAfter
+        );
+
+        insertVoidTx.run(
+          `TX-${randomUUID()}`,
+          outletId,
+          orig.variant_id,
+          restoredQtyMilli,
+          stockBefore,
+          stockAfter,
+          historicalUnitCostMicroBaht,
+          input.salesOrderId,
+          input.voidedByUserId
+        );
+
+        reversedLedgerEntries.push({
+          variantId: orig.variant_id,
+          restoredQtyMilli,
+          historicalUnitCostMicroBaht,
+          stockAfterMilli: stockAfter,
+        });
+      }
+
+      // Mark sales_orders as VOIDED
+      db.prepare(
+        `UPDATE sales_orders
+         SET status = 'VOIDED',
+             voided_by = ?,
+             void_reason = ?,
+             voided_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?`
+      ).run(input.voidedByUserId, input.voidReason, input.salesOrderId);
+
+      // Cancel any associated kitchen_orders
+      db.prepare(
+        `UPDATE kitchen_orders
+         SET status = 'CANCELLED', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE sales_order_id = ?`
+      ).run(input.salesOrderId);
+
+      // If paid by CASH, decrement expected_cash_satang on the shift
+      if (paymentMethod === 'CASH') {
+        db.prepare(
+          `UPDATE pos_shifts SET expected_cash_satang = expected_cash_satang - ? WHERE id = ?`
+        ).run(totalSatang, shiftId);
+      }
+
+      // Append immutable row to security_audit_logs
+      db.prepare(
+        `INSERT INTO security_audit_logs (
+           event_type, actor_user_id, target_key, old_value_redacted, new_value_redacted
+         ) VALUES ('SALES_ORDER_VOIDED', ?, ?, 'COMPLETED', ?)`
+      ).run(input.voidedByUserId, input.salesOrderId, `VOIDED:${input.voidReason}`);
+
+      return {
+        salesOrderId: input.salesOrderId,
+        receiptNumber: String(order.receipt_number),
+        abbTaxInvoiceNo: String(order.abb_tax_invoice_no),
+        refundedTotalSatang: totalSatang,
+        paymentMethod,
+        reversedLedgerEntries,
+      };
+    });
   }
 }

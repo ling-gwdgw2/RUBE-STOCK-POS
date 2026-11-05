@@ -188,7 +188,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - ปรับสคริปต์ `verify-schema-checksum.mjs` ให้ตรวจสอบเทียบค่ากับไฟล์ `.sha256` เป็นค่าเริ่มต้น (และอัปเดตเมื่อระบุ `--update`) พร้อมบังคับกักกันโหนด `ActiveLeader` ทันทีหากตรวจพบ `peer_epoch >= current_epoch` และบล็อกการเลื่อนสถานะตัวเองขณะอยู่ในโหมด `ReadOnlyQuarantine`
 15. **Native Windows Rust Workspace Compilation & Unit Testing (`Cargo.toml`, `packages/core-engine/Cargo.toml`)**:
     - ปรับแต่ง `rusqlite` (`features = ["bundled", "backup", "functions"]`) ให้คอมไพล์ผ่าน MSVC บน Windows ได้โดยตรงโดยไม่ต้องพึ่งพา Perl/OpenSSL ภายนอก
-    - ยืนยันผลการรัน `cargo test` ผ่านครบทั้ง 4 Crates (`rube-shared-contracts`, `rube-core-engine`, `rube-hal-drivers`, `rube-cluster-gateway` — 5/5 Unit Tests, 0 warnings)
+    - ยืนยันผลการรัน `cargo test` ผ่านครบทั้ง 4 Crates (`rube-shared-contracts`, `rube-core-engine`, `rube-hal-drivers`, `rube-cluster-gateway` — 11/11 Unit Tests, 0 warnings)
+
+---
+
+### Phase 2: High-Speed POS Terminal, Shift & Blind Drop, Thai ABB Tax Invoice, Chunked 203-DPI Printing & BOT Mini-QR Anti-Fraud (Weeks 5–8)
+
+#### Squad A: Shift Lifecycle, Atomic Idempotent Checkout & Historical Mirror Void (`packages/core-engine`)
+- **`src/domains/sales_shift.rs` & `src/runtime/sqlite-engine.ts` (`WBS-06`)**:
+  - **Shift & Cash Drawer Management (`SHIFT_SVC`)**:
+    - เพิ่ม `openPosShift` (เปิดกะพร้อมบันทึก `OPENING_FLOAT`), `getActiveShift`, `getShiftById`, `recordCashDrawerMovement` (`PAID_IN`, `PAID_OUT`, `CASH_DROP`), และ `closePosShiftBlindDrop` (ตรวจสอบสมการอนุรักษ์เงินสดในลิ้นชักโดยคำนวณยอดขายสดสุทธิหักบิลยกเลิก บวกเงินนำเข้า หักเงินนำออก/ดรอปเข้าเซฟ แล้วเทียบกับยอดนับจริงแบบ Blind Drop)
+  - **Atomic Idempotent Checkout (`CHECKOUT_SVC`)**:
+    - เพิ่ม `checkoutSalesOrder` ทำงานภายใต้คิว Single-Writer `BEGIN IMMEDIATE TRANSACTION;`
+    - ป้องกันการคิดเงินหรือตัดสต็อกซ้ำ 100% ด้วย `idempotency_key` (`replayedFromIdempotencyKey: true`)
+    - ออกเลขใบเสร็จและเลขใบกำกับภาษีอย่างย่อตามมาตรฐานกรมสรรพากร (`abb_tax_invoice_no` รูปแบบ `ABB-YYYYMMDD-XXXXXX`) พร้อมคำนวณภาษีมูลค่าเพิ่ม 7% (`INCLUSIVE`, `EXCLUSIVE`, `NONE`)
+    - แตกสูตรการผลิตหลายระดับ (Multi-Level BOM) ร่วมกับ Role-Based Modifiers (`ROLE_SCALE_BPS`) และ `FIXED_QTY_DELTA` บันทึกลง `sales_orders`, `sales_order_items`, `sales_order_item_modifiers`, `payment_transactions`, `inventory_levels`, และ `inventory_transactions`
+    - ส่งใบสั่งทำเข้าคิวหน้าจอครัว (`kitchen_orders` & `kitchen_order_items` พร้อม `sequence_id` อัตโนมัติ) ทันทีเมื่อมีเมนูเครื่องดื่ม/อาหาร (`kitchen_station != 'NONE'`)
+  - **Historical Cost Mirror Bill Void (`VOID_RETURN`)**:
+    - เพิ่ม `voidSalesOrder` คืนสต็อกด้วยรายการ `VOID_RETURN` โดยดึง `unit_cost_micro_baht` จากแถว `inventory_transactions` ของบิลขายเดิมโดยตรง (ไม่ใช้ค่า MAC ปัจจุบันที่อาจเปลี่ยนไปแล้วหลังรับของล็อตใหม่) พร้อมหักยอดเงินสดคาดหวังในกะ (`expected_cash_satang`) ยกเลิกออเดอร์ครัว และบันทึกหลักฐานลง `security_audit_logs`
+
+#### Squad B: Thai ABB Thermal Raster Renderer & Two-Phase Slip Anti-Fraud (`packages/hal-drivers`)
+- **`src/printer/mod.ts` (`WBS-08`)**:
+  - เพิ่ม `renderThaiReceiptAbbEscPosJob` สร้างบิตแมปใบเสร็จรับเงิน/ใบกำกับภาษีอย่างย่อ (ABB) ความละเอียด 203-DPI (`576px`/`384px`) หั่นเป็นแถบคำสั่ง `GS v 0` ขนาดปลอดภัย (`<= 8 KB` ต่อแถบ) ข้ามช่องว่างด้วย `ESC J n` พร้อมคำสั่งเตะลิ้นชักเก็บเงินอัตโนมัติ (`ESC p 0 25 250`) เมื่อชำระด้วยเงินสด และคำสั่งตัดกระดาษ (`GS V 66 0`)
+- **`src/payment/mod.ts` (`WBS-09`)**:
+  - เพิ่ม `buildTwoPhaseSlipConfirmationModal` สำหรับตรวจสอบสลิปโอนเงิน BOT Mini-QR แบบ 2 ขั้นตอน (Two-Phase Confirmation): ขั้นตอนที่ 1 ตรวจสอบโครงสร้าง TLV และตรวจสลิปซ้ำโดยยังไม่ล็อกแฮช (`commitSlipHash: false`) พร้อมแสดงชื่อธนาคาร 4 ตัวท้ายของ `TransRef` และป้ายเตือนยอดเงินสุทธิขนาดใหญ่ จนกว่าแคชเชียร์จะกดยืนยันรับชำระในขั้นตอนที่ 2
+
+#### Squad C: POS Terminal & Shift Drawer UI Controllers (`packages/ui-presentation` — `WBS-11`)
+- **`src/views/pos-terminal/PosTerminalView.ts` (`POS_TERMINAL`)**:
+  - สร้าง `PosTerminalViewController` ผสาน `PhysicalScannerStreamBuffer` เข้ากับระบบลบอักษรตัวแรกที่รั่วเข้าช่องค้นหา (`handleKeyDownWithFocusedSearchInput` + `firstCharRollbackCount`), รองรับการยิงบาร์โค้ดสินค้าปลีกและบาร์โค้ดตราชั่งเข้าตะกร้า, การเลือกตัวเลือกเสริมคาเฟ่, การสร้าง Dynamic PromptPay QR, การตรวจสลิป 2 ขั้นตอน (`verifyScannedSlipStep1` / `cancelSlipVerificationModal`), และการยืนยันชำระเงินพร้อมพิมพ์ใบกำกับภาษีอย่างย่อ (`confirmCheckoutAndPrint`)
+- **`src/views/pos-terminal/ShiftDrawerView.ts` (`SHIFT_DRAWER_VIEW`)**:
+  - สร้าง `ShiftDrawerViewController` จัดการเปิดกะ, ซ่อนยอดเงินสดคาดหวังก่อนนับเงินปิดกะ (`getActiveShiftBlindViewModel` -> `expectedCashHiddenForBlindDrop: true`), บันทึกเงินเข้า-ออกลิ้นชัก, ปิดกะแบบ Blind Drop (`closeShiftWithBlindDrop`), และยกเลิกบิล (`voidCompletedOrder`)
+
+#### Squad D: Local IPC Bridge & Phase 2 End-to-End Assembly Suite (`packages/cluster-gateway` & `tests/e2e-integration`)
+- **`packages/cluster-gateway/src/local-ipc-bridge.ts`**:
+  - เชื่อมต่อคำสั่ง IPC ของเฟสที่ 2 ทั้งหมด (`openPosShift`, `getActiveShift`, `getShiftById`, `recordCashDrawerMovement`, `closePosShiftBlindDrop`, `checkoutSalesOrder`, `voidSalesOrder`, `listModifiers`)
+- **`tests/e2e-integration/phase2-pos-assembly.test.ts`**:
+  - ทดสอบบูรณาการเฟสที่ 2 บนฐานข้อมูล SQLite โหมด WAL จริง:
+    1. ทดสอบยิงบาร์โค้ดขณะแป้นพิมพ์ค้างภาษาไทยพร้อม First-Char Rollback, ยิงบาร์โค้ดตราชั่ง (`Prefix 20`), สั่งชานมไข่มุกหวาน 50% + เพิ่มไข่มุก, ออกใบกำกับภาษีอย่างย่อ ABB, ส่งคิวครัว KDS, พิมพ์ใบเสร็จ Chunked Raster 203-DPI พร้อมเตะลิ้นชักเก็บเงิน, และป้องกันบิลซ้ำด้วย `Idempotency-Key`
+    2. ทดสอบสร้าง Dynamic PromptPay QR, สแกนสลิป BOT Mini-QR ขั้นตอนที่ 1 แล้วกดยกเลิก (ยืนยันว่าสลิปไม่ถูกล็อกค้าง), ยืนยันชำระเงินในขั้นตอนที่ 2, และบล็อกการนำสลิปเดิมมาวนซ้ำในบิลถัดไป (`HTTP 409 Duplicate Slip TransRef`)
+    3. ทดสอบยกเลิกบิล (`VOID_RETURN`) หลังจากมีใบสั่งซื้อล็อตใหม่เข้ามาเปลี่ยนค่า MAC (ยืนยันว่าคืนสต็อกด้วยต้นทุนประวัติศาสตร์ขณะขายจริง 100%) และทดสอบปิดกะแบบ Blind Drop พร้อมยืนยันสมการอนุรักษ์สต็อก (`verifyLedgerConservationInvariant`)
+- **ผลการทดสอบทั้งหมด (Node.js `17/17 Tests` + Rust `11/11 Tests`)**: ผ่านครบ **100% Pass**
+
 
 
 

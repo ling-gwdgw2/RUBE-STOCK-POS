@@ -194,3 +194,50 @@ export function verifyOfflineBotSlipMiniQr(
       : {}),
   };
 }
+
+export interface TwoPhaseSlipConfirmationModalModel {
+  canProceedToStep2Confirm: boolean;
+  verification: BotSlipVerificationResult;
+  expectedAmountSatang: Satang;
+  expectedAmountFormatted: string;
+  senderBankCode: string;
+  senderBankNameThai: string;
+  transRefLast4: string;
+  antiFraudWarningBannerThai: string;
+}
+
+/**
+ * Phase 2 (`PAYMENT_HAL` — WBS-09): Step 1 of Two-Phase Slip Confirmation.
+ * Verifies the BOT Mini-QR structure and checks for duplicate hash WITHOUT committing the hash yet,
+ * returning the mandatory visual confirmation modal model so the cashier can verify the bank & exact amount
+ * before pressing "Confirm Payment" (Step 2).
+ */
+export function buildTwoPhaseSlipConfirmationModal(
+  miniQrRaw: string,
+  expectedAmountSatang: Satang,
+  usedSlipHashes: Set<string>
+): TwoPhaseSlipConfirmationModalModel {
+  const verification = verifyOfflineBotSlipMiniQr(
+    miniQrRaw,
+    expectedAmountSatang,
+    usedSlipHashes,
+    { commitSlipHash: false }
+  );
+
+  const whole = Math.floor(expectedAmountSatang / 100);
+  const frac = String(expectedAmountSatang % 100).padStart(2, '0');
+  const expectedAmountFormatted = `฿${whole.toLocaleString('en-US')}.${frac}`;
+
+  return {
+    canProceedToStep2Confirm: verification.validFormat && !verification.isDuplicate,
+    verification,
+    expectedAmountSatang,
+    expectedAmountFormatted,
+    senderBankCode: verification.senderBankCode,
+    senderBankNameThai: verification.senderBankNameThai,
+    transRefLast4: verification.transRefLast4,
+    antiFraudWarningBannerThai:
+      'โปรดตรวจสอบยอดเงินบนสลิป/แจ้งเตือนเงินเข้าให้ตรงกับยอดสุทธิขนาดใหญ่ด้านบน (ป้องกันสลิปโอน 1 บาทตัดต่อตัวเลข)',
+  };
+}
+
