@@ -251,4 +251,111 @@ export function renderThaiReceiptAbbEscPosJob(
   };
 }
 
+export interface SpooledPrintJobRecord {
+  readonly jobId: string;
+  readonly salesOrderId: string;
+  readonly receiptNumber: string;
+  readonly renderedJob: RenderedThaiAbbPrintJob;
+  readonly enqueuedAt: string;
+}
+
+export interface SubmitPrintJobResult {
+  readonly status: 'PRINTED_IMMEDIATELY' | 'QUEUED_PAPER_OUT_OR_COVER_OPEN';
+  readonly jobId: string;
+  readonly salesOrderId: string;
+  readonly receiptNumber: string;
+  readonly uiAlertThai: string | null;
+  readonly pendingQueueLength: number;
+}
+
+/**
+ * Section 6.2 Item 3 (`QUEUE_MGR` / Spool Queue Resilience):
+ * Buffers rendered ESC/POS raster print jobs when the thermal printer cover is open or out of paper,
+ * alerts the cashier on screen without rolling back or blocking the committed POS order, and
+ * automatically flushes queued receipts when the cover is closed — never re-deducting inventory.
+ */
+export class ThermalPrinterSpoolerQueue {
+  private printerReady = true;
+  private readonly pendingQueue: SpooledPrintJobRecord[] = [];
+  private readonly completedPrintHistory: SpooledPrintJobRecord[] = [];
+
+  public isPrinterReady(): boolean {
+    return this.printerReady;
+  }
+
+  public getPendingQueueLength(): number {
+    return this.pendingQueue.length;
+  }
+
+  public getCompletedPrintHistory(): readonly SpooledPrintJobRecord[] {
+    return this.completedPrintHistory;
+  }
+
+  /**
+   * Submits a rendered receipt job to the thermal printer or spools it if cover is open / paper out.
+   */
+  public submitPrintJob(params: {
+    salesOrderId: string;
+    receiptNumber: string;
+    renderedJob: RenderedThaiAbbPrintJob;
+  }): SubmitPrintJobResult {
+    const record: SpooledPrintJobRecord = {
+      jobId: `PRN-JOB-${params.receiptNumber}`,
+      salesOrderId: params.salesOrderId,
+      receiptNumber: params.receiptNumber,
+      renderedJob: params.renderedJob,
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    if (this.printerReady) {
+      this.completedPrintHistory.push(record);
+      return {
+        status: 'PRINTED_IMMEDIATELY',
+        jobId: record.jobId,
+        salesOrderId: record.salesOrderId,
+        receiptNumber: record.receiptNumber,
+        uiAlertThai: null,
+        pendingQueueLength: this.pendingQueue.length,
+      };
+    }
+
+    this.pendingQueue.push(record);
+    return {
+      status: 'QUEUED_PAPER_OUT_OR_COVER_OPEN',
+      jobId: record.jobId,
+      salesOrderId: record.salesOrderId,
+      receiptNumber: record.receiptNumber,
+      uiAlertThai:
+        'แจ้งเตือน: เครื่องพิมพ์ใบเสร็จไม่พร้อม (กระดาษหมดหรือฝาเปิด) — บันทึกบิลสำเร็จแล้ว และเก็บใบเสร็จเข้าคิวพิมพ์อัตโนมัติเมื่อใส่กระดาษเสร็จ',
+      pendingQueueLength: this.pendingQueue.length,
+    };
+  }
+
+  /**
+   * Updates hardware sensor state (cover open / paper out vs ready).
+   * When transitioning back to `ready = true`, automatically flushes all spooled print jobs in FIFO order.
+   */
+  public setHardwareReadyState(ready: boolean): {
+    printerReady: boolean;
+    autoFlushedJobs: SpooledPrintJobRecord[];
+  } {
+    this.printerReady = ready;
+    const autoFlushedJobs: SpooledPrintJobRecord[] = [];
+
+    if (this.printerReady && this.pendingQueue.length > 0) {
+      while (this.pendingQueue.length > 0) {
+        const nextJob = this.pendingQueue.shift()!;
+        this.completedPrintHistory.push(nextJob);
+        autoFlushedJobs.push(nextJob);
+      }
+    }
+
+    return {
+      printerReady: this.printerReady,
+      autoFlushedJobs,
+    };
+  }
+}
+
+
 

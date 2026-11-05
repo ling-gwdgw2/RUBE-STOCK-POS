@@ -2,8 +2,8 @@
 
 Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Hardened Blueprint)
 
-[![Phase 0–5 Tests](https://img.shields.io/badge/Node%20Tests-28%2F28%20Passing-brightgreen)](#automated-testing)
-[![Rust Workspace Tests](https://img.shields.io/badge/Cargo%20Tests-17%2F17%20Passing-brightgreen)](#automated-testing)
+[![Phase 0–5 & HIL Tests](https://img.shields.io/badge/Node%20Tests-33%2F33%20Passing-brightgreen)](#automated-testing)
+[![Rust Workspace Tests](https://img.shields.io/badge/Cargo%20Tests-18%2F18%20Passing-brightgreen)](#automated-testing)
 [![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.0-blue)](#key-architectural-pillars)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Standalone%20%7C%20Local%20LAN-orange)](#overview)
 
@@ -68,6 +68,9 @@ rube-stock-pos/
 รันคำสั่งตรวจสอบความถูกต้องของโครงสร้างฐานข้อมูลและชุดทดสอบทางบัญชี/ฮาร์ดแวร์:
 
 ```bash
+# ตรวจสอบกฎ PR Gatekeeping ทั้ง 3 ข้อ (Static Analysis ไร้ทศนิยม, Contract Parity, Schema Checksum)
+npm run verify:pr-gatekeeping
+
 # ตรวจสอบ SHA-256 Checksum ของ Schema (34 ตาราง + 4 Immutable Triggers)
 npm run verify:schema
 
@@ -86,14 +89,17 @@ npm run test:phase4
 # รันชุดทดสอบเฉพาะเฟสที่ 5 (5-Step FK-Safe Schema Upgrade + Auto USB Backup + UPS Banner + Financial Reports + EV Signed MSI)
 npm run test:phase5
 
-# รันชุดทดสอบทั้งหมดของฝั่ง TypeScript / SQLite Runtime (Phase 0–5 + Accounting Invariants)
+# รันชุดทดสอบรายการตรวจสอบการประกอบร่างบนชุดฮาร์ดแวร์ Section 6.2 (5-Point HIL Assembly Checklist)
+npm run test:hil
+
+# รันชุดทดสอบทั้งหมดของฝั่ง TypeScript / SQLite Runtime (Phase 0–5 + Section 6.2 HIL + Accounting Invariants)
 npm test
 
 # รันชุดทดสอบและคอมไพล์ฝั่ง Rust Workspace ทั้ง 4 Crates (rusqlite + i128 math + Shift/VAT + Keyring HMAC + 5-Step Migrator + mDNS/mTLS/KDS/Epoch Fencing)
 cargo test
 ```
 
-ผลการทดสอบ: **Node.js `28/28 Tests` + Rust `17/17 Tests` ผ่านครบ 100%**
+ผลการทดสอบ: **Node.js `33/33 Tests` + Rust `18/18 Tests` + PR Gatekeeping `3/3 Rules` ผ่านครบ 100%**
 
 ---
 

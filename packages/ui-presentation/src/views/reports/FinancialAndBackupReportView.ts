@@ -96,3 +96,4 @@ export class FinancialAndBackupReportViewController {
     return this.ipc.executeFiveStepSchemaUpgrade(input);
   }
 }
+

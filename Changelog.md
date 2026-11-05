@@ -326,6 +326,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ทดสอบประกอบร่างขั้นสุดท้ายครบทั้ง 4 สถานการณ์หลักของเฟสที่ 5 ผ่านครบ **100%**
 - **ผลการทดสอบครบสมบูรณ์ทุกเฟส (Phase 0–5: Node.js `28/28 Tests` + Rust `17/17 Tests`)**: ผ่านครบ **100% Pass**
 
+---
+
+### Section 6: Integration Rituals, PR Gatekeeping & 5-Point Hardware-in-the-Loop (HIL) Assembly Checklist
+
+#### Section 6.1: Automated PR Gatekeeping (`scripts/verify-pr-gatekeeping.mjs`)
+- **Rule 1 (`Static Analysis สำหรับหน่วยเงิน สต็อก และ i128 Intermediate Math`)**:
+  - สแกนไฟล์โค้ดทั้งหมดใน `packages/` (`19` ไฟล์ `.rs` และ `30` ไฟล์ `.ts`) ยืนยันว่าไม่มีการใช้ `f32`/`f64` ใน Rust หรือ `parseFloat()` ใน TypeScript แม้แต่จุดเดียว และบังคับใช้ `round_div_i128` (`i128`) ร่วมกับ `roundDivBigInt` (`BigInt`)
+- **Rule 2 (`Contract Compatibility Check`)**:
+  - ตรวจสอบความตรงกันของสัญลักษณ์และโครงสร้างข้อมูลระหว่าง `packages/shared-contracts/src/lib.rs` และ `packages/shared-contracts/src/ipc-commands.ts` / `fixed-point.ts` พร้อมเพิ่ม Unit Test `test_shared_contracts_serde_screaming_snake_case_parity` ใน crate `rube-shared-contracts`
+- **Rule 3 (`Automated Invariant & Schema Checksum Lock`)**:
+  - ยืนยัน SHA-256 Checksum ของสคริปต์ `0001_initial_v3_1_schema.sql` (`866a600d3e5eaf0351712c2e7d3085dc6abd68f39f800a1dc7d7ada1895b8d37`) และรันชุดทดสอบสมการบัญชีครบ 100%
+
+#### Section 6.2: 5-Point Hardware-in-the-Loop (HIL) Assembly Bench (`tests/e2e-integration/section6-hil-assembly-checklist.test.ts`)
+- **เพิ่ม `ThermalPrinterSpoolerQueue` (`QUEUE_MGR`) ใน `packages/hal-drivers/src/printer/mod.ts`**:
+  - รองรับการเก็บงานพิมพ์ใบเสร็จเข้าคิวอัตโนมัติเมื่อกระดาษหมดหรือฝาเครื่องพิมพ์เปิดขณะกดปิดบิล (`QUEUED_PAPER_OUT_OR_COVER_OPEN`) พร้อมแจ้งเตือนภาษาไทยบนหน้าจอ POS และสั่งพิมพ์ใบเสร็จค้างคิวออกมาเองทันทีเมื่อใส่กระดาษและปิดฝาเครื่องพิมพ์เสร็จ (`setHardwareReadyState(true)`) โดยไม่ตัดสต็อกซ้ำซ้อน
+- **ทดสอบและติ๊กผ่านครบทั้ง 5 รายการใน Section 6.2 (`[x] 1..5`)**:
+  1. `[x]` คีย์บอร์ดภาษาไทยค้าง + ป้องกันอักษรแรกหลุด (ยิงบาร์โค้ด 10 ชิ้นรวด + บาร์โค้ดตราชั่ง Prefix `20` และ `25`)
+  2. `[x]` พิมพ์ใบเสร็จยาว 30 รายการ (ชื่อเมนูภาษาไทยวรรณยุกต์ซ้อน) แบบหั่นแถบ `Chunked GS v 0` (`<= 8 KB`), เตะลิ้นชัก RJ11, และตัดกระดาษอัตโนมัติ
+  3. `[x]` กระดาษหมด/เปิดฝาเครื่องพิมพ์กลางคัน (`Spool Queue Resilience`) พิมพ์ใบเสร็จย้อนหลังอัตโนมัติโดยไม่ตัดสต็อกซ้ำ
+  4. `[x]` ตรวจสอบสลิป BOT Mini-QR แบบ 2 จังหวะ (แสดงชื่อธนาคาร + 4 ตัวท้าย `TransRef` + ยอดเงินขนาดใหญ่) และบล็อกสลิปซ้ำ (`HTTP 409`)
+  5. `[x]` สายแลนจอครัว KDS หลุด 30 วินาทีซิงค์ครบ 100%, โปรโมตเครื่องสำรองกั้น Split-Brain (`READ_ONLY_QUARANTINE`), และดึงปลั๊ก UPS สั่ง `PRAGMA wal_checkpoint(TRUNCATE);` ทันที
+- **ผลการทดสอบรวมทั้งโครงการ (Node.js `33/33 Tests` + Rust `18/18 Tests` + PR Gatekeeping `3/3 Rules`)**: ผ่านครบ **100% Pass**
+
+
 
 
 

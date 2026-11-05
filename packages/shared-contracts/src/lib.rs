@@ -81,3 +81,37 @@ pub struct Argon2RecoverySlot {
     pub created_at: String,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shared_contracts_serde_screaming_snake_case_parity() {
+        assert_eq!(
+            serde_json::to_string(&BusinessProfile::Retail).unwrap(),
+            "\"RETAIL\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BusinessProfile::Hospitality).unwrap(),
+            "\"HOSPITALITY\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BusinessProfile::Hybrid).unwrap(),
+            "\"HYBRID\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaxMode::Inclusive).unwrap(),
+            "\"INCLUSIVE\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ComponentRole::Sweetener).unwrap(),
+            "\"SWEETENER\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ModifierMode::RoleScaleBps).unwrap(),
+            "\"ROLE_SCALE_BPS\""
+        );
+    }
+}
+
+
