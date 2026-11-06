@@ -372,6 +372,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Hardware-in-the-Loop (HIL) Real-World Hardware Simulation & Shift Sequence Hardening
 
 #### Added & Hardened
+- **Visual Assets & Marketing Promo Mockup (`docs/assets/promo-showcase.png`)**:
+  - เพิ่มภาพโปรโมตระดับ Commercial Hero Showcase จำลองการใช้งานจริงบนเคาน์เตอร์คาเฟ่และร้านค้าปลีกแบบเรียลไทม์ (Dual-Screen All-in-One POS Terminal, หน้าจอลูกค้า PromptPay QR ยอด ฿270.00, เครื่องพิมพ์ใบเสร็จ ABB, และปืนสแกนเนอร์บาร์โค้ด 2D)
 - **`packages/ui-presentation/src/web/index.html` & `packages/ui-presentation/src/server/pos-desktop-server.ts`**:
   - **จำลองการดึงแฟลชไดรฟ์ USB ออกกลางคัน (`simulateYankUsb` / `POST /api/shift/simulate-yank-usb`)**:
     - สร้างไฟล์สำรองข้อมูลชั่วคราวที่เขียนไม่เสร็จ (`.part`) ในโฟลเดอร์สำรองข้อมูล USB เพื่อจำลองพฤติกรรมฮาร์ดแวร์เมื่อผู้ใช้ดึง Flash Drive ออกกะทันหัน

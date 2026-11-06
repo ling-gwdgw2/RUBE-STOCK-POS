@@ -7,6 +7,10 @@ Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Harden
 [![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.1-blue)](#key-architectural-pillars)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Standalone%20%7C%20Local%20LAN-orange)](#overview)
 
+<p align="center">
+  <img src="docs/assets/promo-showcase.png" alt="RUBE-STOCK-POS v3.1 Commercial Hero Showcase" width="100%" />
+</p>
+
 ---
 
 ## ภาพรวมโครงการ (Project Overview)
