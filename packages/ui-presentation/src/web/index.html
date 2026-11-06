@@ -184,24 +184,24 @@
 
   <header>
     <div class="brand">
-      <h1>🛡️ RUBE-STOCK-POS v3.1</h1>
+      <h1>RUBE-STOCK-POS v3.1</h1>
       <span id="profileBadge" class="badge ok">MODE: HYBRID</span>
       <span id="shiftBadge" class="badge ok">SHIFT: OPEN</span>
       <span id="invariantBadge" class="badge ok">LEDGER: 100% CONSERVED</span>
     </div>
     <div style="display:flex; gap:8px; align-items:center;">
-      <span id="printerBadge" class="badge ok">🖨️ PRINTER: READY</span>
-      <span id="clusterBadge" class="badge">🔗 CLUSTER: LEADER (Epoch 1)</span>
+      <span id="printerBadge" class="badge ok">PRINTER: READY</span>
+      <span id="clusterBadge" class="badge">CLUSTER: LEADER (Epoch 1)</span>
     </div>
   </header>
 
   <nav>
-    <button class="active" onclick="switchTab('pos', this)">🛒 1. หน้าจอขาย POS (Dual-Mode)</button>
-    <button onclick="switchTab('kds', this)">👨‍🍳 2. จอครัว KDS (Sequence Sync)</button>
-    <button onclick="switchTab('warehouse', this)">📦 3. คลังสินค้า & รับของ PO (MAC / Landed Cost)</button>
-    <button onclick="switchTab('bom', this)">🧪 4. ผูกสูตร BOM DAG & ต้นทุนเมนู</button>
-    <button onclick="switchTab('reports', this)">📊 5. ปิดกะ & รายงานบัญชี 4 มิติ</button>
-    <button onclick="switchTab('hil', this)">⚡ 6. จำลองฮาร์ดแวร์ & ความปลอดภัย (HIL Bench)</button>
+    <button class="active" onclick="switchTab('pos', this)">1. หน้าจอขาย POS (Dual-Mode)</button>
+    <button onclick="switchTab('kds', this)">2. จอครัว KDS (Sequence Sync)</button>
+    <button onclick="switchTab('warehouse', this)">3. คลังสินค้า & รับของ PO (MAC / Landed Cost)</button>
+    <button onclick="switchTab('bom', this)">4. ผูกสูตร BOM DAG & ต้นทุนเมนู</button>
+    <button onclick="switchTab('reports', this)">5. ปิดกะ & รายงานบัญชี 4 มิติ</button>
+    <button onclick="switchTab('hil', this)">6. จำลองฮาร์ดแวร์ & ความปลอดภัย (HIL Bench)</button>
   </nav>
 
   <main>
@@ -211,20 +211,20 @@
         <div>
           <div class="panel">
             <h2>
-              <span>🔍 ช่องค้นหา & ดักจับปืนสแกนบาร์โค้ด (&lt; 50ms First-Char Rollback)</span>
+              <span>ช่องค้นหา & ดักจับปืนสแกนบาร์โค้ด (&lt; 50ms First-Char Rollback)</span>
               <span id="rollbackBadge" class="badge ok">Rollbacks: 0</span>
             </h2>
             <input id="posSearchInput" type="text" placeholder="คลิกที่นี่แล้วลองกดปุ่มจำลองยิงบาร์โค้ดขณะคีย์บอร์ดเป็นภาษาไทย (กขค)..." oninput="renderCatalog()" />
             <div class="btn-row">
-              <button class="btn emerald" onclick="simulateThaiBarcodeScan('8851952350161')">🔫 ยิงบาร์โค้ดน้ำดื่ม (คีย์บอร์ดไทยค้าง)</button>
-              <button class="btn amber" onclick="simulateThaiBarcodeScan('2010045015004')">⚖️ ยิงบาร์โค้ดตราชั่งน้ำหนัก 1.500 กก. (Prefix 20)</button>
-              <button class="btn purple" onclick="simulateThaiBarcodeScan('2510045090005')">🏷️ ยิงบาร์โค้ดตราชั่งราคา 90฿ (Prefix 25)</button>
+              <button class="btn emerald" onclick="simulateThaiBarcodeScan('8851952350161')">ยิงบาร์โค้ดน้ำดื่ม (คีย์บอร์ดไทยค้าง)</button>
+              <button class="btn amber" onclick="simulateThaiBarcodeScan('2010045015004')">ยิงบาร์โค้ดตราชั่งน้ำหนัก 1.500 กก. (Prefix 20)</button>
+              <button class="btn purple" onclick="simulateThaiBarcodeScan('2510045090005')">ยิงบาร์โค้ดตราชั่งราคา 90฿ (Prefix 25)</button>
             </div>
           </div>
 
           <div class="panel">
             <h2>
-              <span>📋 รายการสินค้า (คลิกเพื่อเพิ่มลงตะกร้า)</span>
+              <span>รายการสินค้า (คลิกเพื่อเพิ่มลงตะกร้า)</span>
               <div style="display:flex; gap:6px;">
                 <select id="cafeModifierSelect" style="width:auto;">
                   <option value="">-- ตัวเลือกเสริมคาเฟ่ (หวานปกติ) --</option>
@@ -242,7 +242,7 @@
         <div>
           <div class="panel">
             <h2>
-              <span>🧺 ตะกร้าสินค้า & คำนวณภาษีใบกำกับภาษีอย่างย่อ (ABB VAT 7%)</span>
+              <span>ตะกร้าสินค้า & คำนวณภาษีใบกำกับภาษีอย่างย่อ (ABB VAT 7%)</span>
               <button class="btn rose" onclick="clearCart()">ล้างตะกร้า</button>
             </h2>
             <table>
@@ -273,18 +273,18 @@
             </div>
 
             <div class="btn-row" style="margin-top:12px;">
-              <button class="btn emerald" style="flex:1; padding:12px;" onclick="checkoutCash()">💵 รับเงินสด & พิมพ์ใบเสร็จ ABB</button>
-              <button class="btn" style="flex:1; padding:12px;" onclick="openPromptPayModal()">📲 รับชำระด้วย PromptPay QR & ตรวจสลิป</button>
+              <button class="btn emerald" style="flex:1; padding:12px;" onclick="checkoutCash()">รับเงินสด & พิมพ์ใบเสร็จ ABB</button>
+              <button class="btn" style="flex:1; padding:12px;" onclick="openPromptPayModal()">รับชำระด้วย PromptPay QR & ตรวจสลิป</button>
             </div>
 
             <div id="promptPayBox" style="display:none; margin-top:12px; padding:12px; background:#0f172a; border:1px solid #38bdf8; border-radius:8px;">
-              <div style="font-weight:700; color:#38bdf8; margin-bottom:6px;">📲 EMVCo PromptPay Dynamic QR (Offline CRC16-CCITT)</div>
+              <div style="font-weight:700; color:#38bdf8; margin-bottom:6px;">EMVCo PromptPay Dynamic QR (Offline CRC16-CCITT)</div>
               <div id="promptPayPayloadText" style="font-family:monospace; font-size:11px; word-break:break-all; color:#94a3b8; margin-bottom:8px;"></div>
               <label style="font-size:12px;">ยิง BOT Slip Mini-QR (ตรวจสอบ 2 จังหวะ ป้องกันสลิปซ้ำ):</label>
               <input id="botSlipInput" type="text" value="004100060000010103014022020261106SCBDEMO00001" style="margin-top:4px;" />
               <div class="btn-row">
-                <button class="btn amber" onclick="verifySlipStep1()">1️⃣ ตรวจสอบธนาคาร & ยอดเงินบนสลิป</button>
-                <button class="btn emerald" onclick="checkoutPromptPayConfirm()">2️⃣ ยืนยันยอดเงินถูกต้อง & ปิดบิล</button>
+                <button class="btn amber" onclick="verifySlipStep1()">1. ตรวจสอบธนาคาร & ยอดเงินบนสลิป</button>
+                <button class="btn emerald" onclick="checkoutPromptPayConfirm()">2. ยืนยันยอดเงินถูกต้อง & ปิดบิล</button>
               </div>
               <div id="slipVerifyResult" style="margin-top:8px; font-size:13px; font-weight:700;"></div>
             </div>
@@ -292,8 +292,8 @@
 
           <div class="panel">
             <h2>
-              <span>🧾 ตัวอย่างใบเสร็จความร้อน 203-DPI (Chunked GS v 0 Raster)</span>
-              <button id="voidLastOrderBtn" class="btn rose" style="display:none;" onclick="voidLastOrder()">↩️ ยกเลิกบิลล่าสุด (VOID_RETURN)</button>
+              <span>ตัวอย่างใบเสร็จความร้อน 203-DPI (Chunked GS v 0 Raster)</span>
+              <button id="voidLastOrderBtn" class="btn rose" style="display:none;" onclick="voidLastOrder()">ยกเลิกบิลล่าสุด (VOID_RETURN)</button>
             </h2>
             <div id="receiptPreview" class="receipt-box">ยังไม่มีบิลที่พิมพ์ในเซสชันนี้ — เลือกสินค้าแล้วกดรับชำระเงินเพื่อดูใบเสร็จ ABB และข้อมูลชุดคำสั่ง GS v 0</div>
           </div>
@@ -305,8 +305,8 @@
     <section id="tab-kds" class="tab-pane">
       <div class="panel">
         <h2>
-          <span>👨‍🍳 จอครัว KDS (Monotonic sequence_id Sync & Gap Recovery)</span>
-          <button class="btn" onclick="refreshAll()">🔄 ซิงค์ออเดอร์ตกหล่นจากเครื่องแม่ข่าย</button>
+          <span>จอครัว KDS (Monotonic sequence_id Sync & Gap Recovery)</span>
+          <button class="btn" onclick="refreshAll()">ซิงค์ออเดอร์ตกหล่นจากเครื่องแม่ข่าย</button>
         </h2>
         <div id="kdsGrid" class="grid-3"></div>
       </div>
@@ -316,7 +316,7 @@
     <section id="tab-warehouse" class="tab-pane">
       <div class="grid-2">
         <div class="panel">
-          <h2>📦 สต็อกคงเหลือ & ต้นทุนถัวเฉลี่ยเคลื่อนที่ (MAC Micro-Baht)</h2>
+          <h2>สต็อกคงเหลือ & ต้นทุนถัวเฉลี่ยเคลื่อนที่ (MAC Micro-Baht)</h2>
           <table>
             <thead>
               <tr><th>รหัส</th><th>ชื่อสินค้า</th><th>คงเหลือ</th><th>ต้นทุนเฉลี่ย (MAC)</th><th>ราคาขาย</th></tr>
@@ -326,7 +326,7 @@
         </div>
         <div>
           <div class="panel">
-            <h2>🚛 รับสินค้าเข้าคลังพร้อมปันส่วนค่าขนส่งแฝง (Landed Cost PO)</h2>
+            <h2>รับสินค้าเข้าคลังพร้อมปันส่วนค่าขนส่งแฝง (Landed Cost PO)</h2>
             <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">ทดสอบรับเข้า สันคอหมู 10 กก. + ใบชา 5 กก. พร้อมปันส่วนค่าขนส่ง (Freight) ด้วย Largest Remainder Method (i128):</p>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
               <div>
@@ -339,8 +339,8 @@
               </div>
             </div>
             <div class="btn-row">
-              <button class="btn emerald" onclick="submitPurchaseOrder()">📥 บันทึกรับสินค้าเข้าคลัง (PO_RECEIVE)</button>
-              <button class="btn amber" onclick="submitPrepBobaBuild()">🧋 ต้มไข่มุกล็อตใหม่ 5 กก. (PRODUCTION_BUILD)</button>
+              <button class="btn emerald" onclick="submitPurchaseOrder()">บันทึกรับสินค้าเข้าคลัง (PO_RECEIVE)</button>
+              <button class="btn amber" onclick="submitPrepBobaBuild()">ต้มไข่มุกล็อตใหม่ 5 กก. (PRODUCTION_BUILD)</button>
             </div>
           </div>
         </div>
@@ -351,7 +351,7 @@
     <section id="tab-bom" class="tab-pane">
       <div class="grid-2">
         <div class="panel">
-          <h2>🧪 โครงสร้างสูตรการผลิตหลายระดับ (Multi-Level BOM DAG)</h2>
+          <h2>โครงสร้างสูตรการผลิตหลายระดับ (Multi-Level BOM DAG)</h2>
           <table>
             <thead>
               <tr><th>เมนู / ของกึ่งสำเร็จรูป</th><th>วัตถุดิบองค์ประกอบ</th><th>บทบาท (Role)</th><th>ปริมาณ (Milli)</th><th>ของเสีย (BPS)</th></tr>
@@ -360,11 +360,11 @@
           </table>
         </div>
         <div class="panel">
-          <h2>🛡️ ทดสอบระบบป้องกันการผูกสูตรวนลูป (DFS Cycle Detection)</h2>
+          <h2>ทดสอบระบบป้องกันการผูกสูตรวนลูป (DFS Cycle Detection)</h2>
           <p style="font-size:13px; color:var(--text-muted); margin-bottom:10px;">
             ในระบบปัจจุบัน <code>VAR-RAW-BOBA</code> (ไข่มุกต้มสุก) ใช้ <code>VAR-RAW-DRY-BOBA</code> (เม็ดไข่มุกดิบ) เป็นวัตถุดิบ หากพยายามผูกย้อนกลับให้เม็ดไข่มุกดิบใช้ไข่มุกต้มสุก ระบบจะบล็อกด้วย <code>HTTP 422 Circular BOM Dependency</code> ทันที:
           </p>
-          <button class="btn rose" onclick="testCircularBomGuard()">🚫 ทดสอบผูกสูตรวนลูป (ต้องถูกบล็อกด้วย HTTP 422)</button>
+          <button class="btn rose" onclick="testCircularBomGuard()">ทดสอบผูกสูตรวนลูป (ต้องถูกบล็อกด้วย HTTP 422)</button>
           <div id="bomCycleResult" style="margin-top:12px; font-weight:700; font-size:13px;"></div>
         </div>
       </div>
@@ -376,8 +376,8 @@
       <div class="grid-2" style="margin-top:16px;">
         <div class="panel">
           <h2>
-            <span>🧾 รายงานภาษีขายใบกำกับภาษีอย่างย่อ (ABB Sales Tax Report)</span>
-            <button class="btn amber" onclick="closeShiftAndBackupUsb()">🔒 ปิดกะ Blind Drop & สำรองข้อมูลลง USB (14 กะ)</button>
+            <span>รายงานภาษีขายใบกำกับภาษีอย่างย่อ (ABB Sales Tax Report)</span>
+            <button class="btn amber" onclick="closeShiftAndBackupUsb()">ปิดกะ Blind Drop & สำรองข้อมูลลง USB (14 กะ)</button>
           </h2>
           <table>
             <thead>
@@ -387,7 +387,7 @@
           </table>
         </div>
         <div class="panel">
-          <h2>📈 รายงานต้นทุนขาย (COGS) & กำไรขั้นต้นรายเมนู</h2>
+          <h2>รายงานต้นทุนขาย (COGS) & กำไรขั้นต้นรายเมนู</h2>
           <table>
             <thead>
               <tr><th>เมนู / สินค้า</th><th>จำนวนที่ขาย</th><th>ยอดขายสุทธิ</th><th>ต้นทุน COGS</th><th>กำไรขั้นต้น (%)</th></tr>
@@ -402,7 +402,7 @@
     <section id="tab-hil" class="tab-pane">
       <div class="grid-3">
         <div class="panel">
-          <h2>🏪 สลับโหมดธุรกิจ (Polymorphic Profile + HMAC-SHA256)</h2>
+          <h2>สลับโหมดธุรกิจ (Polymorphic Profile + HMAC-SHA256)</h2>
           <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">ทุกการสลับโหมดจะลงลายเซ็น HMAC-SHA256 ในตาราง <code>store_config</code> และบันทึก <code>security_audit_logs</code>:</p>
           <div class="btn-row">
             <button class="btn" onclick="switchBusinessProfile('RETAIL')">โหมด RETAIL (ค้าปลีก)</button>
@@ -413,34 +413,34 @@
         </div>
 
         <div class="panel">
-          <h2>🖨️ จำลองกระดาษหมด / เปิดฝาเครื่องพิมพ์ (Spool Queue Resilience)</h2>
+          <h2>จำลองกระดาษหมด / เปิดฝาเครื่องพิมพ์ (Spool Queue Resilience)</h2>
           <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">เมื่อตั้งค่าเป็นกระดาษหมด บิลขายจะยังบันทึกสำเร็จและเก็บงานพิมพ์เข้าคิว เมื่อกดใส่กระดาษเสร็จจะพิมพ์ออกอัตโนมัติโดยไม่ตัดสต็อกซ้ำ:</p>
           <div class="btn-row">
-            <button class="btn rose" onclick="setPrinterState(false)">⚠️ จำลองเปิดฝาเครื่องพิมพ์ / กระดาษหมด</button>
-            <button class="btn emerald" onclick="setPrinterState(true)">✅ ใส่กระดาษเสร็จ / ปิดฝา (Auto-Flush คิวพิมพ์)</button>
+            <button class="btn rose" onclick="setPrinterState(false)">จำลองเปิดฝาเครื่องพิมพ์ / กระดาษหมด</button>
+            <button class="btn emerald" onclick="setPrinterState(true)">ใส่กระดาษเสร็จ / ปิดฝา (Auto-Flush คิวพิมพ์)</button>
           </div>
           <div id="spoolStatusText" style="margin-top:10px; font-size:13px; font-weight:700;"></div>
         </div>
 
         <div class="panel">
-          <h2>🔋 จำลองไฟดับเครื่องสำรองไฟ UPS (USB-HID 0x84)</h2>
+          <h2>จำลองไฟดับเครื่องสำรองไฟ UPS (USB-HID 0x84)</h2>
           <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">เมื่อไฟบ้านดับ (<code>AC_PRESENT = 0</code>) ระบบจะสั่ง <code>PRAGMA wal_checkpoint(TRUNCATE);</code> ลงดิสก์ทันทีและขึ้นแถบเตือนด้านบนสุด:</p>
           <div class="btn-row">
-            <button class="btn amber" onclick="simulateUpsState(false, 65)">🔌 ชักปลั๊กไฟ UPS (ไฟสำรอง 65% + WAL Checkpoint)</button>
-            <button class="btn rose" onclick="simulateUpsState(false, 15)">🚨 แบตต่ำ 15% (เข้าโหมด Read-Only Lock)</button>
-            <button class="btn emerald" onclick="simulateUpsState(true, 100)">⚡ เสียบปลั๊กไฟบ้านกลับตามปกติ (AC Online)</button>
+            <button class="btn amber" onclick="simulateUpsState(false, 65)">ชักปลั๊กไฟ UPS (ไฟสำรอง 65% + WAL Checkpoint)</button>
+            <button class="btn rose" onclick="simulateUpsState(false, 15)">แบตต่ำ 15% (เข้าโหมด Read-Only Lock)</button>
+            <button class="btn emerald" onclick="simulateUpsState(true, 100)">เสียบปลั๊กไฟบ้านกลับตามปกติ (AC Online)</button>
           </div>
         </div>
 
         <div class="panel">
-          <h2>💾 ปิดกะ Blind Drop & ดึงแฟลชไดรฟ์ USB ออกกลางคัน (.part Cleanup)</h2>
+          <h2>ปิดกะ Blind Drop & ดึงแฟลชไดรฟ์ USB ออกกลางคัน (.part Cleanup)</h2>
           <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">
             จำลองแคชเชียร์นับเงินสดแบบไม่รู้ยอดในระบบ (Blind Drop) และกรณีดึงแฟลชไดรฟ์ออกขณะระบบกำลังบันทึกไฟล์สำรอง:
           </p>
           <div class="btn-row">
-            <button class="btn amber" onclick="simulateYankUsb()">🔌 1. จำลองดึง USB ออกกลางคัน (ทิ้งไฟล์ .part ค้าง)</button>
-            <button class="btn emerald" onclick="closeShiftBlindDrop(0)">🔒 2. ปิดกะ Blind Drop (นับเงินตรง 100%)</button>
-            <button class="btn rose" onclick="closeShiftBlindDrop(-5000)">💸 3. ปิดกะ Blind Drop (จำลองเงินขาด 50฿)</button>
+            <button class="btn amber" onclick="simulateYankUsb()">1. จำลองดึง USB ออกกลางคัน (ทิ้งไฟล์ .part ค้าง)</button>
+            <button class="btn emerald" onclick="closeShiftBlindDrop(0)">2. ปิดกะ Blind Drop (นับเงินตรง 100%)</button>
+            <button class="btn rose" onclick="closeShiftBlindDrop(-5000)">3. ปิดกะ Blind Drop (จำลองเงินขาด 50฿)</button>
           </div>
           <div id="usbBackupResultText" style="margin-top:10px; font-size:13px; font-weight:700;"></div>
         </div>
@@ -489,8 +489,8 @@
         ? `LEDGER: 100% CONSERVED (${appState.ledgerInvariant.checkedVariantsCount} SKUs)`
         : 'LEDGER: MISMATCH!';
       document.getElementById('printerBadge').textContent = appState.printer.ready
-        ? `🖨️ PRINTER: READY (Spooled: ${appState.printer.pendingQueueLength})`
-        : `🖨️ PRINTER: PAPER OUT (Queued: ${appState.printer.pendingQueueLength})`;
+        ? `PRINTER: READY (Spooled: ${appState.printer.pendingQueueLength})`
+        : `PRINTER: PAPER OUT (Queued: ${appState.printer.pendingQueueLength})`;
       document.getElementById('printerBadge').className = 'badge ' + (appState.printer.ready ? 'ok' : 'warn');
 
       const upsBanner = document.getElementById('upsBanner');
@@ -516,7 +516,7 @@
         <div class="item-card" onclick="addItemToCart('${v.id}')">
           <div class="title">${v.itemName}</div>
           <div class="meta">SKU: ${v.sku} | ${v.variantName}</div>
-          <div class="meta">${v.isComposite ? '🍹 เมนูผูกสูตร BOM' : `คงเหลือ: ${(v.inStockMilli / 1000).toFixed(2)} ${v.unitName}`}</div>
+          <div class="meta">${v.isComposite ? '[เมนูผูกสูตร BOM]' : `คงเหลือ: ${(v.inStockMilli / 1000).toFixed(2)} ${v.unitName}`}</div>
           <div class="price">฿${(v.priceSatang / 100).toFixed(2)}</div>
         </div>
       `).join('');
@@ -584,7 +584,7 @@
       document.getElementById('rollbackBadge').textContent = 'Rollbacks: ' + res.firstCharRollbackCount;
       cart.push(res.addedCartLine);
       renderCart();
-      showToast(`🔫 สแกนสำเร็จ: ${res.addedCartLine.itemName} (${(res.addedCartLine.quantityMilli / 1000).toFixed(3)} ${res.addedCartLine.unitName}) — ลบอักษรไทยที่รั่วเข้าช่องค้นหาอัตโนมัติ!`);
+      showToast(`สแกนสำเร็จ: ${res.addedCartLine.itemName} (${(res.addedCartLine.quantityMilli / 1000).toFixed(3)} ${res.addedCartLine.unitName}) — ลบอักษรไทยที่รั่วเข้าช่องค้นหาอัตโนมัติ`);
     }
 
     async function checkoutCash() {
@@ -604,7 +604,7 @@
         `\n\n[TELEMETRY] GS v 0 Bands: ${res.printJob.packetsCount} | Max Packet: ${res.printJob.maxPacketByteLength} bytes (<= 8KB Safe) | Spool Status: ${res.spoolResult.status}`;
       clearCart();
       await refreshAll();
-      showToast(res.spoolResult.uiAlertThai || `✅ บันทึกบิล ${res.order.abbTaxInvoiceNo} และสั่งพิมพ์ใบเสร็จสำเร็จ!`);
+      showToast(res.spoolResult.uiAlertThai || `บันทึกบิล ${res.order.abbTaxInvoiceNo} และสั่งพิมพ์ใบเสร็จสำเร็จ`);
     }
 
     async function openPromptPayModal() {
@@ -624,10 +624,10 @@
       const box = document.getElementById('slipVerifyResult');
       if (res.canProceedToStep2Confirm) {
         box.style.color = '#34d399';
-        box.textContent = `✅ ธนาคาร: ${res.senderBankNameThai} | Ref ท้าย: *${res.transRefLast4} | โปรดตรวจยอดเงิน ${res.expectedAmountFormatted} แล้วกดปุ่ม 2️⃣`;
+        box.textContent = `ธนาคาร: ${res.senderBankNameThai} | Ref ท้าย: *${res.transRefLast4} | โปรดตรวจยอดเงิน ${res.expectedAmountFormatted} แล้วกดปุ่ม 2`;
       } else {
         box.style.color = '#f43f5e';
-        box.textContent = `❌ บล็อกสลิป: ${res.verification.errorReason}`;
+        box.textContent = `บล็อกสลิป: ${res.verification.errorReason}`;
       }
     }
 
@@ -650,9 +650,9 @@
           `\n\n[TELEMETRY] GS v 0 Bands: ${res.printJob.packetsCount} | Max Packet: ${res.printJob.maxPacketByteLength} bytes`;
         clearCart();
         await refreshAll();
-        showToast(`✅ รับชำระ PromptPay QR บิล ${res.order.abbTaxInvoiceNo} สำเร็จ!`);
+        showToast(`รับชำระ PromptPay QR บิล ${res.order.abbTaxInvoiceNo} สำเร็จ`);
       } catch (err) {
-        showToast(`🚫 ${err.message}`);
+        showToast(`ข้อผิดพลาด: ${err.message}`);
       }
     }
 
@@ -662,7 +662,7 @@
       lastCompletedOrderId = null;
       document.getElementById('voidLastOrderBtn').style.display = 'none';
       await refreshAll();
-      showToast(`↩️ ยกเลิกบิล ${res.abbTaxInvoiceNo} และคืนสต็อกตามต้นทุนจริง (VOID_RETURN) สำเร็จ!`);
+      showToast(`ยกเลิกบิล ${res.abbTaxInvoiceNo} และคืนสต็อกตามต้นทุนจริง (VOID_RETURN) สำเร็จ`);
     }
 
     function renderKds() {
@@ -682,9 +682,9 @@
             ${t.items.map(i => `<div>• <b>${i.itemSummaryText}</b> x${(i.quantityMilli / 1000).toFixed(0)} ${i.modifiersSummaryText ? `<span style="color:#fbbf24;">(${i.modifiersSummaryText})</span>` : ''}</div>`).join('')}
           </div>
           <div class="btn-row">
-            <button class="btn amber" onclick="bumpKds('${t.kitchenOrderId}', ${t.sequenceId}, 'PREPARING')">👨‍🍳 กำลังทำ</button>
-            <button class="btn emerald" onclick="bumpKds('${t.kitchenOrderId}', ${t.sequenceId}, 'READY')">🔔 พร้อมเสิร์ฟ</button>
-            <button class="btn" onclick="bumpKds('${t.kitchenOrderId}', ${t.sequenceId}, 'SERVED')">✅ เสิร์ฟแล้ว</button>
+            <button class="btn amber" onclick="bumpKds('${t.kitchenOrderId}', ${t.sequenceId}, 'PREPARING')">กำลังทำ</button>
+            <button class="btn emerald" onclick="bumpKds('${t.kitchenOrderId}', ${t.sequenceId}, 'READY')">พร้อมเสิร์ฟ</button>
+            <button class="btn" onclick="bumpKds('${t.kitchenOrderId}', ${t.sequenceId}, 'SERVED')">เสิร์ฟแล้ว</button>
           </div>
         </div>
       `).join('');
@@ -693,7 +693,7 @@
     async function bumpKds(kitchenOrderId, ackedSequenceId, newStatus) {
       await api('/api/kds/bump', 'POST', { kitchenOrderId, ackedSequenceId, newStatus });
       await refreshAll();
-      showToast(`👨‍🍳 อัปเดตสถานะจอครัว KDS Seq #${ackedSequenceId} -> ${newStatus}`);
+      showToast(`อัปเดตสถานะจอครัว KDS Seq #${ackedSequenceId} -> ${newStatus}`);
     }
 
     function renderInventoryAndBom() {
@@ -724,13 +724,13 @@
       const freightBaht = Number(document.getElementById('poFreightBaht').value || 250);
       const res = await api('/api/warehouse/receive-po', 'POST', { porkKg, freightBaht });
       await refreshAll();
-      showToast(`🚛 รับใบสั่งซื้อ ${res.poNumber} เข้าคลังสำเร็จ! ปันส่วนค่าขนส่งครบทุกไมโครบาท`);
+      showToast(`รับใบสั่งซื้อ ${res.poNumber} เข้าคลังสำเร็จ ปันส่วนค่าขนส่งครบทุกไมโครบาท`);
     }
 
     async function submitPrepBobaBuild() {
       const res = await api('/api/warehouse/build-prep', 'POST', { buildQtyMilli: 5000 });
       await refreshAll();
-      showToast(`🧋 ต้มไข่มุก Pre-Built สำเร็จ! สต็อกไข่มุกต้มสุก: ${(res.CompositeStockAfterMilli / 1000).toFixed(2)} กรัม`);
+      showToast(`ต้มไข่มุก Pre-Built สำเร็จ สต็อกไข่มุกต้มสุก: ${(res.CompositeStockAfterMilli / 1000).toFixed(2)} กรัม`);
     }
 
     async function testCircularBomGuard() {
@@ -745,8 +745,8 @@
       } catch (err) {
         const el = document.getElementById('bomCycleResult');
         el.style.color = '#34d399';
-        el.textContent = `✅ ระบบบล็อกสูตรวนลูปสำเร็จ: ${err.message}`;
-        showToast(`🛡️ ป้องกันสูตรวนลูปสำเร็จ: ${err.message}`);
+        el.textContent = `ระบบบล็อกสูตรวนลูปสำเร็จ: ${err.message}`;
+        showToast(`ป้องกันสูตรวนลูปสำเร็จ: ${err.message}`);
       }
     }
 
@@ -783,7 +783,7 @@
       const resEl = document.getElementById('usbBackupResultText');
       if (resEl) {
         resEl.style.color = '#f59e0b';
-        resEl.textContent = `⚠️ ${res.message} -> ${res.corruptFilename} (จะถูกตรวจพบและล้างอัตโนมัติเมื่อกดปิดกะ)`;
+        resEl.textContent = `${res.message} -> ${res.corruptFilename} (จะถูกตรวจพบและล้างอัตโนมัติเมื่อกดปิดกะ)`;
       }
       showToast(res.message);
     }
@@ -801,7 +801,7 @@
       const cleanedPartText = res.usbBackup.cleanedOrphanedPartFilesCount > 0
         ? ` | ล้างไฟล์ .part ที่ตกค้าง: ${res.usbBackup.cleanedOrphanedPartFilesCount} ไฟล์`
         : '';
-      const summaryMsg = `🔒 ปิดกะ ${res.closedShift.shiftNumber} สำเร็จ! นับได้: ฿${(res.closedShift.countedCashSatang / 100).toFixed(2)} (ผลต่าง Variance: ฿${varianceFormatted}) | สำรองลง USB: ${res.usbBackup.retainedBackupsCount}/14 กะ${cleanedPartText}`;
+      const summaryMsg = `ปิดกะ ${res.closedShift.shiftNumber} สำเร็จ นับได้: ฿${(res.closedShift.countedCashSatang / 100).toFixed(2)} (ผลต่าง Variance: ฿${varianceFormatted}) | สำรองลง USB: ${res.usbBackup.retainedBackupsCount}/14 กะ${cleanedPartText}`;
       
       const resEl = document.getElementById('usbBackupResultText');
       if (resEl) {
@@ -819,14 +819,14 @@
       const res = await api('/api/profile/switch', 'POST', { profile });
       document.getElementById('hmacDisplayBox').textContent = `HMAC-SHA256 Signature: ${res.hmacSignatureHex}`;
       await refreshAll();
-      showToast(`🏪 สลับโหมดเป็น ${res.profile} พร้อมลงลายเซ็น HMAC-SHA256 สำเร็จ!`);
+      showToast(`สลับโหมดเป็น ${res.profile} พร้อมลงลายเซ็น HMAC-SHA256 สำเร็จ`);
     }
 
     async function setPrinterState(ready) {
       const res = await api('/api/hal/printer-state', 'POST', { ready });
       document.getElementById('spoolStatusText').textContent = ready
-        ? `✅ เครื่องพิมพ์พร้อมทำงาน — พิมพ์ใบเสร็จค้างคิวออกอัตโนมัติ ${res.autoFlushedCount} ใบ!`
-        : `⚠️ เปิดฝาเครื่องพิมพ์ / กระดาษหมด — บิลถัดไปจะถูกเก็บเข้า Spool Queue`;
+        ? `เครื่องพิมพ์พร้อมทำงาน — พิมพ์ใบเสร็จค้างคิวออกอัตโนมัติ ${res.autoFlushedCount} ใบ`
+        : `เปิดฝาเครื่องพิมพ์ / กระดาษหมด — บิลถัดไปจะถูกเก็บเข้า Spool Queue`;
       await refreshAll();
       showToast(document.getElementById('spoolStatusText').textContent);
     }
@@ -834,7 +834,7 @@
     async function simulateUpsState(acPresent, batteryChargePercent) {
       await api('/api/hal/ups-state', 'POST', { acPresent, batteryChargePercent });
       await refreshAll();
-      showToast(acPresent ? '⚡ ระบบไฟฟ้ากลับมาปกติ (AC Online)' : `🔌 ไฟดับ! สั่ง PRAGMA wal_checkpoint(TRUNCATE) ลงดิสก์ทันที (แบต ${batteryChargePercent}%)`);
+      showToast(acPresent ? 'ระบบไฟฟ้ากลับมาปกติ (AC Online)' : `ไฟดับ สั่ง PRAGMA wal_checkpoint(TRUNCATE) ลงดิสก์ทันที (แบต ${batteryChargePercent}%)`);
     }
 
     refreshAll();

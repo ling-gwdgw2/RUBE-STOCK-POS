@@ -39,7 +39,7 @@ Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Harden
 
 ---
 
-## 📂 โครงสร้าง Monorepo (Monorepo Directory Structure)
+## โครงสร้าง Monorepo (Monorepo Directory Structure)
 
 ```text
 rube-stock-pos/
@@ -67,7 +67,7 @@ rube-stock-pos/
 
 ---
 
-## 🖥️ หน้าจอตัวอย่างและการเปิดใช้งานแอปพลิเคชันจริง (UI & Application Preview)
+## หน้าจอตัวอย่างและการเปิดใช้งานแอปพลิเคชันจริง (UI & Application Preview)
 
 <p align="center">
   <img src="docs/assets/ui-desktop-mockup.jpg" alt="RUBE-STOCK-POS v3.1 Interactive UI Desktop Application Mockup" width="100%" />
@@ -82,7 +82,7 @@ npm start
 
 ---
 
-## ทดสอบระบบอัตโนมัติ (Automated Testing)
+## การทดสอบระบบอัตโนมัติ (Automated Testing)
 
 รันคำสั่งตรวจสอบความถูกต้องของโครงสร้างฐานข้อมูลและชุดทดสอบทางบัญชี/ฮาร์ดแวร์:
 
