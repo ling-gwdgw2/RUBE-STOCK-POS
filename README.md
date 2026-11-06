@@ -67,7 +67,11 @@ rube-stock-pos/
 
 ---
 
-## วิธีเปิดทดสอบโครงสร้าง UI ทั้งหมดในสภาพแวดล้อมจริง
+## 🖥️ หน้าจอตัวอย่างและการเปิดใช้งานแอปพลิเคชันจริง (UI & Application Preview)
+
+<p align="center">
+  <img src="docs/assets/ui-desktop-mockup.jpg" alt="RUBE-STOCK-POS v3.1 Interactive UI Desktop Application Mockup" width="100%" />
+</p>
 
 รันคำสั่งด้านล่างเพื่อเปิดระบบ **RUBE-STOCK-POS v3.1** แบบโต้ตอบครบทั้ง 6 โมดูล (หน้าขาย POS, จอครัว KDS, คลังสินค้า/PO, ผูกสูตร BOM DAG, รายงานบัญชี 4 มิติ, และแผงจำลองฮาร์ดแวร์ HIL):
 
