@@ -9,11 +9,11 @@ Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Harden
 
 ---
 
-## 📌 ภาพรวมโครงการ (Project Overview)
+## ภาพรวมโครงการ (Project Overview)
 
-**RUBE-STOCK-POS** เป็นระบบจัดการคลังสินค้าและจุดขาย (WMS & POS) แบบ **Local-First** ที่ทำงานได้เสถียร 100% แม้ไม่มีอินเทอร์เน็ต (100% Air-Gapped Capable) ออกแบบมาเพื่อธุรกิจค้าปลีก/ซูเปอร์มาร์เก็ต (Retail) และคาเฟ่/ร้านอาหาร (Hospitality) ภายใต้แกนประมวลผลเดี่ยว (Single Unified Engine)
+**RUBE-STOCK-POS** เป็นระบบจัดการคลังสินค้าและจุดขาย (WMS & POS) แบบ **Local-First** ที่ทำงานได้เสถียรแม้ไม่มีอินเทอร์เน็ตออกแบบมาเพื่อธุรกิจค้าปลีก/ซูเปอร์มาร์เก็ต (Retail) และคาเฟ่/ร้านอาหาร (Hospitality) ภายใต้แกนประมวลผลเดี่ยว (Single Unified Engine)
 
-### 🛡️ จุดเด่นด้านสถาปัตยกรรม (Key Architectural Pillars - v3.1)
+### จุดเด่นด้านสถาปัตยกรรม (Key Architectural Pillars - v3.1)
 
 1. **Fixed-Point Scaled Integer & `i128` Intermediate Math**:
    - ป้องกันปัญหา Floating-Point Drift และ Integer Overflow โดยจัดเก็บสต็อกในหน่วยมิลลิยูนิต ($\text{Milli-Units}, \times 10^3$), ยอดเงินในหน่วยสตางค์ ($\text{Satang}, \times 10^2$), และต้นทุนในหน่วยไมโครบาท ($\text{Micro-Baht}, \times 10^6$)
@@ -63,7 +63,7 @@ rube-stock-pos/
 
 ---
 
-## 🚀 การเปิดใช้งานแอปพลิเคชันหน้าจอขายจริง (Interactive Desktop/Web UI)
+## วิธีเปิดทดสอบโครงสร้าง UI ทั้งหมดในสภาพแวดล้อมจริง
 
 รันคำสั่งด้านล่างเพื่อเปิดระบบ **RUBE-STOCK-POS v3.1** แบบโต้ตอบครบทั้ง 6 โมดูล (หน้าขาย POS, จอครัว KDS, คลังสินค้า/PO, ผูกสูตร BOM DAG, รายงานบัญชี 4 มิติ, และแผงจำลองฮาร์ดแวร์ HIL):
 
@@ -74,7 +74,7 @@ npm start
 
 ---
 
-## 🧪 การทดสอบระบบอัตโนมัติ (Automated Testing)
+## ทดสอบระบบอัตโนมัติ (Automated Testing)
 
 รันคำสั่งตรวจสอบความถูกต้องของโครงสร้างฐานข้อมูลและชุดทดสอบทางบัญชี/ฮาร์ดแวร์:
 
@@ -112,12 +112,9 @@ npm test
 # รันชุดทดสอบและคอมไพล์ฝั่ง Rust Workspace ทั้ง 4 Crates (rusqlite + i128 math + Shift/VAT + Keyring HMAC + 5-Step Migrator + mDNS/mTLS/KDS/Epoch Fencing)
 cargo test
 ```
-
-ผลการทดสอบ: **Node.js `34/34 Tests` + Rust `18/18 Tests` + PR Gatekeeping `3/3 Rules` ผ่านครบ 100%**
-
 ---
 
-## 📚 เอกสารอ้างอิงหลัก (Core Specifications)
+## เอกสารอ้างอิงหลัก (Core Specifications)
 
 - [ARCHITECTURE.md](rube_stock_pos_complete_architecture_specification%20(1).md) - สถาปัตยกรรมระบบโดยละเอียด (v3.1)
 - [IMPLEMENTATION_PLAYBOOK.md](rube_stock_pos_team_implementation_assembly_playbook.md) - แผนผังทีมงานและตาราง Master WBS 16 สัปดาห์
