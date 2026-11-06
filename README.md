@@ -68,8 +68,9 @@ rube-stock-pos/
 ---
 
 ## หน้าจอตัวอย่าง
+
 <p align="center">
-  <img src="docs/assets/ui-desktop-mockup.jpg" alt="RUBE-STOCK-POS v3.1 Interactive UI Desktop Application Mockup" width="100%" />
+  <img src="docs/assets/rube_pos_ui_mockup.jpg" alt="RUBE-STOCK-POS v3.1 Interactive UI Desktop Application Mockup" width="100%" />
 </p>
 
 รันคำสั่งด้านล่างเพื่อเปิดระบบ **RUBE-STOCK-POS v3.1** แบบโต้ตอบครบทั้ง 6 โมดูล (หน้าขาย POS, จอครัว KDS, คลังสินค้า/PO, ผูกสูตร BOM DAG, รายงานบัญชี 4 มิติ, และแผงจำลองฮาร์ดแวร์ HIL):
