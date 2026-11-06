@@ -1,6 +1,6 @@
 {
   "name": "rube-stock-pos-monorepo",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "type": "module",
   "private": true,
   "description": "RUBE-STOCK-POS v3.1 Unified Local-First Warehouse & POS System Monorepo",

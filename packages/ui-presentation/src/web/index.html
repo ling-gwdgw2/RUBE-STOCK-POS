@@ -431,6 +431,19 @@
             <button class="btn emerald" onclick="simulateUpsState(true, 100)">⚡ เสียบปลั๊กไฟบ้านกลับตามปกติ (AC Online)</button>
           </div>
         </div>
+
+        <div class="panel">
+          <h2>💾 ปิดกะ Blind Drop & ดึงแฟลชไดรฟ์ USB ออกกลางคัน (.part Cleanup)</h2>
+          <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">
+            จำลองแคชเชียร์นับเงินสดแบบไม่รู้ยอดในระบบ (Blind Drop) และกรณีดึงแฟลชไดรฟ์ออกขณะระบบกำลังบันทึกไฟล์สำรอง:
+          </p>
+          <div class="btn-row">
+            <button class="btn amber" onclick="simulateYankUsb()">🔌 1. จำลองดึง USB ออกกลางคัน (ทิ้งไฟล์ .part ค้าง)</button>
+            <button class="btn emerald" onclick="closeShiftBlindDrop(0)">🔒 2. ปิดกะ Blind Drop (นับเงินตรง 100%)</button>
+            <button class="btn rose" onclick="closeShiftBlindDrop(-5000)">💸 3. ปิดกะ Blind Drop (จำลองเงินขาด 50฿)</button>
+          </div>
+          <div id="usbBackupResultText" style="margin-top:10px; font-size:13px; font-weight:700;"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -765,11 +778,41 @@
       `).join('') || '<tr><td colspan="5">ยังไม่มีข้อมูลการขาย</td></tr>';
     }
 
-    async function closeShiftAndBackupUsb() {
-      const res = await api('/api/shift/close-and-reopen', 'POST');
+    async function simulateYankUsb() {
+      const res = await api('/api/shift/simulate-yank-usb', 'POST');
+      const resEl = document.getElementById('usbBackupResultText');
+      if (resEl) {
+        resEl.style.color = '#f59e0b';
+        resEl.textContent = `⚠️ ${res.message} -> ${res.corruptFilename} (จะถูกตรวจพบและล้างอัตโนมัติเมื่อกดปิดกะ)`;
+      }
+      showToast(res.message);
+    }
+
+    async function closeShiftBlindDrop(varianceOffsetSatang = 0) {
+      const res = await api('/api/shift/close-and-reopen', 'POST', {
+        cashVarianceOffsetSatang: varianceOffsetSatang,
+        notes: varianceOffsetSatang !== 0 ? `ปิดกะทดสอบผลต่างเงินสด ${varianceOffsetSatang / 100}฿` : 'ปิดกะ Blind Drop ปกติ'
+      });
       await refreshAll();
-      await loadReports();
-      showToast(`🔒 ปิดกะสำเร็จ (Variance: ฿0.00) และสำรองไฟล์เข้ารหัสลง USB (${res.usbBackup.retainedBackupsCount}/14 กะ)!`);
+      if (document.getElementById('tab-reports').classList.contains('active')) {
+        await loadReports();
+      }
+      const varianceFormatted = (res.closedShift.cashVarianceSatang / 100).toFixed(2);
+      const cleanedPartText = res.usbBackup.cleanedOrphanedPartFilesCount > 0
+        ? ` | ล้างไฟล์ .part ที่ตกค้าง: ${res.usbBackup.cleanedOrphanedPartFilesCount} ไฟล์`
+        : '';
+      const summaryMsg = `🔒 ปิดกะ ${res.closedShift.shiftNumber} สำเร็จ! นับได้: ฿${(res.closedShift.countedCashSatang / 100).toFixed(2)} (ผลต่าง Variance: ฿${varianceFormatted}) | สำรองลง USB: ${res.usbBackup.retainedBackupsCount}/14 กะ${cleanedPartText}`;
+      
+      const resEl = document.getElementById('usbBackupResultText');
+      if (resEl) {
+        resEl.style.color = res.closedShift.cashVarianceSatang === 0 ? '#34d399' : '#fbbf24';
+        resEl.textContent = summaryMsg;
+      }
+      showToast(summaryMsg);
+    }
+
+    async function closeShiftAndBackupUsb() {
+      return closeShiftBlindDrop(0);
     }
 
     async function switchBusinessProfile(profile) {
@@ -798,3 +841,4 @@
   </script>
 </body>
 </html>
+

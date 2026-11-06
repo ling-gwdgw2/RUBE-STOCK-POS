@@ -365,6 +365,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - เพิ่มคำสั่ง `npm start` สำหรับเปิดใช้งานระบบผ่านเบราว์เซอร์หรือ WebView2 ที่ `http://127.0.0.1:4173`
   - เพิ่มชุดทดสอบอัตโนมัติ `npm run test:ui-server` ทดสอบ API และหน้าจอครบทุกส่วน ผ่านครบ **100% (`34/34` Node Tests + `18/18` Rust Tests)**
 
+---
+
+## [3.1.1] - 2026-11-06T14:24:45+07:00
+
+### Hardware-in-the-Loop (HIL) Real-World Hardware Simulation & Shift Sequence Hardening
+
+#### Added & Hardened
+- **`packages/ui-presentation/src/web/index.html` & `packages/ui-presentation/src/server/pos-desktop-server.ts`**:
+  - **จำลองการดึงแฟลชไดรฟ์ USB ออกกลางคัน (`simulateYankUsb` / `POST /api/shift/simulate-yank-usb`)**:
+    - สร้างไฟล์สำรองข้อมูลชั่วคราวที่เขียนไม่เสร็จ (`.part`) ในโฟลเดอร์สำรองข้อมูล USB เพื่อจำลองพฤติกรรมฮาร์ดแวร์เมื่อผู้ใช้ดึง Flash Drive ออกกะทันหัน
+    - ระบบปิดกะรอบถัดไปตรวจจับไฟล์ตกค้างและกำจัดไฟล์ `.part` ทิ้งอัตโนมัติ (`cleanedOrphanedPartFilesCount: 1`) พร้อมเขียนไฟล์สำรองข้อมูลที่สมบูรณ์และหมุนเวียน Ring-Buffer ขนาด 14 กะอย่างปลอดภัย
+  - **ระบบปิดกะแบบยอดเงินไม่ตรง (`closeShiftBlindDrop` with Cash Variance)**:
+    - รองรับการส่ง `cashVarianceOffsetSatang` เพื่อจำลองกรณีเงินสดขาด/เกินในลิ้นชัก (เช่น เงินขาด 50.00 บาท = `-5000 satang`)
+    - ออก Z-Report บันทึกผลต่างเงินสดที่นับได้จริงเทียบกับยอดคาดหวังลงใน `pos_shifts` อย่างแม่นยำ
+
+#### Fixed & Resolved
+- **ป้องกันข้อผิดพลาดหมายเลขกะและใบสั่งซื้อซ้ำ (`UNIQUE constraint failed: pos_shifts.shift_number` & `po_records.po_number`)**:
+  - แก้ไข `ensureActiveShiftOpen()` และการรับของเข้าคลัง `receivePurchaseOrderWithLandedCosts()` ใน [`pos-desktop-server.ts`](file:///d:/RUBE-STOCK-POS/packages/ui-presentation/src/server/pos-desktop-server.ts) ให้ดึงจำนวนแถวจากฐานข้อมูลจริงมาตั้งต้นเลขกะและเลข PO
+  - เพิ่มกลไก While-Try-Catch Increment Retry Loop เมื่อพบข้อผิดพลาด `UNIQUE constraint` ทำให้การรันเซิร์ฟเวอร์ต่อยอดบนฐานข้อมูลเดิม (`rube_pos_live.db`) ไม่เกิดการหยุดชะงักและสร้างกะถัดไป (`SHF-LIVE-003`, `SHF-LIVE-004`) ได้อย่างราบรื่น 100%
+
+#### Verified & Tested (2026-11-06 14:24:45 ICT)
+- **การทดสอบเคสฮาร์ดแวร์จริง (HIL Bench Verification 6/6 ผ่านครบ 100%)**:
+  1. **Thai Scanner Rollback**: จำลองยิงปืนสแกนเนอร์เร็ว `< 50ms` ขณะค้างภาษาไทย ตรวจจับ `firstCharRollbackCount: 1`, ล้างช่องค้นหา และเพิ่มสินค้าลงตะกร้าถูกต้อง
+  2. **Scale Barcodes (Prefix 20 & 25)**:
+     - Prefix 20 (`2010045015004`): ถอดรหัสน้ำหนัก 1.500 กก. @ 180.00 บาท/กก. = 270.00 บาท
+     - Prefix 25 (`2510045090005`): ถอดรหัสราคา 90.00 บาท คำนวณน้ำหนักได้ 0.500 กก.
+  3. **Thermal Printer Spool Queue**: ฝาเปิดขณะชำระเงิน บิลถูกพักเข้าคิว (`QUEUED_PAPER_OUT_OR_COVER_OPEN`), เมื่อปิดฝา ระบบสั่งพิมพ์อัตโนมัติ (`autoFlushedCount: 1`) โดยไม่ตัดสต็อกซ้ำ
+  4. **UPS Power-Loss Emergency Checkpoint**:
+     - แบตเตอรี่ 65%: ทริกเกอร์ `wal_checkpoint(TRUNCATE)` ซิงค์ข้อมูลลงดิสก์ทันที (`walCheckpointFlushed: true`)
+     - แบตเตอรี่ 15%: ล็อกระบบเป็นโหมดอ่านอย่างเดียว (`LOW_POWER_READ_ONLY_LOCK`)
+     - ไฟมา 100%: กลับสู่สถานะ `NORMAL_AC_ONLINE` ปกติ
+  5. **BOM Cycle Guard**: ปฏิเสธการผูกสูตรวนลูปด้วย `HTTP 422 Unprocessable Entity` ("Circular BOM Dependency detected")
+  6. **Yanked USB & Cash Variance Blind Drop**: จำลองดึง USB ทิ้งไฟล์ `.part` และปิดกะเงินสดขาด -50.00 บาท ระบบสร้าง Z-Report บันทึกผลต่าง ลบไฟล์ `.part` ชำรุด และหมุนเวียนไฟล์สำรองข้อมูล 14-Shift Ring Buffer สำเร็จ
+- **ผลทดสอบรวมทุกระบบ**:
+  - Node.js Test Suite: **34/34 passing (100%)**
+  - Rust Cargo Workspace (`cargo test --workspace`): **18/18 passing (100%)**
+  - Schema Checksum Verification: **34 Tables, 4 Triggers, SHA-256 Checksum Match**
+
+
 
 
 

@@ -88,6 +88,23 @@ export class RubePosInteractiveAppServer {
         await this.ipc.triggerEmergencyUpsWalCheckpoint('POS-TERM-01');
       },
     });
+
+    try {
+      const shiftRow = this.engine.executeRead((db) => {
+        return db.prepare('SELECT count(*) as cnt FROM pos_shifts').get() as { cnt: number } | undefined;
+      });
+      if (shiftRow && typeof shiftRow.cnt === 'number') {
+        this.shiftSequenceCounter = Math.max(1, shiftRow.cnt + 1);
+      }
+      const poRow = this.engine.executeRead((db) => {
+        return db.prepare('SELECT count(*) as cnt FROM po_records').get() as { cnt: number } | undefined;
+      });
+      if (poRow && typeof poRow.cnt === 'number') {
+        this.poSequenceCounter = Math.max(1, poRow.cnt + 1);
+      }
+    } catch {
+      // schema might be uninitialized in fresh db
+    }
   }
 
   private async ensureActiveShiftOpen(): Promise<void> {
@@ -97,14 +114,26 @@ export class RubePosInteractiveAppServer {
     }
     const active = this.ipc.getActiveShift('OUTLET-HQ', 'POS-TERM-01');
     if (!active) {
-      const shiftNo = `SHF-LIVE-${String(this.shiftSequenceCounter).padStart(3, '0')}`;
-      await this.ipc.openPosShift({
-        outletId: 'OUTLET-HQ',
-        terminalId: 'POS-TERM-01',
-        shiftNumber: shiftNo,
-        openedByUserId: 'USR-CASHIER-01',
-        openingCashSatang: 100_000, // 1,000.00 THB
-      });
+      let opened = false;
+      while (!opened) {
+        const shiftNo = `SHF-LIVE-${String(this.shiftSequenceCounter++).padStart(3, '0')}`;
+        try {
+          await this.ipc.openPosShift({
+            outletId: 'OUTLET-HQ',
+            terminalId: 'POS-TERM-01',
+            shiftNumber: shiftNo,
+            openedByUserId: 'USR-CASHIER-01',
+            openingCashSatang: 100_000, // 1,000.00 THB
+          });
+          opened = true;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes('UNIQUE') || msg.includes('shift_number')) {
+            continue;
+          }
+          throw err;
+        }
+      }
     }
   }
 
@@ -423,35 +452,47 @@ export class RubePosInteractiveAppServer {
         const body = await this.readJsonBody<{ porkKg?: number; freightBaht?: number }>(req);
         const porkQtyMilli = Math.max(1, Math.round(Number(body.porkKg ?? 10) * 1_000));
         const freightSatang = Math.max(0, Math.round(Number(body.freightBaht ?? 250) * 100));
-        const poNumber = `PO-LIVE-${String(this.poSequenceCounter++).padStart(4, '0')}`;
-
-        const poRes = await this.ipc.receivePurchaseOrderWithLandedCosts({
-          poNumber,
-          outletId: 'OUTLET-HQ',
-          supplierId: 'SUP-001',
-          createdByUserId: 'USR-WH-01',
-          items: [
-            {
-              variantId: 'VAR-RET-002',
-              orderedQtyMilli: porkQtyMilli,
-              receivedQtyMilli: porkQtyMilli,
-              baseUnitCostMicroBaht: 125_000_000, // 125.00 THB/kg
-            },
-            {
-              variantId: 'VAR-RAW-TEA',
-              orderedQtyMilli: 5_000,
-              receivedQtyMilli: 5_000,
-              baseUnitCostMicroBaht: 300_000, // 0.30 THB/g
-            },
-          ],
-          landedCosts: [
-            {
-              costType: 'FREIGHT',
-              description: 'Freight & Cold-Chain Delivery',
-              amountSatang: freightSatang,
-            },
-          ],
-        });
+        let poRes;
+        let createdPo = false;
+        while (!createdPo) {
+          const poNumber = `PO-LIVE-${String(this.poSequenceCounter++).padStart(4, '0')}`;
+          try {
+            poRes = await this.ipc.receivePurchaseOrderWithLandedCosts({
+              poNumber,
+              outletId: 'OUTLET-HQ',
+              supplierId: 'SUP-001',
+              createdByUserId: 'USR-WH-01',
+              items: [
+                {
+                  variantId: 'VAR-RET-002',
+                  orderedQtyMilli: porkQtyMilli,
+                  receivedQtyMilli: porkQtyMilli,
+                  baseUnitCostMicroBaht: 125_000_000, // 125.00 THB/kg
+                },
+                {
+                  variantId: 'VAR-RAW-TEA',
+                  orderedQtyMilli: 5_000,
+                  receivedQtyMilli: 5_000,
+                  baseUnitCostMicroBaht: 300_000, // 0.30 THB/g
+                },
+              ],
+              landedCosts: [
+                {
+                  costType: 'FREIGHT',
+                  description: 'Freight & Cold-Chain Delivery',
+                  amountSatang: freightSatang,
+                },
+              ],
+            });
+            createdPo = true;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.includes('UNIQUE') || msg.includes('po_number')) {
+              continue;
+            }
+            throw err;
+          }
+        }
         this.sendJson(res, 200, poRes);
         return;
       }
@@ -494,17 +535,44 @@ export class RubePosInteractiveAppServer {
         return;
       }
 
+      if (method === 'POST' && url.pathname === '/api/shift/simulate-yank-usb') {
+        const corruptPartPath = path.join(
+          this.usbBackupDir,
+          `rube_backup_SHF-LIVE-YANKED-${Date.now()}.db.enc.part`
+        );
+        fs.writeFileSync(corruptPartPath, 'CORRUPT_BYTES_FROM_YANKED_USB_FLASH_DRIVE_SIMULATION');
+        this.sendJson(res, 200, {
+          ok: true,
+          corruptFilename: path.basename(corruptPartPath),
+          message: 'จำลองการดึงแฟลชไดรฟ์ USB ออกกลางคันสำเร็จ (ทิ้งไฟล์ .part ชำรุดไว้ในไดเรกทอรีสำรองข้อมูล)',
+        });
+        return;
+      }
+
       if (method === 'POST' && url.pathname === '/api/shift/close-and-reopen') {
         await this.ensureActiveShiftOpen();
         const activeShift = this.ipc.getActiveShift('OUTLET-HQ', 'POS-TERM-01')!;
+        const body = await this.readJsonBody<{
+          countedCashSatang?: number;
+          cashVarianceOffsetSatang?: number;
+          notes?: string;
+        }>(req);
+        let countedCashSatang = activeShift.expectedCashSatang;
+        if (typeof body.countedCashSatang === 'number') {
+          countedCashSatang = body.countedCashSatang;
+        } else if (typeof body.cashVarianceOffsetSatang === 'number') {
+          countedCashSatang = Math.max(
+            0,
+            activeShift.expectedCashSatang + Number(body.cashVarianceOffsetSatang)
+          );
+        }
         const closeRes = await this.reportsController.closeShiftWithAutoUsbBackup({
           shiftId: activeShift.id,
           closedByUserId: 'USR-CASHIER-01',
-          countedCashSatang: activeShift.expectedCashSatang,
+          countedCashSatang,
           usbBackupDir: this.usbBackupDir,
-          notes: 'Closed from Interactive POS UI',
+          notes: body.notes ?? 'Closed from Interactive POS UI',
         });
-        this.shiftSequenceCounter++;
         await this.ensureActiveShiftOpen();
         this.sendJson(res, 200, closeRes);
         return;

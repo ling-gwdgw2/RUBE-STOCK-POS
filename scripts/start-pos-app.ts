@@ -24,3 +24,4 @@ console.log('🚀 RUBE-STOCK-POS v3.1 Interactive Full-Stack Application Running
 console.log(`🌐 Open in Browser / WebView2: ${url}`);
 console.log(`🗄️  SQLite WAL Database:        ${dbPath}`);
 console.log('===================================================================');
+

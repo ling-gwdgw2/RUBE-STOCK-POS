@@ -1,10 +1,10 @@
-# RUBE-STOCK-POS (v3.1)
+# RUBE-STOCK-POS (v3.1.1)
 
 Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Hardened Blueprint)
 
 [![Phase 0–6 & HIL Tests](https://img.shields.io/badge/Node%20Tests-34%2F34%20Passing-brightgreen)](#automated-testing)
 [![Rust Workspace Tests](https://img.shields.io/badge/Cargo%20Tests-18%2F18%20Passing-brightgreen)](#automated-testing)
-[![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.0-blue)](#key-architectural-pillars)
+[![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.1-blue)](#key-architectural-pillars)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Standalone%20%7C%20Local%20LAN-orange)](#overview)
 
 ---
