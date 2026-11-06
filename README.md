@@ -67,8 +67,7 @@ rube-stock-pos/
 
 ---
 
-## หน้าจอตัวอย่างและการเปิดใช้งานแอปพลิเคชันจริง (UI & Application Preview)
-
+## หน้าจอตัวอย่าง
 <p align="center">
   <img src="docs/assets/ui-desktop-mockup.jpg" alt="RUBE-STOCK-POS v3.1 Interactive UI Desktop Application Mockup" width="100%" />
 </p>
