@@ -78,6 +78,13 @@ export interface PosShiftDto {
   openedAt: string;
 }
 
+export interface SplitPaymentLegInput {
+  paymentMethod: 'CASH' | 'PROMPTPAY_QR' | 'CARD' | 'VOUCHER';
+  amountSatang: Satang;
+  cashTenderedSatang?: Satang | undefined;
+  slipTransRefRaw?: string | undefined;
+}
+
 export interface CheckoutOrderRequest {
   idempotencyKey: string;
   outletId: string;
@@ -85,11 +92,13 @@ export interface CheckoutOrderRequest {
   shiftId: string;
   cashierId: string;
   orderType: 'RETAIL' | 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY';
+  tableOrQueueNo?: string | undefined;
   taxMode: TaxMode;
   discountSatang: Satang;
   paymentMethod: 'CASH' | 'PROMPTPAY_QR' | 'CARD' | 'VOUCHER';
-  cashTenderedSatang?: Satang;
-  slipTransRefRaw?: string;
+  cashTenderedSatang?: Satang | undefined;
+  slipTransRefRaw?: string | undefined;
+  splitPayments?: ReadonlyArray<SplitPaymentLegInput> | undefined;
   lines: ReadonlyArray<{
     variantId: string;
     quantityMilli: MilliUnit;

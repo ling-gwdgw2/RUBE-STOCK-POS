@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    /* Canonical Google Design System (--glue-*) Tokens from google.design.md */
+    --glue-blue-600: #1a73e8;
+    --glue-blue-700: #1967d2;
+    --glue-blue-50: #e8f0fe;
+    --glue-red-500: #ea4335;
+    --glue-yellow-500: #fbbc04;
+    --glue-green-500: #34a853;
+
+    --glue-grey-900: #202124; /* ink */
+    --glue-grey-800: #3c4043; /* ink-soft */
+    --glue-grey-700: #5f6368; /* ink-muted */
+    --glue-grey-600: #80868b; /* ink-quiet */
+    --glue-grey-300: #dadce0; /* hairline */
+    --glue-grey-100: #f8f9fa; /* surface-1 */
+    --glue-grey-0: #ffffff;   /* canvas */
+    --glue-hero-bg: #000000;  /* hero-bg */
+
+    /* Canonical Two-Typeface Split (Google Sans -> Manrope, Google Sans Text -> Inter) */
+    --font-google-sans: "Google Sans", "Product Sans", "Manrope", "Noto Sans Thai", Arial, Helvetica, sans-serif;
+    --font-google-text: "Google Sans Text", "Inter", "Noto Sans Thai", Arial, Helvetica, sans-serif;
+
+    font-family: var(--font-google-text);
+    color-scheme: light;
+  }
+
+  body {
+    margin: 0;
+    background-color: #ffffff;
+    color: #202124;
+    overflow-x: hidden;
+  }
+}
+
+/* Google Sans Spoken / Display / CTA Tier */
+.font-google-display {
+  font-family: var(--font-google-sans);
+}
+
+/* Google Sans Text Body / Metadata Tier */
+.font-google-body {
+  font-family: var(--font-google-text);
+}
+
+/* Tabular figures within Google Sans / Google Sans Text (no third monospace family on POS surface) */
+.tabular-nums-google {
+  font-family: var(--font-google-sans);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Keep font-mono-num for back-office tables compatibility */
+.font-mono-num {
+  font-family: var(--font-google-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Respect prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Subtle hairline scrollbars on white canvas */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f8f9fa;
+}
+::-webkit-scrollbar-thumb {
+  background: #dadce0;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #80868b;
+}
+
+/* 80mm Thermal Receipt Surface (Zero Drop Shadow, 1px Hairline) */
+.thermal-receipt-paper {
+  background: #ffffff;
+  color: #202124;
+  font-family: 'Courier New', Consolas, monospace;
+  border: 1px solid #dadce0;
+}
+
+/* Physical 80mm / 58mm Windows Thermal Printer Support (@media print) */
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+  #rube-printable-receipt,
+  #rube-printable-receipt * {
+    visibility: visible !important;
+  }
+  #rube-printable-receipt {
+    position: fixed !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 78mm !important;
+    padding: 2mm !important;
+    border: none !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 11px !important;
+    line-height: 1.35 !important;
+  }
+  #rube-printable-receipt.paper-58mm {
+    width: 56mm !important;
+    font-size: 9.5px !important;
+  }
+}

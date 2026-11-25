@@ -54,6 +54,7 @@ import {
   type ModifierDto,
   type PosShiftDto,
   type StockDeductionEntry,
+  type UserRole,
 } from '../../../shared-contracts/src/ipc-commands.ts';
 import {
   SEED_BOM_EDGES,
@@ -178,6 +179,7 @@ export interface CheckoutOrderResult {
   shiftId: string;
   cashierId: string;
   orderType: CheckoutOrderRequest['orderType'];
+  tableOrQueueNo: string | null;
   taxMode: TaxMode;
   subtotalSatang: Satang;
   discountSatang: Satang;
@@ -186,6 +188,15 @@ export interface CheckoutOrderResult {
   totalSatang: Satang;
   totalCogsMicroBaht: MicroBaht;
   paymentMethod: CheckoutOrderRequest['paymentMethod'];
+  paymentSummaryLabel: string;
+  payments: Array<{
+    paymentMethod: CheckoutOrderRequest['paymentMethod'];
+    amountSatang: Satang;
+    cashTenderedSatang: Satang | null;
+    changeGivenSatang: Satang | null;
+    senderBankCode: string | null;
+    slipTransRefLast4: string | null;
+  }>;
   cashTenderedSatang: Satang | null;
   changeGivenSatang: Satang | null;
   senderBankCode: string | null;
@@ -1632,11 +1643,12 @@ export class SqliteReadWritePoolEngine {
       }
 
       // Re-verify expected cash directly from the ledger (Section 5.4.1 Cash Conservation Equation)
+      // Sum exact payment_transactions.amount_satang for CASH legs so Split Payments reconcile cleanly.
       const cashSalesRow = db
         .prepare(
-          `SELECT COALESCE(SUM(so.total_satang), 0) AS netCashSalesSatang
-           FROM sales_orders so
-           JOIN payment_transactions pt ON pt.sales_order_id = so.id
+          `SELECT COALESCE(SUM(pt.amount_satang), 0) AS netCashSalesSatang
+           FROM payment_transactions pt
+           JOIN sales_orders so ON so.id = pt.sales_order_id
            WHERE so.shift_id = ? AND so.status = 'COMPLETED' AND pt.payment_method = 'CASH'`
         )
         .get(input.shiftId) as { netCashSalesSatang: number };
@@ -1715,13 +1727,10 @@ export class SqliteReadWritePoolEngine {
           `SELECT
              so.id, so.idempotency_key, so.receipt_number, so.abb_tax_invoice_no,
              so.outlet_id, so.terminal_id, so.shift_id, so.cashier_id,
-             so.order_type, so.tax_mode, so.subtotal_satang, so.discount_satang,
+             so.order_type, so.table_or_queue_no, so.tax_mode, so.subtotal_satang, so.discount_satang,
              so.tax_satang, so.total_satang, so.total_cogs_micro_baht, so.created_at,
-             pt.payment_method, pt.cash_tendered_satang, pt.change_given_satang,
-             pt.sender_bank_code, pt.slip_trans_ref_last4, pt.slip_trans_ref_hash,
              ko.sequence_id AS kitchen_seq_id
            FROM sales_orders so
-           LEFT JOIN payment_transactions pt ON pt.sales_order_id = so.id
            LEFT JOIN kitchen_orders ko ON ko.sales_order_id = so.id
            WHERE so.idempotency_key = ?`
         )
@@ -1737,6 +1746,35 @@ export class SqliteReadWritePoolEngine {
         const netBeforeTaxSatang =
           taxMode === 'INCLUSIVE' ? afterDiscount - taxSatang : afterDiscount;
 
+        const existingPaymentsRaw = db
+          .prepare(
+            `SELECT payment_method, amount_satang, cash_tendered_satang, change_given_satang,
+                    sender_bank_code, slip_trans_ref_last4, slip_trans_ref_hash
+             FROM payment_transactions
+             WHERE sales_order_id = ?
+             ORDER BY rowid ASC`
+          )
+          .all(String(existingOrder.id)) as Array<Record<string, unknown>>;
+
+        const existingPayments = existingPaymentsRaw.map((p) => ({
+          paymentMethod: String(p.payment_method) as CheckoutOrderRequest['paymentMethod'],
+          amountSatang: Number(p.amount_satang),
+          cashTenderedSatang:
+            p.cash_tendered_satang === null ? null : Number(p.cash_tendered_satang),
+          changeGivenSatang:
+            p.change_given_satang === null ? null : Number(p.change_given_satang),
+          senderBankCode: p.sender_bank_code === null ? null : String(p.sender_bank_code),
+          slipTransRefLast4:
+            p.slip_trans_ref_last4 === null ? null : String(p.slip_trans_ref_last4),
+          slipTransRefHash:
+            p.slip_trans_ref_hash === null ? null : String(p.slip_trans_ref_hash),
+        }));
+        const firstPay = existingPayments[0];
+        const replayPaymentSummary =
+          existingPayments.length > 1
+            ? existingPayments.map((p) => p.paymentMethod).join(' + ')
+            : (firstPay?.paymentMethod ?? request.paymentMethod);
+
         return {
           salesOrderId: String(existingOrder.id),
           idempotencyKey: String(existingOrder.idempotency_key),
@@ -1748,6 +1786,10 @@ export class SqliteReadWritePoolEngine {
           shiftId: String(existingOrder.shift_id),
           cashierId: String(existingOrder.cashier_id),
           orderType: String(existingOrder.order_type) as CheckoutOrderRequest['orderType'],
+          tableOrQueueNo:
+            existingOrder.table_or_queue_no === null || existingOrder.table_or_queue_no === undefined
+              ? null
+              : String(existingOrder.table_or_queue_no),
           taxMode,
           subtotalSatang,
           discountSatang,
@@ -1755,29 +1797,24 @@ export class SqliteReadWritePoolEngine {
           taxSatang,
           totalSatang,
           totalCogsMicroBaht: Number(existingOrder.total_cogs_micro_baht),
-          paymentMethod: String(
-            existingOrder.payment_method
-          ) as CheckoutOrderRequest['paymentMethod'],
-          cashTenderedSatang:
-            existingOrder.cash_tendered_satang === null
-              ? null
-              : Number(existingOrder.cash_tendered_satang),
-          changeGivenSatang:
-            existingOrder.change_given_satang === null
-              ? null
-              : Number(existingOrder.change_given_satang),
+          paymentMethod: (firstPay?.paymentMethod ?? request.paymentMethod) as CheckoutOrderRequest['paymentMethod'],
+          paymentSummaryLabel: replayPaymentSummary,
+          payments: existingPayments.map((p) => ({
+            paymentMethod: p.paymentMethod,
+            amountSatang: p.amountSatang,
+            cashTenderedSatang: p.cashTenderedSatang,
+            changeGivenSatang: p.changeGivenSatang,
+            senderBankCode: p.senderBankCode,
+            slipTransRefLast4: p.slipTransRefLast4,
+          })),
+          cashTenderedSatang: firstPay?.cashTenderedSatang ?? null,
+          changeGivenSatang: firstPay?.changeGivenSatang ?? null,
           senderBankCode:
-            existingOrder.sender_bank_code === null
-              ? null
-              : String(existingOrder.sender_bank_code),
+            existingPayments.find((p) => p.senderBankCode)?.senderBankCode ?? null,
           slipTransRefLast4:
-            existingOrder.slip_trans_ref_last4 === null
-              ? null
-              : String(existingOrder.slip_trans_ref_last4),
+            existingPayments.find((p) => p.slipTransRefLast4)?.slipTransRefLast4 ?? null,
           slipTransRefHash:
-            existingOrder.slip_trans_ref_hash === null
-              ? null
-              : String(existingOrder.slip_trans_ref_hash),
+            existingPayments.find((p) => p.slipTransRefHash)?.slipTransRefHash ?? null,
           kitchenOrderSequenceId:
             existingOrder.kitchen_seq_id === null || existingOrder.kitchen_seq_id === undefined
               ? null
@@ -1992,31 +2029,16 @@ export class SqliteReadWritePoolEngine {
           ? afterDiscountSatang + taxSatang
           : afterDiscountSatang;
 
-      // 5. Validate Payment Method (Cash vs PromptPay QR with BOT Slip Mini-QR Anti-Fraud)
-      let cashTenderedSatang: Satang | null = null;
-      let changeGivenSatang: Satang | null = null;
-      let senderBankCode: string | null = null;
-      let slipTransRefLast4: string | null = null;
-      let slipTransRefHash: string | null = null;
-
-      if (request.paymentMethod === 'CASH') {
-        const tendered = request.cashTenderedSatang ?? totalSatang;
-        if (tendered < totalSatang) {
-          throw new Error(
-            `Insufficient cash tendered: tendered=${tendered}, total=${totalSatang}`
-          );
-        }
-        cashTenderedSatang = tendered;
-        changeGivenSatang = tendered - totalSatang;
-      } else if (request.paymentMethod === 'PROMPTPAY_QR' && request.slipTransRefRaw) {
+      // 5. Validate Payment Method (Single Tender or Multi-Leg Split Tender + BOT Slip Anti-Fraud)
+      const parseAndVerifyBotSlip = (rawSlip: string) => {
         const botMatch = /^00(\d{2})00060000010103(\d{3})02(\d{2})([A-Za-z0-9_-]+)$/.exec(
-          request.slipTransRefRaw.trim()
+          rawSlip.trim()
         );
         if (!botMatch) {
           throw new Error('HTTP 422 Invalid BOT Slip Mini-QR format');
         }
         const outerTlvLen = Number(botMatch[1]!);
-        senderBankCode = botMatch[2]!;
+        const bankCode = botMatch[2]!;
         const declaredLen = Number(botMatch[3]!);
         const tailPayload = botMatch[4]!;
         if (
@@ -2028,20 +2050,120 @@ export class SqliteReadWritePoolEngine {
           throw new Error('HTTP 422 Invalid BOT Slip Mini-QR TLV length');
         }
         const transRef = tailPayload.slice(0, declaredLen);
-        slipTransRefLast4 = transRef.slice(-4);
-        slipTransRefHash = createHash('sha256')
-          .update(`${senderBankCode}:${transRef}`)
-          .digest('hex');
+        const last4 = transRef.slice(-4);
+        const hash = createHash('sha256').update(`${bankCode}:${transRef}`).digest('hex');
 
         const dupRow = db
           .prepare(`SELECT id FROM payment_transactions WHERE slip_trans_ref_hash = ? LIMIT 1`)
-          .get(slipTransRefHash) as { id?: string } | undefined;
+          .get(hash) as { id?: string } | undefined;
 
         if (dupRow?.id) {
           throw new Error(
-            `HTTP 409 Duplicate Slip TransRef detected (hash=${slipTransRefHash.slice(0, 12)}...)`
+            `HTTP 409 Duplicate Slip TransRef detected (hash=${hash.slice(0, 12)}...)`
           );
         }
+        return { bankCode, last4, hash };
+      };
+
+      interface ValidatedPaymentRow {
+        paymentMethod: CheckoutOrderRequest['paymentMethod'];
+        amountSatang: Satang;
+        cashTenderedSatang: Satang | null;
+        changeGivenSatang: Satang | null;
+        senderBankCode: string | null;
+        slipTransRefLast4: string | null;
+        slipTransRefHash: string | null;
+      }
+
+      const validatedPaymentRows: ValidatedPaymentRow[] = [];
+      let cashTenderedSatang: Satang | null = null;
+      let changeGivenSatang: Satang | null = null;
+      let senderBankCode: string | null = null;
+      let slipTransRefLast4: string | null = null;
+      let slipTransRefHash: string | null = null;
+      let netCashAddedToDrawerSatang = 0;
+
+      if (request.splitPayments && request.splitPayments.length > 0) {
+        const sumLegs = request.splitPayments.reduce((s, l) => s + Number(l.amountSatang), 0);
+        if (sumLegs !== totalSatang) {
+          throw new Error(
+            `Split payment sum (${sumLegs}) must equal order totalSatang (${totalSatang})`
+          );
+        }
+        const seenInOrderHashes = new Set<string>();
+        for (const leg of request.splitPayments) {
+          if (leg.amountSatang <= 0) {
+            throw new Error('Each split payment leg amountSatang must be > 0');
+          }
+          let legTendered: Satang | null = null;
+          let legChange: Satang | null = null;
+          let legBank: string | null = null;
+          let legLast4: string | null = null;
+          let legHash: string | null = null;
+
+          if (leg.paymentMethod === 'CASH') {
+            const t = leg.cashTenderedSatang ?? leg.amountSatang;
+            if (t < leg.amountSatang) {
+              throw new Error(
+                `Insufficient cash tendered on split leg: tendered=${t}, required=${leg.amountSatang}`
+              );
+            }
+            legTendered = t;
+            legChange = t - leg.amountSatang;
+            cashTenderedSatang = (cashTenderedSatang ?? 0) + legTendered;
+            changeGivenSatang = (changeGivenSatang ?? 0) + legChange;
+            netCashAddedToDrawerSatang += leg.amountSatang;
+          } else if (leg.paymentMethod === 'PROMPTPAY_QR' && leg.slipTransRefRaw) {
+            const slip = parseAndVerifyBotSlip(leg.slipTransRefRaw);
+            if (seenInOrderHashes.has(slip.hash)) {
+              throw new Error('HTTP 409 Duplicate Slip TransRef within split payment legs');
+            }
+            seenInOrderHashes.add(slip.hash);
+            legBank = slip.bankCode;
+            legLast4 = slip.last4;
+            legHash = slip.hash;
+            senderBankCode = legBank;
+            slipTransRefLast4 = legLast4;
+            slipTransRefHash = legHash;
+          }
+
+          validatedPaymentRows.push({
+            paymentMethod: leg.paymentMethod,
+            amountSatang: leg.amountSatang,
+            cashTenderedSatang: legTendered,
+            changeGivenSatang: legChange,
+            senderBankCode: legBank,
+            slipTransRefLast4: legLast4,
+            slipTransRefHash: legHash,
+          });
+        }
+      } else {
+        if (request.paymentMethod === 'CASH') {
+          const tendered = request.cashTenderedSatang ?? totalSatang;
+          if (tendered < totalSatang) {
+            throw new Error(
+              `Insufficient cash tendered: tendered=${tendered}, total=${totalSatang}`
+            );
+          }
+          cashTenderedSatang = tendered;
+          changeGivenSatang = tendered - totalSatang;
+          netCashAddedToDrawerSatang = totalSatang;
+        } else if (request.paymentMethod === 'PROMPTPAY_QR' && request.slipTransRefRaw) {
+          const slip = parseAndVerifyBotSlip(request.slipTransRefRaw);
+          senderBankCode = slip.bankCode;
+          slipTransRefLast4 = slip.last4;
+          slipTransRefHash = slip.hash;
+        }
+
+        validatedPaymentRows.push({
+          paymentMethod: request.paymentMethod,
+          amountSatang: totalSatang,
+          cashTenderedSatang,
+          changeGivenSatang,
+          senderBankCode,
+          slipTransRefLast4,
+          slipTransRefHash,
+        });
       }
 
       // 6. Generate sequential Receipt Number & Thai ABB Tax Invoice Number
@@ -2057,13 +2179,14 @@ export class SqliteReadWritePoolEngine {
       const createdAt = new Date().toISOString();
 
       // 7. Insert sales_orders, sales_order_items, sales_order_item_modifiers, payment_transactions
+      const cleanTableOrQueue = request.tableOrQueueNo?.trim() || null;
       db.prepare(
         `INSERT INTO sales_orders (
            id, idempotency_key, receipt_number, abb_tax_invoice_no,
-           outlet_id, terminal_id, shift_id, cashier_id, order_type, status,
+           outlet_id, terminal_id, shift_id, cashier_id, order_type, table_or_queue_no, status,
            tax_mode, subtotal_satang, discount_satang, tax_satang, total_satang,
            total_cogs_micro_baht, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?, ?, ?, ?)`
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         salesOrderId,
         request.idempotencyKey,
@@ -2074,6 +2197,7 @@ export class SqliteReadWritePoolEngine {
         request.shiftId,
         request.cashierId,
         request.orderType,
+        cleanTableOrQueue,
         request.taxMode,
         subtotalSatang,
         discountSatang,
@@ -2121,29 +2245,32 @@ export class SqliteReadWritePoolEngine {
         );
       }
 
-      db.prepare(
+      const insertPaymentTx = db.prepare(
         `INSERT INTO payment_transactions (
            id, sales_order_id, payment_method, amount_satang,
            cash_tendered_satang, change_given_satang,
            sender_bank_code, slip_trans_ref_last4, slip_trans_ref_hash, verified_by_user_id
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        `PAY-${randomUUID()}`,
-        salesOrderId,
-        request.paymentMethod,
-        totalSatang,
-        cashTenderedSatang,
-        changeGivenSatang,
-        senderBankCode,
-        slipTransRefLast4,
-        slipTransRefHash,
-        request.cashierId
       );
+      for (const pRow of validatedPaymentRows) {
+        insertPaymentTx.run(
+          `PAY-${randomUUID()}`,
+          salesOrderId,
+          pRow.paymentMethod,
+          pRow.amountSatang,
+          pRow.cashTenderedSatang,
+          pRow.changeGivenSatang,
+          pRow.senderBankCode,
+          pRow.slipTransRefLast4,
+          pRow.slipTransRefHash,
+          request.cashierId
+        );
+      }
 
-      if (request.paymentMethod === 'CASH') {
+      if (netCashAddedToDrawerSatang > 0) {
         db.prepare(
           `UPDATE pos_shifts SET expected_cash_satang = expected_cash_satang + ? WHERE id = ?`
-        ).run(totalSatang, request.shiftId);
+        ).run(netCashAddedToDrawerSatang, request.shiftId);
       }
 
       // 8. Deduct Stock in inventory_levels and record immutable inventory_transactions
@@ -2206,13 +2333,16 @@ export class SqliteReadWritePoolEngine {
 
       if (kitchenLines.length > 0) {
         const koId = `KO-${randomUUID()}`;
-        const queueNumber = `Q-${String(nextSeq).padStart(3, '0')}`;
+        const queueNumber = cleanTableOrQueue || `Q-${String(nextSeq).padStart(3, '0')}`;
+        const firstStation = catalogMap.get(kitchenLines[0]!.variantId)?.kitchenStation;
+        const primaryStation =
+          firstStation && firstStation !== 'NONE' ? firstStation : 'BAR';
         const koResult = db
           .prepare(
             `INSERT INTO kitchen_orders (id, sales_order_id, outlet_id, station, queue_number, status)
-             VALUES (?, ?, ?, 'BAR', ?, 'QUEUED')`
+             VALUES (?, ?, ?, ?, ?, 'QUEUED')`
           )
-          .run(koId, salesOrderId, request.outletId, queueNumber);
+          .run(koId, salesOrderId, request.outletId, primaryStation, queueNumber);
 
         kitchenOrderSequenceId = Number(koResult.lastInsertRowid);
 
@@ -2249,6 +2379,7 @@ export class SqliteReadWritePoolEngine {
         shiftId: request.shiftId,
         cashierId: request.cashierId,
         orderType: request.orderType,
+        tableOrQueueNo: cleanTableOrQueue,
         taxMode: request.taxMode,
         subtotalSatang,
         discountSatang,
@@ -2257,6 +2388,18 @@ export class SqliteReadWritePoolEngine {
         totalSatang,
         totalCogsMicroBaht,
         paymentMethod: request.paymentMethod,
+        paymentSummaryLabel:
+          validatedPaymentRows.length > 1
+            ? validatedPaymentRows.map((p) => p.paymentMethod).join(' + ')
+            : (validatedPaymentRows[0]?.paymentMethod ?? request.paymentMethod),
+        payments: validatedPaymentRows.map((p) => ({
+          paymentMethod: p.paymentMethod,
+          amountSatang: p.amountSatang,
+          cashTenderedSatang: p.cashTenderedSatang,
+          changeGivenSatang: p.changeGivenSatang,
+          senderBankCode: p.senderBankCode,
+          slipTransRefLast4: p.slipTransRefLast4,
+        })),
         cashTenderedSatang,
         changeGivenSatang,
         senderBankCode,
@@ -2407,11 +2550,19 @@ export class SqliteReadWritePoolEngine {
          WHERE sales_order_id = ?`
       ).run(input.salesOrderId);
 
-      // If paid by CASH, decrement expected_cash_satang on the shift
-      if (paymentMethod === 'CASH') {
+      // Decrement expected_cash_satang by exact CASH portion paid on this order (supports Split Payments)
+      const cashLegSum = db
+        .prepare(
+          `SELECT COALESCE(SUM(amount_satang), 0) AS cashPaid
+           FROM payment_transactions
+           WHERE sales_order_id = ? AND payment_method = 'CASH'`
+        )
+        .get(input.salesOrderId) as { cashPaid: number };
+      const cashToReverseSatang = Number(cashLegSum.cashPaid ?? 0);
+      if (cashToReverseSatang > 0) {
         db.prepare(
           `UPDATE pos_shifts SET expected_cash_satang = expected_cash_satang - ? WHERE id = ?`
-        ).run(totalSatang, shiftId);
+        ).run(cashToReverseSatang, shiftId);
       }
 
       // Append immutable row to security_audit_logs
@@ -3311,10 +3462,10 @@ export class SqliteReadWritePoolEngine {
       const paymentSummary = db
         .prepare(
           `SELECT
-             COALESCE(SUM(CASE WHEN pt.payment_method = 'CASH' AND so.status = 'COMPLETED' THEN so.total_satang ELSE 0 END), 0) AS cashSalesSatang,
-             COALESCE(SUM(CASE WHEN pt.payment_method = 'PROMPTPAY_QR' AND so.status = 'COMPLETED' THEN so.total_satang ELSE 0 END), 0) AS promptPayQrSalesSatang,
-             COALESCE(SUM(CASE WHEN pt.payment_method = 'CARD' AND so.status = 'COMPLETED' THEN so.total_satang ELSE 0 END), 0) AS cardSalesSatang,
-             COALESCE(SUM(CASE WHEN pt.payment_method = 'VOUCHER' AND so.status = 'COMPLETED' THEN so.total_satang ELSE 0 END), 0) AS voucherSalesSatang
+             COALESCE(SUM(CASE WHEN pt.payment_method = 'CASH' AND so.status = 'COMPLETED' THEN pt.amount_satang ELSE 0 END), 0) AS cashSalesSatang,
+             COALESCE(SUM(CASE WHEN pt.payment_method = 'PROMPTPAY_QR' AND so.status = 'COMPLETED' THEN pt.amount_satang ELSE 0 END), 0) AS promptPayQrSalesSatang,
+             COALESCE(SUM(CASE WHEN pt.payment_method = 'CARD' AND so.status = 'COMPLETED' THEN pt.amount_satang ELSE 0 END), 0) AS cardSalesSatang,
+             COALESCE(SUM(CASE WHEN pt.payment_method = 'VOUCHER' AND so.status = 'COMPLETED' THEN pt.amount_satang ELSE 0 END), 0) AS voucherSalesSatang
            FROM payment_transactions pt
            JOIN sales_orders so ON so.id = pt.sales_order_id
            WHERE so.shift_id = ?`
@@ -3547,4 +3698,1486 @@ export class SqliteReadWritePoolEngine {
       };
     });
   }
+
+  // ============================================================================
+  // Phase 6 Production Back-Office, Auth/RBAC, Catalog CRUD & Audit Query Suite
+  // ============================================================================
+
+  public hashStaffPin(rawPin: string): string {
+    const clean = rawPin.trim();
+    if (!/^\d{4,8}$/.test(clean)) {
+      throw new Error('Staff PIN must be 4 to 8 numeric digits');
+    }
+    const digest = createHash('sha256').update(`RUBE-STAFF-PIN-V3.1:${clean}`, 'utf8').digest('hex');
+    return `sha256:pin:${digest}`;
+  }
+
+  private matchesPinHash(rawPin: string, storedHash: string): boolean {
+    const clean = rawPin.trim();
+    if (!/^\d{4,8}$/.test(clean)) return false;
+    // Support legacy seeded user placeholders out of the box
+    if (storedHash === 'sha256:owner_pin' && clean === '999999') return true;
+    if (storedHash === 'sha256:cashier_pin' && clean === '111111') return true;
+    if (storedHash === 'sha256:wh_pin' && clean === '222222') return true;
+
+    const computed = this.hashStaffPin(clean);
+    const a = Buffer.from(computed, 'utf8');
+    const b = Buffer.from(storedHash, 'utf8');
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  public listStaffUsers(): StaffUserDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT id, username, display_name AS displayName, role, active, created_at AS createdAt
+           FROM users
+           ORDER BY CASE role
+             WHEN 'OWNER' THEN 1
+             WHEN 'MANAGER' THEN 2
+             WHEN 'CASHIER' THEN 3
+             WHEN 'WAREHOUSE' THEN 4
+             ELSE 5
+           END, id ASC`
+        )
+        .all() as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        username: String(r.username),
+        displayName: String(r.displayName),
+        role: String(r.role) as UserRole,
+        active: Number(r.active) === 1,
+        createdAt: String(r.createdAt),
+      }));
+    });
+  }
+
+  public async authenticateStaffByPin(input: {
+    pin: string;
+    userId?: string | undefined;
+    terminalId?: string | undefined;
+  }): Promise<StaffUserDto> {
+    const terminalId = input.terminalId ?? 'POS-TERM-01';
+    return this.executeWriteImmediate((db) => {
+      const rows = input.userId
+        ? (db
+            .prepare(
+              `SELECT id, username, display_name AS displayName, role, pin_hash AS pinHash, active, created_at AS createdAt
+               FROM users WHERE id = ? AND active = 1`
+            )
+            .all(input.userId) as Array<Record<string, unknown>>)
+        : (db
+            .prepare(
+              `SELECT id, username, display_name AS displayName, role, pin_hash AS pinHash, active, created_at AS createdAt
+               FROM users WHERE active = 1`
+            )
+            .all() as Array<Record<string, unknown>>);
+
+      const matched = rows.find((r) => this.matchesPinHash(input.pin, String(r.pinHash)));
+      if (!matched) {
+        db.prepare(
+          `INSERT INTO security_audit_logs (
+             event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+           ) VALUES ('AUTH_PIN_FAILED', ?, ?, 'STAFF_SESSION', NULL, 'INVALID_PIN')`
+        ).run(input.userId ?? null, terminalId);
+        throw new Error('HTTP 401 Invalid Staff PIN or inactive user');
+      }
+
+      const user: StaffUserDto = {
+        id: String(matched.id),
+        username: String(matched.username),
+        displayName: String(matched.displayName),
+        role: String(matched.role) as UserRole,
+        active: Number(matched.active) === 1,
+        createdAt: String(matched.createdAt),
+      };
+
+      db.prepare(
+        `INSERT INTO security_audit_logs (
+           event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+         ) VALUES ('AUTH_PIN_SUCCESS', ?, ?, 'STAFF_SESSION', NULL, ?)`
+      ).run(user.id, terminalId, `ROLE:${user.role}`);
+
+      return user;
+    });
+  }
+
+  public async upsertStaffUser(input: {
+    id?: string | undefined;
+    username: string;
+    displayName: string;
+    role: UserRole;
+    pin?: string | undefined;
+    active?: boolean | undefined;
+    actorUserId?: string | undefined;
+  }): Promise<StaffUserDto> {
+    const id = input.id?.trim() || `USR-${randomUUID().slice(0, 8).toUpperCase()}`;
+    const activeInt = input.active === false ? 0 : 1;
+    const username = input.username.trim();
+    const displayName = input.displayName.trim();
+    if (!username || !displayName) {
+      throw new Error('username and displayName are required');
+    }
+
+    await this.executeWriteImmediate((db) => {
+      const existing = db
+        .prepare(`SELECT id, pin_hash AS pinHash FROM users WHERE id = ?`)
+        .get(id) as { id: string; pinHash: string } | undefined;
+
+      const pinHash = input.pin
+        ? this.hashStaffPin(input.pin)
+        : (existing?.pinHash ?? this.hashStaffPin('111111'));
+
+      if (existing) {
+        db.prepare(
+          `UPDATE users SET username = ?, display_name = ?, role = ?, pin_hash = ?, active = ? WHERE id = ?`
+        ).run(username, displayName, input.role, pinHash, activeInt, id);
+      } else {
+        db.prepare(
+          `INSERT INTO users (id, username, display_name, role, pin_hash, active)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(id, username, displayName, input.role, pinHash, activeInt);
+      }
+
+      db.prepare(
+        `INSERT INTO security_audit_logs (
+           event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+         ) VALUES ('STAFF_USER_UPSERTED', ?, 'POS-TERM-01', ?, NULL, ?)`
+      ).run(input.actorUserId ?? 'USR-OWNER-01', id, `${username}:${input.role}:active=${activeInt}`);
+    });
+
+    const found = this.listStaffUsers().find((u) => u.id === id);
+    if (!found) {
+      throw new Error(`Failed to reload upserted staff user ${id}`);
+    }
+    return found;
+  }
+
+  public getStoreIdentitySettings(outletId = 'OUTLET-HQ'): StoreIdentitySettingsDto {
+    const outletRow = this.executeRead((db) => {
+      return db
+        .prepare(
+          `SELECT id, code, name, tax_id AS taxId, branch_code AS branchCode, rd_pos_reg_no AS rdPosRegNo
+           FROM outlets WHERE id = ?`
+        )
+        .get(outletId) as Record<string, unknown> | undefined;
+    });
+
+    let promptPayId = '0105566001234';
+    try {
+      const configuredPromptPay = this.getVerifiedProtectedStoreConfig('promptpay_merchant_id');
+      if (configuredPromptPay) {
+        promptPayId = configuredPromptPay;
+      } else if (outletRow?.taxId) {
+        promptPayId = String(outletRow.taxId);
+      }
+    } catch {
+      // Fallback if tampered or unset
+    }
+
+    return {
+      outletId,
+      outletCode: String(outletRow?.code ?? 'HQ-01'),
+      storeName: String(outletRow?.name ?? 'RUBE Flagship Store & Warehouse'),
+      taxId: String(outletRow?.taxId ?? '0105566001234'),
+      branchCode: String(outletRow?.branchCode ?? '00000'),
+      rdPosRegNo: String(outletRow?.rdPosRegNo ?? 'RD-POS-2026-001'),
+      promptPayId,
+      businessProfile: this.getVerifiedBusinessProfileMode(),
+    };
+  }
+
+  public async updateStoreIdentitySettings(input: {
+    outletId?: string | undefined;
+    storeName: string;
+    taxId: string;
+    branchCode: string;
+    rdPosRegNo: string;
+    promptPayId: string;
+    updatedByUserId?: string | undefined;
+  }): Promise<StoreIdentitySettingsDto> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const actor = input.updatedByUserId ?? 'USR-OWNER-01';
+    const cleanPromptPay = input.promptPayId.replace(/\D/g, '');
+    if (cleanPromptPay.length !== 10 && cleanPromptPay.length !== 13 && cleanPromptPay.length !== 15) {
+      throw new Error('PromptPay ID must be 10 digits (Mobile), 13 digits (Tax/Citizen ID), or 15 digits (e-Wallet)');
+    }
+
+    await this.executeWriteImmediate((db) => {
+      db.prepare(
+        `UPDATE outlets SET name = ?, tax_id = ?, branch_code = ?, rd_pos_reg_no = ? WHERE id = ?`
+      ).run(
+        input.storeName.trim(),
+        input.taxId.trim(),
+        input.branchCode.trim() || '00000',
+        input.rdPosRegNo.trim(),
+        outletId
+      );
+    });
+
+    await this.setProtectedStoreConfig({
+      key: 'promptpay_merchant_id',
+      value: cleanPromptPay,
+      updatedByUserId: actor,
+    });
+
+    return this.getStoreIdentitySettings(outletId);
+  }
+
+  public listOutlets(): OutletDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT id, code, name, tax_id AS taxId, branch_code AS branchCode, rd_pos_reg_no AS rdPosRegNo, is_warehouse AS isWarehouse, active
+           FROM outlets ORDER BY is_warehouse DESC, id ASC`
+        )
+        .all() as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        code: String(r.code),
+        name: String(r.name),
+        taxId: r.taxId === null ? null : String(r.taxId),
+        branchCode: String(r.branchCode ?? '00000'),
+        rdPosRegNo: r.rdPosRegNo === null ? null : String(r.rdPosRegNo),
+        isWarehouse: Number(r.isWarehouse) === 1,
+        active: Number(r.active) === 1,
+      }));
+    });
+  }
+
+  public listCategories(): CategoryDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT id, name, display_color AS displayColor, kitchen_station AS kitchenStation, sort_order AS sortOrder
+           FROM categories ORDER BY sort_order ASC, name ASC`
+        )
+        .all() as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        name: String(r.name),
+        displayColor: String(r.displayColor ?? '#2563EB'),
+        kitchenStation: String(r.kitchenStation ?? 'NONE'),
+        sortOrder: Number(r.sortOrder ?? 0),
+      }));
+    });
+  }
+
+  public async upsertCategory(input: {
+    id?: string | undefined;
+    name: string;
+    displayColor?: string | undefined;
+    kitchenStation?: string | undefined;
+    sortOrder?: number | undefined;
+  }): Promise<CategoryDto> {
+    const id = input.id?.trim() || `CAT-${randomUUID().slice(0, 6).toUpperCase()}`;
+    const name = input.name.trim();
+    if (!name) throw new Error('Category name is required');
+    const displayColor = input.displayColor?.trim() || '#2563EB';
+    const kitchenStation = input.kitchenStation?.trim() || 'NONE';
+    const sortOrder = input.sortOrder ?? 10;
+
+    await this.executeWriteImmediate((db) => {
+      db.prepare(
+        `INSERT INTO categories (id, name, display_color, kitchen_station, sort_order)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           display_color = excluded.display_color,
+           kitchen_station = excluded.kitchen_station,
+           sort_order = excluded.sort_order`
+      ).run(id, name, displayColor, kitchenStation, sortOrder);
+    });
+
+    return { id, name, displayColor, kitchenStation, sortOrder };
+  }
+
+  public listSuppliers(): SupplierDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT id, code, name, tax_id AS taxId, phone, active
+           FROM suppliers ORDER BY code ASC`
+        )
+        .all() as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        code: String(r.code),
+        name: String(r.name),
+        taxId: r.taxId === null ? null : String(r.taxId),
+        phone: r.phone === null ? null : String(r.phone),
+        active: Number(r.active) === 1,
+      }));
+    });
+  }
+
+  public async upsertSupplier(input: {
+    id?: string | undefined;
+    code: string;
+    name: string;
+    taxId?: string | null | undefined;
+    phone?: string | null | undefined;
+  }): Promise<SupplierDto> {
+    const id = input.id?.trim() || `SUP-${randomUUID().slice(0, 6).toUpperCase()}`;
+    const code = input.code.trim().toUpperCase();
+    const name = input.name.trim();
+    if (!code || !name) throw new Error('Supplier code and name are required');
+
+    await this.executeWriteImmediate((db) => {
+      db.prepare(
+        `INSERT INTO suppliers (id, code, name, tax_id, phone, active)
+         VALUES (?, ?, ?, ?, ?, 1)
+         ON CONFLICT(id) DO UPDATE SET
+           code = excluded.code,
+           name = excluded.name,
+           tax_id = excluded.tax_id,
+           phone = excluded.phone`
+      ).run(id, code, name, input.taxId?.trim() || null, input.phone?.trim() || null);
+    });
+
+    return {
+      id,
+      code,
+      name,
+      taxId: input.taxId?.trim() || null,
+      phone: input.phone?.trim() || null,
+      active: true,
+    };
+  }
+
+  public listCatalogVariantsDetailed(outletId = 'OUTLET-HQ'): CatalogVariantDetailDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT
+             v.id,
+             v.item_id AS itemId,
+             i.name AS itemName,
+             v.variant_name AS variantName,
+             v.sku,
+             v.barcode,
+             i.unit_name AS unitName,
+             v.price_satang AS priceSatang,
+             v.default_purchase_cost_micro_baht AS defaultPurchaseCostMicroBaht,
+             COALESCE(il.average_cost_micro_baht, v.default_purchase_cost_micro_baht) AS averageCostMicroBaht,
+             COALESCE(il.in_stock_milli, 0) AS inStockMilli,
+             COALESCE(il.optimal_stock_milli, 200000) AS optimalStockMilli,
+             COALESCE(il.low_stock_threshold_milli, 10000) AS lowStockThresholdMilli,
+             i.is_composite AS isComposite,
+             i.use_production AS useProduction,
+             i.is_weighted_scale AS isWeightedScale,
+             i.category_id AS categoryId,
+             COALESCE(c.name, 'ทั่วไป') AS categoryName,
+             COALESCE(c.display_color, '#64748B') AS categoryColor,
+             COALESCE(c.kitchen_station, 'NONE') AS kitchenStation,
+             v.active AS active
+           FROM item_variants v
+           JOIN items i ON i.id = v.item_id
+           LEFT JOIN categories c ON c.id = i.category_id
+           LEFT JOIN inventory_levels il ON il.variant_id = v.id AND il.outlet_id = ?
+           ORDER BY COALESCE(c.sort_order, 99) ASC, i.name ASC, v.id ASC`
+        )
+        .all(outletId) as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        itemId: String(r.itemId),
+        itemName: String(r.itemName),
+        variantName: String(r.variantName),
+        sku: String(r.sku),
+        barcode: r.barcode === null ? null : String(r.barcode),
+        unitName: String(r.unitName),
+        priceSatang: Number(r.priceSatang),
+        defaultPurchaseCostMicroBaht: Number(r.defaultPurchaseCostMicroBaht),
+        averageCostMicroBaht: Number(r.averageCostMicroBaht),
+        inStockMilli: Number(r.inStockMilli),
+        optimalStockMilli: Number(r.optimalStockMilli),
+        lowStockThresholdMilli: Number(r.lowStockThresholdMilli),
+        isComposite: Number(r.isComposite) === 1,
+        useProduction: Number(r.useProduction) === 1,
+        isWeightedScale: Number(r.isWeightedScale) === 1,
+        categoryId: r.categoryId === null ? null : String(r.categoryId),
+        categoryName: String(r.categoryName),
+        categoryColor: String(r.categoryColor),
+        kitchenStation: String(r.kitchenStation),
+        active: Number(r.active) === 1,
+      }));
+    });
+  }
+
+  public async upsertCatalogVariant(
+    input: UpsertCatalogVariantInput
+  ): Promise<CatalogVariantDetailDto> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const variantId = input.variantId?.trim() || `VAR-${randomUUID().slice(0, 8).toUpperCase()}`;
+    const itemId = input.itemId?.trim() || `ITM-${variantId.replace(/^VAR-/, '')}`;
+    const itemName = input.itemName.trim();
+    const variantName = input.variantName?.trim() || 'ปกติ';
+    const sku = input.sku.trim();
+    const barcode = input.barcode?.trim() ? input.barcode.trim() : null;
+    const unitName = input.unitName.trim() || 'ชิ้น';
+
+    if (!itemName || !sku) {
+      throw new Error('itemName and sku are required');
+    }
+    if (input.priceSatang < 0 || input.defaultPurchaseCostMicroBaht < 0) {
+      throw new Error('priceSatang and defaultPurchaseCostMicroBaht must be >= 0');
+    }
+
+    await this.executeWriteImmediate((db) => {
+      const existingVariant = db
+        .prepare(`SELECT id, item_id AS itemId FROM item_variants WHERE id = ?`)
+        .get(variantId) as { id: string; itemId: string } | undefined;
+
+      const resolvedItemId = existingVariant?.itemId ?? itemId;
+      const activeInt = input.active === false ? 0 : 1;
+
+      db.prepare(
+        `INSERT INTO items (
+           id, name, category_id, unit_name, track_stock, is_composite, use_production, is_weighted_scale, active
+         ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           category_id = excluded.category_id,
+           unit_name = excluded.unit_name,
+           is_composite = excluded.is_composite,
+           use_production = excluded.use_production,
+           is_weighted_scale = excluded.is_weighted_scale,
+           active = excluded.active`
+      ).run(
+        resolvedItemId,
+        itemName,
+        input.categoryId ?? 'CAT-RETAIL',
+        unitName,
+        input.isComposite ? 1 : 0,
+        input.useProduction ? 1 : 0,
+        input.isWeightedScale ? 1 : 0,
+        activeInt
+      );
+
+      db.prepare(
+        `INSERT INTO item_variants (
+           id, item_id, variant_name, sku, barcode, price_satang, default_purchase_cost_micro_baht, active
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           variant_name = excluded.variant_name,
+           sku = excluded.sku,
+           barcode = excluded.barcode,
+           price_satang = excluded.price_satang,
+           default_purchase_cost_micro_baht = excluded.default_purchase_cost_micro_baht,
+           active = excluded.active`
+      ).run(
+        variantId,
+        resolvedItemId,
+        variantName,
+        sku,
+        barcode,
+        input.priceSatang,
+        input.defaultPurchaseCostMicroBaht,
+        activeInt
+      );
+
+      const existingInv = db
+        .prepare(`SELECT id, in_stock_milli FROM inventory_levels WHERE outlet_id = ? AND variant_id = ?`)
+        .get(outletId, variantId) as { id: string; in_stock_milli: number } | undefined;
+
+      const lowStockMilli = input.lowStockThresholdMilli ?? 10_000;
+      const optimalStockMilli = input.optimalStockMilli ?? 200_000;
+
+      if (!existingInv) {
+        const initStock = Math.max(0, input.initialStockMilli ?? 0);
+        const initMac = input.defaultPurchaseCostMicroBaht;
+        db.prepare(
+          `INSERT INTO inventory_levels (
+             id, outlet_id, variant_id, in_stock_milli, average_cost_micro_baht, optimal_stock_milli, low_stock_threshold_milli
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          `INV-${outletId}-${variantId}`,
+          outletId,
+          variantId,
+          initStock,
+          initMac,
+          optimalStockMilli,
+          lowStockMilli
+        );
+
+        if (initStock > 0) {
+          db.prepare(
+            `INSERT INTO inventory_transactions (
+               id, outlet_id, variant_id, transaction_type, quantity_change_milli,
+               stock_before_milli, stock_after_milli, unit_cost_micro_baht,
+               reference_type, reference_id, performed_by
+             ) VALUES (?, ?, ?, 'PO_RECEIVE', ?, 0, ?, ?, 'CATALOG_OPENING_STOCK', ?, ?)`
+          ).run(
+            `TX-OPEN-${variantId}-${Date.now()}`,
+            outletId,
+            variantId,
+            initStock,
+            initStock,
+            initMac,
+            variantId,
+            input.performedByUserId ?? 'USR-OWNER-01'
+          );
+        }
+      } else {
+        if (Number(existingInv.in_stock_milli) <= 0) {
+          db.prepare(
+            `UPDATE inventory_levels
+             SET low_stock_threshold_milli = ?, optimal_stock_milli = ?, average_cost_micro_baht = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE outlet_id = ? AND variant_id = ?`
+          ).run(
+            lowStockMilli,
+            optimalStockMilli,
+            input.defaultPurchaseCostMicroBaht,
+            outletId,
+            variantId
+          );
+        } else {
+          db.prepare(
+            `UPDATE inventory_levels
+             SET low_stock_threshold_milli = ?, optimal_stock_milli = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE outlet_id = ? AND variant_id = ?`
+          ).run(lowStockMilli, optimalStockMilli, outletId, variantId);
+        }
+      }
+    });
+
+    const reloaded = this.listCatalogVariantsDetailed(outletId).find((v) => v.id === variantId);
+    if (!reloaded) {
+      throw new Error(`Failed to reload catalog variant ${variantId}`);
+    }
+    return reloaded;
+  }
+
+  public async deleteBomComponentEdge(
+    compositeVariantId: string,
+    componentVariantId: string
+  ): Promise<void> {
+    await this.executeWriteImmediate((db) => {
+      db.prepare(
+        `DELETE FROM item_components WHERE composite_variant_id = ? AND component_variant_id = ?`
+      ).run(compositeVariantId, componentVariantId);
+    });
+  }
+
+  public listModifierGroupsWithModifiers(): ModifierGroupWithItemsDto[] {
+    return this.executeRead((db) => {
+      const groups = db
+        .prepare(
+          `SELECT id, name, selection_type AS selectionType, min_selections AS minSelections, max_selections AS maxSelections
+           FROM modifier_groups ORDER BY id ASC`
+        )
+        .all() as Array<Record<string, unknown>>;
+
+      const mods = this.listModifiers();
+      return groups.map((g) => {
+        const groupId = String(g.id);
+        return {
+          id: groupId,
+          name: String(g.name),
+          selectionType: String(g.selectionType) as 'SINGLE' | 'MULTIPLE',
+          minSelections: Number(g.minSelections),
+          maxSelections: Number(g.maxSelections),
+          modifiers: mods.filter((m) => m.modifierGroupId === groupId),
+        };
+      });
+    });
+  }
+
+  public listKitchenOrdersAllStations(
+    outletId = 'OUTLET-HQ',
+    includeServed = false
+  ): KitchenOrderTicketDto[] {
+    return this.executeRead((db) => {
+      const sql = includeServed
+        ? `SELECT sequence_id AS sequenceId, id AS kitchenOrderId, sales_order_id AS salesOrderId,
+                  outlet_id AS outletId, station, queue_number AS queueNumber, status, created_at AS createdAt
+           FROM kitchen_orders
+           WHERE outlet_id = ? AND status != 'CANCELLED'
+           ORDER BY sequence_id DESC LIMIT 60`
+        : `SELECT sequence_id AS sequenceId, id AS kitchenOrderId, sales_order_id AS salesOrderId,
+                  outlet_id AS outletId, station, queue_number AS queueNumber, status, created_at AS createdAt
+           FROM kitchen_orders
+           WHERE outlet_id = ? AND status NOT IN ('SERVED', 'CANCELLED')
+           ORDER BY sequence_id ASC`;
+
+      const orders = db.prepare(sql).all(outletId) as Array<Record<string, unknown>>;
+      const getItems = db.prepare(
+        `SELECT id, item_summary_text AS itemSummaryText, modifiers_summary_text AS modifiersSummaryText,
+                quantity_milli AS quantityMilli, status
+         FROM kitchen_order_items WHERE kitchen_order_id = ? ORDER BY id ASC`
+      );
+
+      return orders.map((o) => ({
+        sequenceId: Number(o.sequenceId),
+        kitchenOrderId: String(o.kitchenOrderId),
+        salesOrderId: String(o.salesOrderId),
+        outletId: String(o.outletId),
+        station: String(o.station),
+        queueNumber: String(o.queueNumber),
+        status: String(o.status) as KitchenOrderTicketDto['status'],
+        createdAt: String(o.createdAt),
+        items: (getItems.all(String(o.kitchenOrderId)) as Array<Record<string, unknown>>).map(
+          (it) => ({
+            id: String(it.id),
+            itemSummaryText: String(it.itemSummaryText),
+            modifiersSummaryText:
+              it.modifiersSummaryText === null ? null : String(it.modifiersSummaryText),
+            quantityMilli: Number(it.quantityMilli),
+            status: String(it.status) as 'PENDING' | 'DONE',
+          })
+        ),
+      }));
+    });
+  }
+
+  public listShiftsHistory(outletId = 'OUTLET-HQ', limit = 20): PosShiftDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT id, shift_number AS shiftNumber, outlet_id AS outletId, terminal_id AS terminalId,
+                  opened_by AS openedBy, status, opening_cash_satang AS openingCashSatang,
+                  expected_cash_satang AS expectedCashSatang, counted_cash_satang AS countedCashSatang,
+                  cash_variance_satang AS cashVarianceSatang, opened_at AS openedAt
+           FROM pos_shifts
+           WHERE outlet_id = ?
+           ORDER BY opened_at DESC, rowid DESC
+           LIMIT ?`
+        )
+        .all(outletId, limit) as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        shiftNumber: String(r.shiftNumber),
+        outletId: String(r.outletId),
+        terminalId: String(r.terminalId),
+        openedBy: String(r.openedBy),
+        status: String(r.status) as 'OPEN' | 'CLOSED',
+        openingCashSatang: Number(r.openingCashSatang),
+        expectedCashSatang: Number(r.expectedCashSatang),
+        countedCashSatang: r.countedCashSatang === null ? null : Number(r.countedCashSatang),
+        cashVarianceSatang: r.cashVarianceSatang === null ? null : Number(r.cashVarianceSatang),
+        openedAt: String(r.openedAt),
+      }));
+    });
+  }
+
+  public listCashDrawerMovements(shiftId: string): Array<
+    CashDrawerMovementRecord & { createdAt: string; performedByName: string }
+  > {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT m.id, m.shift_id AS shiftId, m.movement_type AS movementType,
+                  m.amount_satang AS amountSatang, m.reason, m.performed_by AS performedByUserId,
+                  COALESCE(u.display_name, m.performed_by) AS performedByName,
+                  m.created_at AS createdAt
+           FROM cash_drawer_movements m
+           LEFT JOIN users u ON u.id = m.performed_by
+           WHERE m.shift_id = ?
+           ORDER BY m.created_at ASC, m.rowid ASC`
+        )
+        .all(shiftId) as Array<Record<string, unknown>>;
+
+      let runningCash = 0;
+      return rows.map((r) => {
+        const type = String(r.movementType) as CashDrawerMovementRecord['movementType'];
+        const amt = Number(r.amountSatang);
+        if (type === 'OPENING_FLOAT' || type === 'PAID_IN') {
+          runningCash += amt;
+        } else {
+          runningCash -= amt;
+        }
+        return {
+          id: String(r.id),
+          shiftId: String(r.shiftId),
+          movementType: type,
+          amountSatang: amt,
+          reason: String(r.reason),
+          performedByUserId: String(r.performedByUserId),
+          performedByName: String(r.performedByName),
+          expectedCashAfterSatang: runningCash,
+          createdAt: String(r.createdAt),
+        };
+      });
+    });
+  }
+
+  public listRecentSalesOrders(outletId = 'OUTLET-HQ', limit = 40): SalesOrderHistoryDto[] {
+    return this.executeRead((db) => {
+      const orders = db
+        .prepare(
+          `SELECT
+             so.id AS salesOrderId,
+             so.receipt_number AS receiptNumber,
+             so.abb_tax_invoice_no AS abbTaxInvoiceNo,
+             so.shift_id AS shiftId,
+             so.cashier_id AS cashierId,
+             COALESCE(u.display_name, so.cashier_id) AS cashierName,
+             so.order_type AS orderType,
+             so.table_or_queue_no AS tableOrQueueNo,
+             so.status,
+             so.tax_mode AS taxMode,
+             so.subtotal_satang AS subtotalSatang,
+             so.discount_satang AS discountSatang,
+             so.tax_satang AS taxSatang,
+             so.total_satang AS totalSatang,
+             so.total_cogs_micro_baht AS totalCogsMicroBaht,
+             so.void_reason AS voidReason,
+             so.created_at AS createdAt
+           FROM sales_orders so
+           LEFT JOIN users u ON u.id = so.cashier_id
+           WHERE so.outlet_id = ?
+           ORDER BY so.created_at DESC, so.rowid DESC
+           LIMIT ?`
+        )
+        .all(outletId, limit) as Array<Record<string, unknown>>;
+
+      const paymentStmt = db.prepare(
+        `SELECT
+           payment_method AS paymentMethod,
+           amount_satang AS amountSatang,
+           cash_tendered_satang AS cashTenderedSatang,
+           change_given_satang AS changeGivenSatang,
+           sender_bank_code AS senderBankCode,
+           slip_trans_ref_last4 AS slipTransRefLast4
+         FROM payment_transactions
+         WHERE sales_order_id = ?
+         ORDER BY rowid ASC`
+      );
+
+      const lineStmt = db.prepare(
+        `SELECT
+           soi.id AS salesOrderItemId,
+           soi.variant_id AS variantId,
+           i.name AS itemName,
+           i.unit_name AS unitName,
+           soi.quantity_milli AS quantityMilli,
+           soi.unit_price_satang AS unitPriceSatang,
+           soi.modifiers_total_satang AS modifiersTotalSatang,
+           soi.line_total_satang AS lineTotalSatang
+         FROM sales_order_items soi
+         JOIN item_variants v ON v.id = soi.variant_id
+         JOIN items i ON i.id = v.item_id
+         WHERE soi.sales_order_id = ?
+         ORDER BY soi.rowid ASC`
+      );
+
+      const modStmt = db.prepare(
+        `SELECT modifier_name_snapshot AS name, price_delta_satang AS priceDeltaSatang
+         FROM sales_order_item_modifiers
+         WHERE sales_order_item_id = ?`
+      );
+
+      return orders.map((o) => {
+        const orderId = String(o.salesOrderId);
+        const subtotalSatang = Number(o.subtotalSatang);
+        const discountSatang = Number(o.discountSatang);
+        const taxSatang = Number(o.taxSatang);
+        const totalSatang = Number(o.totalSatang);
+        const taxMode = String(o.taxMode) as TaxMode;
+        const afterDiscount = Math.max(0, subtotalSatang - discountSatang);
+        const netBeforeTaxSatang =
+          taxMode === 'INCLUSIVE' ? afterDiscount - taxSatang : afterDiscount;
+
+        const rawPayments = paymentStmt.all(orderId) as Array<Record<string, unknown>>;
+        const payments = rawPayments.map((p) => ({
+          paymentMethod: String(p.paymentMethod) as CheckoutOrderRequest['paymentMethod'],
+          amountSatang: Number(p.amountSatang),
+          cashTenderedSatang:
+            p.cashTenderedSatang === null ? null : Number(p.cashTenderedSatang),
+          changeGivenSatang: p.changeGivenSatang === null ? null : Number(p.changeGivenSatang),
+          senderBankCode: p.senderBankCode === null ? null : String(p.senderBankCode),
+          slipTransRefLast4: p.slipTransRefLast4 === null ? null : String(p.slipTransRefLast4),
+        }));
+
+        const primaryPay = payments[0];
+        const paymentSummaryLabel =
+          payments.length > 1
+            ? payments.map((p) => p.paymentMethod).join(' + ')
+            : (primaryPay?.paymentMethod ?? 'CASH');
+
+        const rawLines = lineStmt.all(orderId) as Array<Record<string, unknown>>;
+        const lines = rawLines.map((l) => {
+          const itemId = String(l.salesOrderItemId);
+          const mods = (modStmt.all(itemId) as Array<Record<string, unknown>>).map((m) => ({
+            name: String(m.name),
+            priceDeltaSatang: Number(m.priceDeltaSatang),
+          }));
+          return {
+            salesOrderItemId: itemId,
+            variantId: String(l.variantId),
+            itemName: String(l.itemName),
+            unitName: String(l.unitName),
+            quantityMilli: Number(l.quantityMilli),
+            unitPriceSatang: Number(l.unitPriceSatang),
+            modifiersTotalSatang: Number(l.modifiersTotalSatang),
+            lineTotalSatang: Number(l.lineTotalSatang),
+            modifiers: mods,
+          };
+        });
+
+        return {
+          salesOrderId: orderId,
+          receiptNumber: String(o.receiptNumber),
+          abbTaxInvoiceNo: o.abbTaxInvoiceNo === null ? null : String(o.abbTaxInvoiceNo),
+          shiftId: String(o.shiftId),
+          cashierId: String(o.cashierId),
+          cashierName: String(o.cashierName),
+          orderType: String(o.orderType) as CheckoutOrderRequest['orderType'],
+          tableOrQueueNo: o.tableOrQueueNo === null ? null : String(o.tableOrQueueNo),
+          status: String(o.status) as 'OPEN' | 'COMPLETED' | 'VOIDED',
+          taxMode,
+          subtotalSatang,
+          discountSatang,
+          netBeforeTaxSatang,
+          taxSatang,
+          totalSatang,
+          totalCogsMicroBaht: Number(o.totalCogsMicroBaht),
+          paymentMethod: (primaryPay?.paymentMethod ?? 'CASH') as CheckoutOrderRequest['paymentMethod'],
+          paymentSummaryLabel,
+          payments,
+          cashTenderedSatang: primaryPay?.cashTenderedSatang ?? null,
+          changeGivenSatang: primaryPay?.changeGivenSatang ?? null,
+          senderBankCode:
+            payments.find((p) => p.senderBankCode)?.senderBankCode ?? null,
+          slipTransRefLast4:
+            payments.find((p) => p.slipTransRefLast4)?.slipTransRefLast4 ?? null,
+          voidReason: o.voidReason === null ? null : String(o.voidReason),
+          createdAt: String(o.createdAt),
+          lines,
+        };
+      });
+    });
+  }
+
+  public listInventoryTransactions(
+    outletId = 'OUTLET-HQ',
+    limit = 80,
+    variantId?: string | undefined
+  ): InventoryLedgerEntryDto[] {
+    return this.executeRead((db) => {
+      const sql = variantId
+        ? `SELECT t.id, t.outlet_id AS outletId, t.variant_id AS variantId,
+                  i.name AS itemName, v.sku, i.unit_name AS unitName,
+                  t.transaction_type AS transactionType, t.quantity_change_milli AS quantityChangeMilli,
+                  t.stock_before_milli AS stockBeforeMilli, t.stock_after_milli AS stockAfterMilli,
+                  t.unit_cost_micro_baht AS unitCostMicroBaht, t.reference_type AS referenceType,
+                  t.reference_id AS referenceId, COALESCE(u.display_name, t.performed_by, 'System') AS performedByName,
+                  t.created_at AS createdAt
+           FROM inventory_transactions t
+           JOIN item_variants v ON v.id = t.variant_id
+           JOIN items i ON i.id = v.item_id
+           LEFT JOIN users u ON u.id = t.performed_by
+           WHERE t.outlet_id = ? AND t.variant_id = ?
+           ORDER BY t.rowid DESC LIMIT ?`
+        : `SELECT t.id, t.outlet_id AS outletId, t.variant_id AS variantId,
+                  i.name AS itemName, v.sku, i.unit_name AS unitName,
+                  t.transaction_type AS transactionType, t.quantity_change_milli AS quantityChangeMilli,
+                  t.stock_before_milli AS stockBeforeMilli, t.stock_after_milli AS stockAfterMilli,
+                  t.unit_cost_micro_baht AS unitCostMicroBaht, t.reference_type AS referenceType,
+                  t.reference_id AS referenceId, COALESCE(u.display_name, t.performed_by, 'System') AS performedByName,
+                  t.created_at AS createdAt
+           FROM inventory_transactions t
+           JOIN item_variants v ON v.id = t.variant_id
+           JOIN items i ON i.id = v.item_id
+           LEFT JOIN users u ON u.id = t.performed_by
+           WHERE t.outlet_id = ?
+           ORDER BY t.rowid DESC LIMIT ?`;
+
+      const rows = (
+        variantId ? db.prepare(sql).all(outletId, variantId, limit) : db.prepare(sql).all(outletId, limit)
+      ) as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        outletId: String(r.outletId),
+        variantId: String(r.variantId),
+        itemName: String(r.itemName),
+        sku: String(r.sku),
+        unitName: String(r.unitName),
+        transactionType: String(r.transactionType),
+        quantityChangeMilli: Number(r.quantityChangeMilli),
+        stockBeforeMilli: Number(r.stockBeforeMilli),
+        stockAfterMilli: Number(r.stockAfterMilli),
+        unitCostMicroBaht: Number(r.unitCostMicroBaht),
+        referenceType: String(r.referenceType),
+        referenceId: String(r.referenceId),
+        performedByName: String(r.performedByName),
+        createdAt: String(r.createdAt),
+      }));
+    });
+  }
+
+  public listPurchaseOrdersHistory(outletId = 'OUTLET-HQ', limit = 30): PurchaseOrderHistoryDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT po.id, po.po_number AS poNumber, po.outlet_id AS outletId,
+                  po.supplier_id AS supplierId, COALESCE(s.name, po.supplier_id) AS supplierName,
+                  po.status, po.subtotal_satang AS subtotalSatang,
+                  po.total_landed_cost_satang AS totalLandedCostSatang,
+                  po.grand_total_satang AS grandTotalSatang,
+                  po.received_at AS receivedAt, po.created_at AS createdAt,
+                  (SELECT COUNT(*) FROM purchase_order_items poi WHERE poi.purchase_order_id = po.id) AS lineCount
+           FROM purchase_orders po
+           LEFT JOIN suppliers s ON s.id = po.supplier_id
+           WHERE po.outlet_id = ?
+           ORDER BY po.created_at DESC, po.rowid DESC
+           LIMIT ?`
+        )
+        .all(outletId, limit) as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        poNumber: String(r.poNumber),
+        outletId: String(r.outletId),
+        supplierId: String(r.supplierId),
+        supplierName: String(r.supplierName),
+        status: String(r.status),
+        subtotalSatang: Number(r.subtotalSatang),
+        totalLandedCostSatang: Number(r.totalLandedCostSatang),
+        grandTotalSatang: Number(r.grandTotalSatang),
+        lineCount: Number(r.lineCount),
+        receivedAt: r.receivedAt === null ? null : String(r.receivedAt),
+        createdAt: String(r.createdAt),
+      }));
+    });
+  }
+
+  public listTransferOrdersHistory(limit = 30): TransferOrderHistoryDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT tr.id, tr.transfer_number AS transferNumber,
+                  tr.source_outlet_id AS sourceOutletId, COALESCE(os.name, tr.source_outlet_id) AS sourceOutletName,
+                  tr.destination_outlet_id AS destinationOutletId, COALESCE(od.name, tr.destination_outlet_id) AS destinationOutletName,
+                  tr.status, tr.dispatched_at AS dispatchedAt, tr.received_at AS receivedAt, tr.created_at AS createdAt
+           FROM transfer_orders tr
+           LEFT JOIN outlets os ON os.id = tr.source_outlet_id
+           LEFT JOIN outlets od ON od.id = tr.destination_outlet_id
+           ORDER BY tr.created_at DESC, tr.rowid DESC
+           LIMIT ?`
+        )
+        .all(limit) as Array<Record<string, unknown>>;
+
+      const itemsStmt = db.prepare(
+        `SELECT toi.variant_id AS variantId, i.name AS itemName, i.unit_name AS unitName,
+                toi.quantity_milli AS quantityMilli, toi.transfer_unit_cost_micro_baht AS transferUnitCostMicroBaht
+         FROM transfer_order_items toi
+         JOIN item_variants v ON v.id = toi.variant_id
+         JOIN items i ON i.id = v.item_id
+         WHERE toi.transfer_order_id = ?`
+      );
+
+      return rows.map((r) => {
+        const id = String(r.id);
+        const items = (itemsStmt.all(id) as Array<Record<string, unknown>>).map((it) => ({
+          variantId: String(it.variantId),
+          itemName: String(it.itemName),
+          unitName: String(it.unitName),
+          quantityMilli: Number(it.quantityMilli),
+          transferUnitCostMicroBaht: Number(it.transferUnitCostMicroBaht),
+        }));
+        return {
+          id,
+          transferNumber: String(r.transferNumber),
+          sourceOutletId: String(r.sourceOutletId),
+          sourceOutletName: String(r.sourceOutletName),
+          destinationOutletId: String(r.destinationOutletId),
+          destinationOutletName: String(r.destinationOutletName),
+          status: String(r.status) as 'PENDING' | 'IN_TRANSIT' | 'COMPLETED' | 'CANCELLED',
+          dispatchedAt: r.dispatchedAt === null ? null : String(r.dispatchedAt),
+          receivedAt: r.receivedAt === null ? null : String(r.receivedAt),
+          createdAt: String(r.createdAt),
+          items,
+        };
+      });
+    });
+  }
+
+  public listSecurityAuditLogs(limit = 50): SecurityAuditLogEntryDto[] {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT id, event_type AS eventType, actor_user_id AS actorUserId,
+                  terminal_id AS terminalId, target_key AS targetKey,
+                  old_value_redacted AS oldValueRedacted, new_value_redacted AS newValueRedacted,
+                  created_at AS createdAt
+           FROM security_audit_logs
+           ORDER BY id DESC
+           LIMIT ?`
+        )
+        .all(limit) as Array<Record<string, unknown>>;
+
+      return rows.map((r) => ({
+        id: Number(r.id),
+        eventType: String(r.eventType),
+        actorUserId: r.actorUserId === null ? null : String(r.actorUserId),
+        terminalId: r.terminalId === null ? null : String(r.terminalId),
+        targetKey: r.targetKey === null ? null : String(r.targetKey),
+        oldValueRedacted: r.oldValueRedacted === null ? null : String(r.oldValueRedacted),
+        newValueRedacted: r.newValueRedacted === null ? null : String(r.newValueRedacted),
+        createdAt: String(r.createdAt),
+      }));
+    });
+  }
+
+  // ============================================================================
+  // Phase 6B: Modifier Groups CRUD & Production Clean-Start Onboarding Wizard
+  // ============================================================================
+
+  public async upsertModifierGroup(input: {
+    id?: string | undefined;
+    name: string;
+    selectionType: 'SINGLE' | 'MULTIPLE';
+    minSelections?: number | undefined;
+    maxSelections?: number | undefined;
+  }): Promise<ModifierGroupWithItemsDto> {
+    const id = input.id?.trim() || `GRP-${randomUUID().slice(0, 6).toUpperCase()}`;
+    const name = input.name.trim();
+    if (!name) throw new Error('Modifier group name is required');
+    const minSel = Math.max(0, input.minSelections ?? (input.selectionType === 'SINGLE' ? 1 : 0));
+    const maxSel = Math.max(
+      1,
+      Math.max(minSel, input.maxSelections ?? (input.selectionType === 'SINGLE' ? 1 : 5))
+    );
+
+    await this.executeWriteImmediate((db) => {
+      db.prepare(
+        `INSERT INTO modifier_groups (id, name, selection_type, min_selections, max_selections)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           selection_type = excluded.selection_type,
+           min_selections = excluded.min_selections,
+           max_selections = excluded.max_selections`
+      ).run(id, name, input.selectionType, minSel, maxSel);
+    });
+
+    const group = this.listModifierGroupsWithModifiers().find((g) => g.id === id);
+    if (!group) throw new Error(`Failed to reload modifier group ${id}`);
+    return group;
+  }
+
+  public async deleteModifierGroup(groupId: string): Promise<void> {
+    await this.executeWriteImmediate((db) => {
+      db.prepare(`DELETE FROM modifier_groups WHERE id = ?`).run(groupId);
+    });
+  }
+
+  public async upsertModifierItem(input: {
+    id?: string | undefined;
+    modifierGroupId: string;
+    name: string;
+    priceDeltaSatang: Satang;
+    modifierMode: 'FIXED_QTY_DELTA' | 'ROLE_SCALE_BPS';
+    componentVariantId?: string | null | undefined;
+    quantityDeltaMilli?: MilliUnit | undefined;
+    targetComponentRole?: ComponentRole | null | undefined;
+    scaleBasisPoints?: BasisPoints | undefined;
+    sortOrder?: number | undefined;
+  }): Promise<ModifierDto> {
+    const id = input.id?.trim() || `MOD-${randomUUID().slice(0, 6).toUpperCase()}`;
+    const name = input.name.trim();
+    if (!name) throw new Error('Modifier name is required');
+
+    const compId =
+      input.modifierMode === 'FIXED_QTY_DELTA' && input.componentVariantId?.trim()
+        ? input.componentVariantId.trim()
+        : null;
+    const qtyDelta = input.modifierMode === 'FIXED_QTY_DELTA' ? (input.quantityDeltaMilli ?? 0) : 0;
+    const targetRole =
+      input.modifierMode === 'ROLE_SCALE_BPS' ? (input.targetComponentRole ?? 'SWEETENER') : null;
+    const scaleBps = input.modifierMode === 'ROLE_SCALE_BPS' ? (input.scaleBasisPoints ?? 0) : 0;
+    const sortOrder = input.sortOrder ?? 10;
+
+    await this.executeWriteImmediate((db) => {
+      db.prepare(
+        `INSERT INTO modifiers (
+           id, modifier_group_id, name, price_delta_satang, modifier_mode,
+           component_variant_id, quantity_delta_milli, target_component_role, scale_basis_points, sort_order
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           modifier_group_id = excluded.modifier_group_id,
+           name = excluded.name,
+           price_delta_satang = excluded.price_delta_satang,
+           modifier_mode = excluded.modifier_mode,
+           component_variant_id = excluded.component_variant_id,
+           quantity_delta_milli = excluded.quantity_delta_milli,
+           target_component_role = excluded.target_component_role,
+           scale_basis_points = excluded.scale_basis_points,
+           sort_order = excluded.sort_order`
+      ).run(
+        id,
+        input.modifierGroupId,
+        name,
+        input.priceDeltaSatang,
+        input.modifierMode,
+        compId,
+        qtyDelta,
+        targetRole,
+        scaleBps,
+        sortOrder
+      );
+    });
+
+    const mod = this.listModifiers().find((m) => m.id === id);
+    if (!mod) throw new Error(`Failed to reload modifier ${id}`);
+    return mod;
+  }
+
+  public async deleteModifierItem(modifierId: string): Promise<void> {
+    await this.executeWriteImmediate((db) => {
+      db.prepare(`DELETE FROM modifiers WHERE id = ?`).run(modifierId);
+    });
+  }
+
+  public isSystemOnboarded(): boolean {
+    return this.executeRead((db) => {
+      const cfg = db
+        .prepare(`SELECT value FROM store_config WHERE key = 'first_run_onboarded'`)
+        .get() as { value?: string } | undefined;
+      if (cfg?.value === '1') return true;
+      const usr = db.prepare(`SELECT COUNT(*) AS cnt FROM users`).get() as { cnt: number };
+      return Number(usr.cnt) > 0;
+    });
+  }
+
+  /**
+   * Production Clean-Start First-Run Onboarding:
+   * Sets up a customer terminal from an empty database WITHOUT demo clutter (unless `loadDemoSampleCatalog` is explicitly opted in),
+   * hashes the Owner's real master PIN, signs `business_profile` + `promptpay_merchant_id` with HMAC-SHA256,
+   * and opens the initial cashier shift.
+   */
+  public async initializeFirstRunOnboarding(input: FirstRunOnboardingInput): Promise<{
+    ownerUser: StaffUserDto;
+    activeShift: PosShiftDto;
+    storeSettings: StoreIdentitySettingsDto;
+  }> {
+    const outletId = 'OUTLET-HQ';
+    const cleanPromptPay = input.promptPayId.replace(/\D/g, '');
+    if (cleanPromptPay.length !== 10 && cleanPromptPay.length !== 13 && cleanPromptPay.length !== 15) {
+      throw new Error('PromptPay ID must be 10, 13, or 15 digits');
+    }
+    const ownerPinHash = this.hashStaffPin(input.ownerPin);
+
+    if (input.loadDemoSampleCatalog) {
+      await this.seedDefaultWarehouseAndCatalog(outletId);
+    }
+
+    await this.executeWriteImmediate((db) => {
+      db.prepare(
+        `INSERT INTO outlets (id, code, name, tax_id, branch_code, rd_pos_reg_no, is_warehouse, active)
+         VALUES (?, 'HQ-01', ?, ?, ?, ?, 1, 1)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           tax_id = excluded.tax_id,
+           branch_code = excluded.branch_code,
+           rd_pos_reg_no = excluded.rd_pos_reg_no`
+      ).run(
+        outletId,
+        input.storeName.trim(),
+        input.taxId.trim(),
+        input.branchCode.trim() || '00000',
+        input.rdPosRegNo.trim() || 'RD-POS-0001'
+      );
+
+      db.prepare(
+        `INSERT OR IGNORE INTO pos_terminals (id, outlet_id, terminal_name, role, cluster_epoch)
+         VALUES ('POS-TERM-01', ?, 'Main Counter Leader POS', 'LEADER', 1)`
+      ).run(outletId);
+
+      // Upsert real Owner account with real hashed PIN (replaces demo PIN if demo catalog was opted in)
+      db.prepare(
+        `INSERT INTO users (id, username, display_name, role, pin_hash, active)
+         VALUES ('USR-OWNER-01', ?, ?, 'OWNER', ?, 1)
+         ON CONFLICT(id) DO UPDATE SET
+           username = excluded.username,
+           display_name = excluded.display_name,
+           pin_hash = excluded.pin_hash,
+           active = 1`
+      ).run(
+        input.ownerUsername?.trim() || 'owner',
+        input.ownerDisplayName.trim() || 'เจ้าของร้าน',
+        ownerPinHash
+      );
+
+      // Ensure baseline categories & default general supplier exist even on Clean Production Start
+      db.prepare(
+        `INSERT OR IGNORE INTO categories (id, name, display_color, kitchen_station, sort_order)
+         VALUES
+           ('CAT-RETAIL', 'สินค้าทั่วไป & ค้าปลีก', '#1a73e8', 'NONE', 1),
+           ('CAT-CAFE', 'เครื่องดื่ม & อาหาร', '#1a73e8', 'BAR', 2),
+           ('CAT-RAW', 'วัตถุดิบหลังร้าน', '#5f6368', 'PREP', 3)`
+      ).run();
+
+      db.prepare(
+        `INSERT OR IGNORE INTO suppliers (id, code, name)
+         VALUES ('SUP-001', 'SUP-GENERAL', 'ผู้จำหน่ายทั่วไป (General Supplier)')`
+      ).run();
+
+      db.prepare(
+        `INSERT INTO store_config (key, value, is_protected, updated_by)
+         VALUES ('first_run_onboarded', '1', 0, 'USR-OWNER-01')
+         ON CONFLICT(key) DO UPDATE SET value = '1', updated_by = 'USR-OWNER-01'`
+      ).run();
+
+      db.prepare(
+        `INSERT INTO security_audit_logs (
+           event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+         ) VALUES ('FIRST_RUN_ONBOARDING_COMPLETED', 'USR-OWNER-01', 'POS-TERM-01', 'SYSTEM_BOOTSTRAP', NULL, ?)`
+      ).run(
+        `profile=${input.businessProfile}:cleanStart=${!input.loadDemoSampleCatalog}`
+      );
+    });
+
+    await this.setBusinessProfileMode(input.businessProfile, 'USR-OWNER-01');
+    await this.setProtectedStoreConfig({
+      key: 'promptpay_merchant_id',
+      value: cleanPromptPay,
+      updatedByUserId: 'USR-OWNER-01',
+    });
+
+    let activeShift = this.getActiveShift(outletId, 'POS-TERM-01');
+    if (!activeShift) {
+      activeShift = await this.openPosShift({
+        outletId,
+        terminalId: 'POS-TERM-01',
+        shiftNumber: `SHF-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-001`,
+        openedByUserId: 'USR-OWNER-01',
+        openingCashSatang: Math.max(0, input.openingCashSatang),
+        notes: 'Initial shift opened via First-Run Setup Wizard',
+      });
+    }
+
+    const ownerUser = this.listStaffUsers().find((u) => u.id === 'USR-OWNER-01')!;
+    return {
+      ownerUser,
+      activeShift,
+      storeSettings: this.getStoreIdentitySettings(outletId),
+    };
+  }
 }
+
+export interface FirstRunOnboardingInput {
+  businessProfile: BusinessProfile;
+  storeName: string;
+  taxId: string;
+  branchCode: string;
+  rdPosRegNo: string;
+  promptPayId: string;
+  ownerDisplayName: string;
+  ownerUsername?: string | undefined;
+  ownerPin: string;
+  loadDemoSampleCatalog: boolean;
+  openingCashSatang: Satang;
+}
+
+export interface StaffUserDto {
+  id: string;
+  username: string;
+  displayName: string;
+  role: UserRole;
+  active: boolean;
+  createdAt: string;
+}
+
+export interface StoreIdentitySettingsDto {
+  outletId: string;
+  outletCode: string;
+  storeName: string;
+  taxId: string;
+  branchCode: string;
+  rdPosRegNo: string;
+  promptPayId: string;
+  businessProfile: BusinessProfile;
+}
+
+export interface OutletDto {
+  id: string;
+  code: string;
+  name: string;
+  taxId: string | null;
+  branchCode: string;
+  rdPosRegNo: string | null;
+  isWarehouse: boolean;
+  active: boolean;
+}
+
+export interface CategoryDto {
+  id: string;
+  name: string;
+  displayColor: string;
+  kitchenStation: string;
+  sortOrder: number;
+}
+
+export interface SupplierDto {
+  id: string;
+  code: string;
+  name: string;
+  taxId: string | null;
+  phone: string | null;
+  active: boolean;
+}
+
+export interface CatalogVariantDetailDto extends ItemVariantDto {
+  defaultPurchaseCostMicroBaht: MicroBaht;
+  optimalStockMilli: MilliUnit;
+  lowStockThresholdMilli: MilliUnit;
+  categoryId: string | null;
+  categoryName: string;
+  categoryColor: string;
+  kitchenStation: string;
+  active: boolean;
+}
+
+export interface UpsertCatalogVariantInput {
+  outletId?: string | undefined;
+  variantId?: string | undefined;
+  itemId?: string | undefined;
+  itemName: string;
+  variantName?: string | undefined;
+  categoryId?: string | null | undefined;
+  sku: string;
+  barcode?: string | null | undefined;
+  unitName: string;
+  priceSatang: Satang;
+  defaultPurchaseCostMicroBaht: MicroBaht;
+  initialStockMilli?: MilliUnit | undefined;
+  lowStockThresholdMilli?: MilliUnit | undefined;
+  optimalStockMilli?: MilliUnit | undefined;
+  isComposite?: boolean | undefined;
+  useProduction?: boolean | undefined;
+  isWeightedScale?: boolean | undefined;
+  active?: boolean | undefined;
+  performedByUserId?: string | undefined;
+}
+
+export interface ModifierGroupWithItemsDto {
+  id: string;
+  name: string;
+  selectionType: 'SINGLE' | 'MULTIPLE';
+  minSelections: number;
+  maxSelections: number;
+  modifiers: ModifierDto[];
+}
+
+export interface SalesOrderHistoryDto {
+  salesOrderId: string;
+  receiptNumber: string;
+  abbTaxInvoiceNo: string | null;
+  shiftId: string;
+  cashierId: string;
+  cashierName: string;
+  orderType: CheckoutOrderRequest['orderType'];
+  tableOrQueueNo: string | null;
+  status: 'OPEN' | 'COMPLETED' | 'VOIDED';
+  taxMode: TaxMode;
+  subtotalSatang: Satang;
+  discountSatang: Satang;
+  netBeforeTaxSatang: Satang;
+  taxSatang: Satang;
+  totalSatang: Satang;
+  totalCogsMicroBaht: MicroBaht;
+  paymentMethod: CheckoutOrderRequest['paymentMethod'];
+  paymentSummaryLabel: string;
+  payments: Array<{
+    paymentMethod: CheckoutOrderRequest['paymentMethod'];
+    amountSatang: Satang;
+    cashTenderedSatang: Satang | null;
+    changeGivenSatang: Satang | null;
+    senderBankCode: string | null;
+    slipTransRefLast4: string | null;
+  }>;
+  cashTenderedSatang: Satang | null;
+  changeGivenSatang: Satang | null;
+  senderBankCode: string | null;
+  slipTransRefLast4: string | null;
+  voidReason: string | null;
+  createdAt: string;
+  lines: Array<{
+    salesOrderItemId: string;
+    variantId: string;
+    itemName: string;
+    unitName: string;
+    quantityMilli: MilliUnit;
+    unitPriceSatang: Satang;
+    modifiersTotalSatang: Satang;
+    lineTotalSatang: Satang;
+    modifiers: Array<{
+      name: string;
+      priceDeltaSatang: Satang;
+    }>;
+  }>;
+}
+
+export interface InventoryLedgerEntryDto {
+  id: string;
+  outletId: string;
+  variantId: string;
+  itemName: string;
+  sku: string;
+  unitName: string;
+  transactionType: string;
+  quantityChangeMilli: MilliUnit;
+  stockBeforeMilli: MilliUnit;
+  stockAfterMilli: MilliUnit;
+  unitCostMicroBaht: MicroBaht;
+  referenceType: string;
+  referenceId: string;
+  performedByName: string;
+  createdAt: string;
+}
+
+export interface PurchaseOrderHistoryDto {
+  id: string;
+  poNumber: string;
+  outletId: string;
+  supplierId: string;
+  supplierName: string;
+  status: string;
+  subtotalSatang: Satang;
+  totalLandedCostSatang: Satang;
+  grandTotalSatang: Satang;
+  lineCount: number;
+  receivedAt: string | null;
+  createdAt: string;
+}
+
+export interface TransferOrderHistoryDto {
+  id: string;
+  transferNumber: string;
+  sourceOutletId: string;
+  sourceOutletName: string;
+  destinationOutletId: string;
+  destinationOutletName: string;
+  status: 'PENDING' | 'IN_TRANSIT' | 'COMPLETED' | 'CANCELLED';
+  dispatchedAt: string | null;
+  receivedAt: string | null;
+  createdAt: string;
+  items: Array<{
+    variantId: string;
+    itemName: string;
+    unitName: string;
+    quantityMilli: MilliUnit;
+    transferUnitCostMicroBaht: MicroBaht;
+  }>;
+}
+
+export interface SecurityAuditLogEntryDto {
+  id: number;
+  eventType: string;
+  actorUserId: string | null;
+  terminalId: string | null;
+  targetKey: string | null;
+  oldValueRedacted: string | null;
+  newValueRedacted: string | null;
+  createdAt: string;
+}
+

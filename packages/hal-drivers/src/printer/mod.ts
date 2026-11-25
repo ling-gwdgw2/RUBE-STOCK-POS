@@ -357,5 +357,8 @@ export class ThermalPrinterSpoolerQueue {
   }
 }
 
+export * from './transport.ts';
+
+
 
 

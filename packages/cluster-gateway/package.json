@@ -4,8 +4,7 @@
   "type": "module",
   "private": true,
   "dependencies": {
-    "@rube-pos/shared-contracts": "workspace:*",
-    "@rube-pos/core-engine": "workspace:*"
+    "@rube-pos/shared-contracts": "*",
+    "@rube-pos/core-engine": "*"
   }
 }
-

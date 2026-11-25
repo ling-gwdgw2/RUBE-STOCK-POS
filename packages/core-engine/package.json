@@ -7,7 +7,7 @@
     ".": "./src/runtime/sqlite-engine.ts"
   },
   "dependencies": {
-    "@rube-pos/shared-contracts": "workspace:*"
+    "@rube-pos/shared-contracts": "*"
   }
 }
 

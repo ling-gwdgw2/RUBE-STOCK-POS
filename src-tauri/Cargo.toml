@@ -1,0 +1,21 @@
+[package]
+name = "rube-stock-pos-desktop"
+version = "3.1.1"
+description = "RUBE-STOCK-POS v3.1 Windows Native Desktop & Kiosk Application"
+authors = ["RUBE-STOCK-POS"]
+edition = "2021"
+
+# Standalone Cargo workspace so root Rust core engine tests remain isolated and fast
+[workspace]
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -9,24 +9,40 @@ import type {
   BomEdgeDto,
   BusinessProfile,
   CheckoutOrderRequest,
+  ComponentRole,
   ItemVariantDto,
   ModifierDto,
   PosShiftDto,
+  UserRole,
 } from '../../shared-contracts/src/ipc-commands.ts';
 import type {
   CashDrawerMovementRecord,
+  CatalogVariantDetailDto,
+  CategoryDto,
   CheckoutOrderResult,
   ClosePosShiftBlindDropInput,
   CreatePurchaseOrderInput,
+  FirstRunOnboardingInput,
+  InventoryLedgerEntryDto,
+  ModifierGroupWithItemsDto,
   OpenPosShiftInput,
+  OutletDto,
   PoReceivePreviewLine,
   PoReceiveResult,
   ProductionBuildResult,
+  PurchaseOrderHistoryDto,
   ReceiveTransferOrderInput,
   RecordCashDrawerMovementInput,
+  SalesOrderHistoryDto,
+  SecurityAuditLogEntryDto,
   SqliteReadWritePoolEngine,
+  StaffUserDto,
+  StoreIdentitySettingsDto,
+  SupplierDto,
   TransferOrderDispatchResult,
+  TransferOrderHistoryDto,
   TransferOrderReceiveResult,
+  UpsertCatalogVariantInput,
   VoidSalesOrderInput,
   VoidSalesOrderResult,
   DispatchTransferOrderInput,
@@ -314,5 +330,217 @@ export class LocalIpcBridge {
   public generateMenuGrossMarginAndCogsReport(outletId = 'OUTLET-HQ'): MenuGrossMarginReportDto {
     this.totalReadsRouted++;
     return this.engine.generateMenuGrossMarginAndCogsReport(outletId);
+  }
+
+  public listStaffUsers(): StaffUserDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listStaffUsers();
+  }
+
+  public async authenticateStaffByPin(input: {
+    pin: string;
+    userId?: string | undefined;
+    terminalId?: string | undefined;
+  }): Promise<StaffUserDto> {
+    this.totalWritesRouted++;
+    return this.engine.authenticateStaffByPin(input);
+  }
+
+  public async upsertStaffUser(input: {
+    id?: string | undefined;
+    username: string;
+    displayName: string;
+    role: UserRole;
+    pin?: string | undefined;
+    active?: boolean | undefined;
+    actorUserId?: string | undefined;
+  }): Promise<StaffUserDto> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.upsertStaffUser(input);
+  }
+
+  public getStoreIdentitySettings(outletId = 'OUTLET-HQ'): StoreIdentitySettingsDto {
+    this.totalReadsRouted++;
+    return this.engine.getStoreIdentitySettings(outletId);
+  }
+
+  public async updateStoreIdentitySettings(input: {
+    outletId?: string | undefined;
+    storeName: string;
+    taxId: string;
+    branchCode: string;
+    rdPosRegNo: string;
+    promptPayId: string;
+    updatedByUserId?: string | undefined;
+  }): Promise<StoreIdentitySettingsDto> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.updateStoreIdentitySettings(input);
+  }
+
+  public listOutlets(): OutletDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listOutlets();
+  }
+
+  public listCategories(): CategoryDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listCategories();
+  }
+
+  public async upsertCategory(input: {
+    id?: string | undefined;
+    name: string;
+    displayColor?: string | undefined;
+    kitchenStation?: string | undefined;
+    sortOrder?: number | undefined;
+  }): Promise<CategoryDto> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.upsertCategory(input);
+  }
+
+  public listSuppliers(): SupplierDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listSuppliers();
+  }
+
+  public async upsertSupplier(input: {
+    id?: string | undefined;
+    code: string;
+    name: string;
+    taxId?: string | null | undefined;
+    phone?: string | null | undefined;
+  }): Promise<SupplierDto> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.upsertSupplier(input);
+  }
+
+  public listCatalogVariantsDetailed(outletId = 'OUTLET-HQ'): CatalogVariantDetailDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listCatalogVariantsDetailed(outletId);
+  }
+
+  public async upsertCatalogVariant(
+    input: UpsertCatalogVariantInput
+  ): Promise<CatalogVariantDetailDto> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.upsertCatalogVariant(input);
+  }
+
+  public async deleteBomComponentEdge(
+    compositeVariantId: string,
+    componentVariantId: string
+  ): Promise<void> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.deleteBomComponentEdge(compositeVariantId, componentVariantId);
+  }
+
+  public listModifierGroupsWithModifiers(): ModifierGroupWithItemsDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listModifierGroupsWithModifiers();
+  }
+
+  public listKitchenOrdersAllStations(
+    outletId = 'OUTLET-HQ',
+    includeServed = false
+  ): KitchenOrderTicketDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listKitchenOrdersAllStations(outletId, includeServed);
+  }
+
+  public listShiftsHistory(outletId = 'OUTLET-HQ', limit = 20): PosShiftDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listShiftsHistory(outletId, limit);
+  }
+
+  public listCashDrawerMovements(shiftId: string) {
+    this.totalReadsRouted++;
+    return this.engine.listCashDrawerMovements(shiftId);
+  }
+
+  public listRecentSalesOrders(outletId = 'OUTLET-HQ', limit = 40): SalesOrderHistoryDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listRecentSalesOrders(outletId, limit);
+  }
+
+  public listInventoryTransactions(
+    outletId = 'OUTLET-HQ',
+    limit = 80,
+    variantId?: string | undefined
+  ): InventoryLedgerEntryDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listInventoryTransactions(outletId, limit, variantId);
+  }
+
+  public listPurchaseOrdersHistory(outletId = 'OUTLET-HQ', limit = 30): PurchaseOrderHistoryDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listPurchaseOrdersHistory(outletId, limit);
+  }
+
+  public listTransferOrdersHistory(limit = 30): TransferOrderHistoryDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listTransferOrdersHistory(limit);
+  }
+
+  public listSecurityAuditLogs(limit = 50): SecurityAuditLogEntryDto[] {
+    this.totalReadsRouted++;
+    return this.engine.listSecurityAuditLogs(limit);
+  }
+
+  public async upsertModifierGroup(input: {
+    id?: string | undefined;
+    name: string;
+    selectionType: 'SINGLE' | 'MULTIPLE';
+    minSelections?: number | undefined;
+    maxSelections?: number | undefined;
+  }): Promise<ModifierGroupWithItemsDto> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.upsertModifierGroup(input);
+  }
+
+  public async deleteModifierGroup(groupId: string): Promise<void> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.deleteModifierGroup(groupId);
+  }
+
+  public async upsertModifierItem(input: {
+    id?: string | undefined;
+    modifierGroupId: string;
+    name: string;
+    priceDeltaSatang: number;
+    modifierMode: 'FIXED_QTY_DELTA' | 'ROLE_SCALE_BPS';
+    componentVariantId?: string | null | undefined;
+    quantityDeltaMilli?: number | undefined;
+    targetComponentRole?: ComponentRole | null | undefined;
+    scaleBasisPoints?: number | undefined;
+    sortOrder?: number | undefined;
+  }): Promise<ModifierDto> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.upsertModifierItem(input);
+  }
+
+  public async deleteModifierItem(modifierId: string): Promise<void> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.deleteModifierItem(modifierId);
+  }
+
+  public isSystemOnboarded(): boolean {
+    this.totalReadsRouted++;
+    return this.engine.isSystemOnboarded();
+  }
+
+  public async initializeFirstRunOnboarding(input: FirstRunOnboardingInput) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.initializeFirstRunOnboarding(input);
   }
 }

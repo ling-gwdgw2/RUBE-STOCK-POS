@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@rube-pos/shared-contracts": "workspace:*"
+    "@rube-pos/shared-contracts": "*"
   }
 }
 

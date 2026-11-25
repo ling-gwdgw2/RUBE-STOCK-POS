@@ -236,4 +236,43 @@ export function formatMicroBahtToThbString(microBaht: MicroBaht): string {
   return `${sign}${whole.toLocaleString('en-US')}.${frac}`;
 }
 
+/**
+ * Exact string-to-scaled-integer parser (Zero IEEE-754 floating-point math).
+ * Examples:
+ * - ("65.50", 2) -> 6550 (Satang)
+ * - ("1.250", 3) -> 1250 (MilliUnit)
+ * - ("125.50", 6) -> 125500000 (MicroBaht)
+ */
+export function parseDecimalStringToScaledInt(
+  rawInput: string,
+  scaleDecimals: 2 | 3 | 4 | 6
+): number {
+  const trimmed = rawInput.trim().replace(/,/g, '');
+  if (!trimmed || trimmed === '-' || trimmed === '+') {
+    return 0;
+  }
+  const match = /^([+-])?(\d+)(?:\.(\d*))?$/.exec(trimmed);
+  if (!match) {
+    throw new Error(`Invalid fixed-point numeric input: "${rawInput}"`);
+  }
+  const sign = match[1] === '-' ? -1n : 1n;
+  const intPart = match[2] ?? '0';
+  const rawFrac = match[3] ?? '';
+  const paddedFrac = rawFrac.padEnd(scaleDecimals + 1, '0');
+  const mainFrac = paddedFrac.slice(0, scaleDecimals);
+  const nextDigit = Number(paddedFrac[scaleDecimals] ?? '0');
+
+  let scaleFactor = 1n;
+  for (let i = 0; i < scaleDecimals; i++) {
+    scaleFactor *= 10n;
+  }
+
+  let scaledAbs = BigInt(intPart) * scaleFactor + BigInt(mainFrac || '0');
+  if (nextDigit >= 5) {
+    scaledAbs += 1n;
+  }
+  return toSafeFixedPointNumber(sign * scaledAbs, 'parseDecimalStringToScaledInt');
+}
+
+
 

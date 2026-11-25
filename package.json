@@ -13,6 +13,12 @@
   ],
   "scripts": {
     "start": "node scripts/start-pos-app.ts",
+    "desktop:clean-start": "node scripts/start-pos-app.ts --clean-start",
+    "build:installer": "node scripts/build-desktop-installer.ts",
+    "dev:ui": "vite --config packages/ui-presentation/vite.config.mjs",
+    "build:ui": "vite build --config packages/ui-presentation/vite.config.mjs",
+    "tauri:dev": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "tauri:build": "npx tauri build",
     "test": "node --test tests/property-invariants/accounting-invariants.test.ts tests/e2e-integration/phase0-assembly.test.ts tests/e2e-integration/phase1-warehouse-assembly.test.ts tests/e2e-integration/phase2-pos-assembly.test.ts tests/e2e-integration/phase3-cluster-resilience-assembly.test.ts tests/e2e-integration/phase4-security-chaos-soak-assembly.test.ts tests/e2e-integration/phase5-production-release-assembly.test.ts tests/e2e-integration/section6-hil-assembly-checklist.test.ts tests/e2e-integration/phase6-interactive-ui-server.test.ts",
     "test:invariants": "node --test tests/property-invariants/accounting-invariants.test.ts",
     "test:phase0": "node --test tests/e2e-integration/phase0-assembly.test.ts",
@@ -26,6 +32,20 @@
     "test:rust": "cargo test",
     "verify:schema": "node scripts/verify-schema-checksum.mjs",
     "verify:pr-gatekeeping": "node scripts/verify-pr-gatekeeping.mjs"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.14",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "lucide-react": "^0.479.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.14",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.2"
   },
   "engines": {
     "node": ">=22.6.0"

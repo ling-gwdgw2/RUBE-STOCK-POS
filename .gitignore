@@ -2,7 +2,11 @@
 node_modules/
 target/
 dist/
+dist-installer/
 build/
+*.exe
+*.msi
+*.pdb
 
 # Database & Keystore Runtime Files
 data/

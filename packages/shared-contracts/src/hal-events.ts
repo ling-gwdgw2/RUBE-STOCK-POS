@@ -60,6 +60,13 @@ export interface UpsPowerEvent {
   timestampIso: string;
 }
 
+export interface UpsPowerStateEvent {
+  acPresent: boolean;
+  batteryChargePercent: number;
+  estimatedRuntimeSeconds: number;
+  triggeredWalCheckpoint: boolean;
+}
+
 export interface UsbBackupRingEvent {
   shiftNumber: string;
   tempPartFilename: string;

@@ -85,10 +85,10 @@ export interface ParsedScaleBarcode {
   mode?: 'WEIGHT_EMBEDDED' | 'PRICE_EMBEDDED';
   prefix?: string;
   sku?: string;
-  weightMilliKg?: MilliUnit;
-  totalPriceSatang?: Satang;
-  computedWeightMilliFromPrice?: MilliUnit;
-  checkDigitValid?: boolean;
+  weightMilliKg?: MilliUnit | undefined;
+  totalPriceSatang?: Satang | undefined;
+  computedWeightMilliFromPrice?: MilliUnit | undefined;
+  checkDigitValid?: boolean | undefined;
 }
 
 /**
