@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
   AlertTriangle,
@@ -51,6 +51,7 @@ import type {
   StaffUserDto,
   TaxMode,
 } from '../types.ts';
+import { ConfirmDialog, ModalDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface PosRegisterWorkspaceProps {
   bootstrap: BootstrapPayload;
@@ -187,7 +188,7 @@ const ProductEditorialArtwork: React.FC<{
 
       {/* Subtle top-left monochrome metadata tag */}
       <div className="absolute left-3 top-3 flex items-center gap-1.5">
-        <span className="rounded-[4px] bg-white/92 px-2 py-0.5 text-[11px] font-medium text-[#202124] backdrop-blur-xs">
+        <span className="rounded-[4px] bg-white/95 px-2 py-0.5 text-[11px] font-medium text-ink">
           {item.isComposite
             ? 'สูตร BOM'
             : item.isWeightedScale
@@ -198,7 +199,7 @@ const ProductEditorialArtwork: React.FC<{
 
       {/* Active In-Cart Counter Pill (Google Blue #1a73e8 48px pill) */}
       {inCartQtyMilli > 0 && (
-        <div className="absolute right-3 top-3 rounded-[48px] bg-[#1a73e8] px-3 py-1 text-xs font-medium text-white tabular-nums-google">
+        <div className="absolute right-3 top-3 rounded-[48px] bg-primary px-3 py-1 text-xs font-medium text-white tabular-nums-google">
           ในบิล{' '}
           {item.isWeightedScale
             ? formatMilliUnitsToQtyString(inCartQtyMilli, item.unitName)
@@ -301,6 +302,16 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     transportMode?: string | undefined;
     bytesSent?: number | undefined;
   } | null>(null);
+
+  const uid = useId();
+  const [confirmAction, setConfirmAction] = useState<{
+    title: string;
+    description: string;
+    confirmLabel: string;
+    tone: 'danger' | 'primary';
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const discountInputRef = useRef<HTMLInputElement | null>(null);
@@ -701,10 +712,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           instantExactCashCheckoutRef.current?.();
         }
       } else if (e.key === 'Escape') {
-        if (checkoutModalOpen) setCheckoutModalOpen(false);
-        else if (customizingVariant) setCustomizingVariant(null);
-        else if (receiptModalOpen) setReceiptModalOpen(false);
-        else if (editingCartKey) setEditingCartKey(null);
+        if (!confirmAction && !checkoutModalOpen && !customizingVariant && !receiptModalOpen && editingCartKey) {
+          setEditingCartKey(null);
+        }
       }
     };
     window.addEventListener('keydown', onWindowKeyDown);
@@ -712,6 +722,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   }, [
     cart.length,
     checkoutModalOpen,
+    confirmAction,
     customizingVariant,
     editingCartKey,
     handleHoldCurrentBill,
@@ -1046,26 +1057,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       {/* ==================================================================== */}
       <div className="lg:col-span-7 xl:col-span-8 space-y-5">
         {/* Top Register Control Strip: Mode Underline Tabs + Smart Search Pill */}
-        <div className="border-b border-[#dadce0] bg-white">
+        <div className="border-b border-hairline bg-canvas">
           <div className="flex flex-wrap items-center justify-between gap-4">
             {/* Canonical Google Nav-Link Tabs (4px #1a73e8 bottom-rule indicator, 48px height, zero fill) */}
-            <div className="flex items-center gap-1 overflow-x-auto" role="tablist">
+            <div className="flex items-center gap-1 overflow-x-auto" role="tablist" aria-label="มุมมองหน้าขาย POS">
               {bootstrap.profile !== 'RETAIL' && (
                 <button
                   type="button"
                   role="tab"
                   aria-selected={posSubView === 'STUDIO_CARDS'}
                   onClick={() => setPosSubView('STUDIO_CARDS')}
-                  className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
-                    posSubView === 'STUDIO_CARDS'
-                      ? 'text-[#202124]'
-                      : 'text-[#5f6368] hover:text-[#202124]'
+                  className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                    posSubView === 'STUDIO_CARDS' ? 'text-ink' : 'text-ink-muted hover:text-ink'
                   }`}
                 >
                   <LayoutGrid className="h-4 w-4" />
                   <span>การ์ดสินค้า</span>
                   {posSubView === 'STUDIO_CARDS' && (
-                    <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-[#1a73e8]" />
+                    <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                   )}
                 </button>
               )}
@@ -1076,16 +1085,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   role="tab"
                   aria-selected={posSubView === 'SCAN_LEDGER'}
                   onClick={() => setPosSubView('SCAN_LEDGER')}
-                  className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
-                    posSubView === 'SCAN_LEDGER'
-                      ? 'text-[#202124]'
-                      : 'text-[#5f6368] hover:text-[#202124]'
+                  className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                    posSubView === 'SCAN_LEDGER' ? 'text-ink' : 'text-ink-muted hover:text-ink'
                   }`}
                 >
                   <List className="h-4 w-4" />
                   <span>ตารางสแกนด่วน</span>
                   {posSubView === 'SCAN_LEDGER' && (
-                    <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-[#1a73e8]" />
+                    <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                   )}
                 </button>
               )}
@@ -1095,21 +1102,19 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 role="tab"
                 aria-selected={posSubView === 'HELD_BILLS'}
                 onClick={() => setPosSubView('HELD_BILLS')}
-                className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
-                  posSubView === 'HELD_BILLS'
-                    ? 'text-[#202124]'
-                    : 'text-[#5f6368] hover:text-[#202124]'
+                className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                  posSubView === 'HELD_BILLS' ? 'text-ink' : 'text-ink-muted hover:text-ink'
                 }`}
               >
                 <PauseCircle className="h-4 w-4" />
                 <span>บิลพักไว้</span>
                 {heldBills.length > 0 && (
-                  <span className="rounded-[48px] bg-[#1a73e8] px-2 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
+                  <span className="rounded-[48px] bg-primary px-2 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
                     {heldBills.length}
                   </span>
                 )}
                 {posSubView === 'HELD_BILLS' && (
-                  <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-[#1a73e8]" />
+                  <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                 )}
               </button>
 
@@ -1118,23 +1123,21 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 role="tab"
                 aria-selected={posSubView === 'ORDER_HISTORY'}
                 onClick={() => setPosSubView('ORDER_HISTORY')}
-                className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
-                  posSubView === 'ORDER_HISTORY'
-                    ? 'text-[#202124]'
-                    : 'text-[#5f6368] hover:text-[#202124]'
+                className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                  posSubView === 'ORDER_HISTORY' ? 'text-ink' : 'text-ink-muted hover:text-ink'
                 }`}
               >
                 <History className="h-4 w-4" />
                 <span>ใบเสร็จย้อนหลัง ({bootstrap.recentOrders.length})</span>
                 {posSubView === 'ORDER_HISTORY' && (
-                  <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-[#1a73e8]" />
+                  <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                 )}
               </button>
             </div>
 
             {/* Pre-Scan Quantity Multiplier Pills (F4) */}
-            <div className="flex items-center gap-1.5 pb-2 sm:pb-0">
-              <span className="text-xs text-[#5f6368] mr-1">ตัวคูณสแกน (F4):</span>
+            <div className="flex flex-wrap items-center gap-1.5 pb-2 sm:pb-0">
+              <span className="text-xs text-ink-muted mr-1">ตัวคูณสแกน (F4):</span>
               {MULTIPLIER_PRESETS.map((mult) => {
                 const active = scanMultiplier === mult;
                 return (
@@ -1142,10 +1145,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     key={mult}
                     type="button"
                     onClick={() => setScanMultiplier(mult)}
-                    className={`min-h-[36px] min-w-[44px] rounded-[48px] border px-3 font-google-display text-xs font-medium tracking-[0.25px] transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
+                    className={`min-h-[36px] min-w-[44px] rounded-[48px] border px-3 font-google-display text-xs font-medium tracking-[0.25px] ${UI_INTERACTION.focusButton} ${
                       active
-                        ? 'border-[#1a73e8] bg-[#1a73e8] text-white'
-                        : 'border-[#dadce0] bg-white text-[#3c4043] hover:border-[#1a73e8] hover:text-[#1a73e8]'
+                        ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                        : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
                     }`}
                   >
                     ×{mult}
@@ -1160,7 +1163,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         {posSubView !== 'ORDER_HISTORY' && posSubView !== 'HELD_BILLS' && (
           <div className="space-y-3">
             <div className="relative flex items-center">
-              <Search className="pointer-events-none absolute left-4 h-5 w-5 text-[#5f6368]" />
+              <Search className="pointer-events-none absolute left-4 h-5 w-5 text-ink-muted" />
               <input
                 ref={searchInputRef}
                 data-scanner-allow="true"
@@ -1182,25 +1185,27 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     }
                   }
                 }}
-                placeholder="ยิงบาร์โค้ด (ป้องกันคีย์ไทยอัตโนมัติ) หรือพิมพ์ชื่อสินค้า / SKU... (กด F2)"
-                className="h-[50px] w-full rounded-[48px] border border-[#dadce0] bg-white pl-12 pr-44 text-[16px] text-[#202124] placeholder:text-[#80868b] transition-colors duration-200 focus:border-[#1a73e8] focus:outline-none focus:ring-2 focus:ring-[#1a73e8]/20"
+                placeholder="ยิงบาร์โค้ด หรือพิมพ์ชื่อสินค้า / SKU... (กด F2)"
+                className={`h-[50px] w-full rounded-[48px] border border-hairline bg-canvas pl-12 pr-28 sm:pr-44 text-[15px] sm:text-[16px] text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
-              <div className="absolute right-3 flex items-center gap-2">
+              <div className="absolute right-3 flex items-center gap-1.5 sm:gap-2">
                 {searchQuery && (
                   <button
                     type="button"
                     aria-label="ล้างคำค้นหา"
                     onClick={() => setSearchQuery('')}
-                    className="flex h-8 w-8 items-center justify-center rounded-full text-[#5f6368] hover:bg-[#f8f9fa] hover:text-[#202124] cursor-pointer"
+                    className={`flex h-8 w-8 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
                   >
                     <X className="h-4 w-4" />
                   </button>
                 )}
                 <span
                   title="จำนวนครั้งที่ระบบลบตัวอักษรภาษาไทยตัวแรกที่หลุดจากปืนบาร์โค้ดอัตโนมัติ"
-                  className="rounded-[48px] border border-[#dadce0] bg-[#f8f9fa] px-3 py-1 text-xs text-[#5f6368] tabular-nums-google"
+                  className="rounded-[48px] border border-hairline bg-surface-1 px-2.5 sm:px-3 py-1 text-xs text-ink-muted tabular-nums-google"
                 >
-                  กันคีย์ไทย {rollbackCount}
+                  <span className="hidden sm:inline">กันคีย์ไทย </span>
+                  <span className="sm:hidden">TH </span>
+                  {rollbackCount}
                 </span>
               </div>
             </div>
@@ -1210,10 +1215,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <button
                 type="button"
                 onClick={() => setSelectedCategoryId('ALL')}
-                className={`min-h-[44px] shrink-0 rounded-[48px] border px-5 font-google-display text-sm font-medium tracking-[0.25px] transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
+                className={`min-h-[44px] shrink-0 rounded-[48px] border px-5 font-google-display text-sm font-medium tracking-[0.25px] ${UI_INTERACTION.focusButton} ${
                   selectedCategoryId === 'ALL'
-                    ? 'border-[#1a73e8] bg-[#1a73e8] text-white'
-                    : 'border-[#dadce0] bg-white text-[#3c4043] hover:border-[#1a73e8] hover:text-[#1a73e8]'
+                    ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                    : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
                 }`}
               >
                 รายการขายทั้งหมด
@@ -1225,10 +1230,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     key={cat.id}
                     type="button"
                     onClick={() => setSelectedCategoryId(cat.id)}
-                    className={`min-h-[44px] shrink-0 rounded-[48px] border px-5 font-google-display text-sm font-medium tracking-[0.25px] transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
+                    className={`min-h-[44px] shrink-0 rounded-[48px] border px-5 font-google-display text-sm font-medium tracking-[0.25px] ${UI_INTERACTION.focusButton} ${
                       active
-                        ? 'border-[#1a73e8] bg-[#1a73e8] text-white'
-                        : 'border-[#dadce0] bg-white text-[#3c4043] hover:border-[#1a73e8] hover:text-[#1a73e8]'
+                        ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                        : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
                     }`}
                   >
                     {cat.name}
@@ -1245,14 +1250,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         {/* ================================================================== */}
         {posSubView === 'STUDIO_CARDS' &&
           (sellableCatalog.length === 0 ? (
-            <div className="rounded-[4px] border border-[#dadce0] bg-white py-16 px-6 text-center space-y-3">
-              <Search className="h-9 w-9 text-[#80868b] mx-auto" />
-              <p className="font-google-display text-[20px] font-normal text-[#202124]">
+            <div className="rounded-[4px] border border-hairline bg-canvas py-16 px-6 text-center space-y-3">
+              <Search className="h-9 w-9 text-ink-muted mx-auto" />
+              <p className="font-google-display text-[20px] font-normal text-ink">
                 {searchQuery.trim() || selectedCategoryId !== 'ALL'
                   ? 'ไม่พบสินค้าที่ตรงกับคำค้นหาหรือหมวดหมู่นี้'
                   : 'ยังไม่มีรายการสินค้าในระบบ'}
               </p>
-              <p className="text-sm text-[#5f6368]">
+              <p className="text-sm text-ink-muted">
                 {searchQuery.trim() || selectedCategoryId !== 'ALL'
                   ? 'ลองล้างคำค้นหาหรือเลือกดูรายการขายทั้งหมด'
                   : 'ไปที่แท็บ “คลังสินค้า & PO” ด้านบนเพื่อเพิ่มสินค้าใหม่เข้าหน้าร้าน'}
@@ -1264,7 +1269,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     setSearchQuery('');
                     setSelectedCategoryId('ALL');
                   }}
-                  className="h-[44px] rounded-[48px] border border-[#dadce0] bg-white px-6 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
+                  className={`h-[44px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
                   ล้างคำค้นหา / ตัวกรอง
                 </button>
@@ -1282,10 +1287,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     key={item.id}
                     type="button"
                     onClick={() => handleProductSelect(item)}
-                    className={`group flex flex-col justify-between overflow-hidden rounded-[4px] border bg-white text-left transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
-                      inCartQty > 0
-                        ? 'border-[#1a73e8]'
-                        : 'border-[#dadce0] hover:border-[#1a73e8]'
+                    className={`group flex flex-col justify-between overflow-hidden rounded-[4px] border bg-canvas text-left ${UI_INTERACTION.focusButton} ${
+                      inCartQty > 0 ? 'border-primary' : 'border-hairline hover:border-primary'
                     }`}
                   >
                     <div className="w-full">
@@ -1293,10 +1296,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
                       {/* Canonical 24px (p-6) card-photo content padding */}
                       <div className="p-6 pb-4">
-                        <h3 className="font-google-display text-[20px] font-normal leading-[28px] tracking-normal text-[#202124] line-clamp-2">
+                        <h3 className="font-google-display text-[20px] font-normal leading-[28px] tracking-normal text-ink line-clamp-2">
                           {item.itemName}
                         </h3>
-                        <p className="mt-1 text-[14px] leading-[20px] text-[#5f6368]">
+                        <p className="mt-1 text-[14px] leading-[20px] text-ink-muted">
                           {item.isComposite && !item.useProduction
                             ? 'ตัดวัตถุดิบสดตามสูตร Multi-Level BOM'
                             : lowStock
@@ -1306,14 +1309,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       </div>
                     </div>
 
-                    <div className="px-6 pb-5 pt-2 flex items-center justify-between">
-                      <span className="font-google-display text-[24px] font-normal tracking-[-0.25px] text-[#202124] tabular-nums-google">
+                    <div className="px-6 pb-5 pt-2 flex items-center justify-between w-full">
+                      <span className="font-google-display text-[24px] font-normal tracking-[-0.25px] text-ink tabular-nums-google">
                         ฿{formatSatangToThbString(item.priceSatang)}
                         {item.isWeightedScale && (
-                          <span className="text-sm text-[#5f6368] ml-1">/ {item.unitName}</span>
+                          <span className="text-sm text-ink-muted ml-1">/ {item.unitName}</span>
                         )}
                       </span>
-                      <span className="flex h-10 w-10 items-center justify-center rounded-full border border-[#dadce0] text-[#1a73e8] transition-colors duration-200 group-hover:border-[#1a73e8] group-hover:bg-[#1a73e8] group-hover:text-white">
+                      <span className="flex h-10 w-10 items-center justify-center rounded-full border border-hairline text-primary transition-colors duration-200 group-hover:border-primary group-hover:bg-primary group-hover:text-white">
                         {item.isComposite ? (
                           <ArrowUpRight className="h-5 w-5" />
                         ) : (
@@ -1331,10 +1334,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         {/* SUB-VIEW 2: SUPERMARKET HIGH-SPEED SCAN LEDGER                     */}
         {/* ================================================================== */}
         {posSubView === 'SCAN_LEDGER' && (
-          <div className="rounded-[4px] border border-[#dadce0] bg-white overflow-hidden">
-            <div className="border-b border-[#dadce0] bg-[#f8f9fa] px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-sm text-[#3c4043]">
-                <ScanBarcode className="h-4 w-4 text-[#1a73e8]" />
+          <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
+            <div className="border-b border-hairline bg-surface-1 px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm text-ink-soft">
+                <ScanBarcode className="h-4 w-4 text-primary shrink-0" />
                 <span>คลิกแถวสินค้าเพื่อเพิ่มลงบิลทันที (×{scanMultiplier}) หรือยิงปืนบาร์โค้ดต่อเนื่อง</span>
               </div>
 
@@ -1343,14 +1346,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   <button
                     type="button"
                     onClick={() => onScanBarcodeString('2010045012505', 1)}
-                    className="min-h-[38px] rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] transition-colors duration-200 cursor-pointer"
+                    className={`min-h-[38px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                   >
                     + สแกนตราชั่ง 1.250 กก. (Prefix 20)
                   </button>
                   <button
                     type="button"
                     onClick={() => onScanBarcodeString('2510045225009', 1)}
-                    className="min-h-[38px] rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] transition-colors duration-200 cursor-pointer"
+                    className={`min-h-[38px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                   >
                     + สแกนป้ายฝังราคา ฿225 (Prefix 25)
                   </button>
@@ -1360,20 +1363,20 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="border-b border-[#dadce0] bg-[#f8f9fa] text-xs font-medium text-[#5f6368]">
+                <thead className="border-b border-hairline bg-surface-1 text-xs font-medium text-ink-muted">
                   <tr>
-                    <th className="py-3.5 px-5">รหัสบาร์โค้ด / SKU</th>
-                    <th className="py-3.5 px-5">ชื่อสินค้า</th>
-                    <th className="py-3.5 px-5">หมวดหมู่</th>
-                    <th className="py-3.5 px-5 text-right">สต็อกคงเหลือ</th>
-                    <th className="py-3.5 px-5 text-right">ราคาขาย</th>
-                    <th className="py-3.5 px-5 text-right">เพิ่มลงบิล</th>
+                    <th scope="col" className="py-3.5 px-5">รหัสบาร์โค้ด / SKU</th>
+                    <th scope="col" className="py-3.5 px-5">ชื่อสินค้า</th>
+                    <th scope="col" className="py-3.5 px-5">หมวดหมู่</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">สต็อกคงเหลือ</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">ราคาขาย</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">เพิ่มลงบิล</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#dadce0]">
+                <tbody className="divide-y divide-hairline">
                   {sellableCatalog.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-14 text-center text-sm text-[#5f6368]">
+                      <td colSpan={6} className="py-14 text-center text-sm text-ink-muted">
                         {searchQuery.trim() || selectedCategoryId !== 'ALL'
                           ? 'ไม่พบรายการสินค้าที่ตรงกับคำค้นหา'
                           : 'ยังไม่มีรายการสินค้าในระบบ — กรุณาเพิ่มสินค้าในแท็บ “คลังสินค้า & PO”'}
@@ -1386,40 +1389,48 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         <tr
                           key={item.id}
                           onClick={() => handleProductSelect(item)}
-                          className="hover:bg-[#f8f9fa] transition-colors duration-150 cursor-pointer"
+                          className="hover:bg-surface-1 transition-colors duration-150 cursor-pointer"
                         >
                           <td className="py-3.5 px-5 tabular-nums-google">
-                            <div className="text-sm text-[#202124]">{item.barcode ?? '—'}</div>
-                            <div className="text-xs text-[#5f6368]">{item.sku}</div>
+                            <div className="text-sm text-ink">{item.barcode ?? '—'}</div>
+                            <div className="text-xs text-ink-muted">{item.sku}</div>
                           </td>
                           <td className="py-3.5 px-5">
-                            <div className="font-google-display text-[16px] font-medium text-[#202124] flex items-center gap-2">
+                            <div className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
                               <span>{item.itemName}</span>
                               {inCartQty > 0 && (
-                                <span className="rounded-[48px] bg-[#1a73e8] px-2.5 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
+                                <span className="rounded-[48px] bg-primary px-2.5 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
                                   ×{item.isWeightedScale ? formatMilliUnitsToQtyString(inCartQty) : Math.round(inCartQty / 1000)}
                                 </span>
                               )}
                             </div>
                             {item.isWeightedScale && (
-                              <div className="text-xs text-[#5f6368] flex items-center gap-1 mt-0.5">
-                                <Scale className="h-3 w-3 text-[#1a73e8]" /> รองรับบาร์โค้ดชั่งน้ำหนักสด EAN-13
+                              <div className="text-xs text-ink-muted flex items-center gap-1 mt-0.5">
+                                <Scale className="h-3 w-3 text-primary" /> รองรับบาร์โค้ดชั่งน้ำหนักสด EAN-13
                               </div>
                             )}
                           </td>
-                          <td className="py-3.5 px-5 text-xs text-[#5f6368]">{item.categoryName}</td>
-                          <td className="py-3.5 px-5 text-right text-sm text-[#3c4043] tabular-nums-google">
+                          <td className="py-3.5 px-5 text-xs text-ink-muted">{item.categoryName}</td>
+                          <td className="py-3.5 px-5 text-right text-sm text-ink-soft tabular-nums-google">
                             {item.isComposite && !item.useProduction
                               ? 'ตัดตามสูตร'
                               : formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}
                           </td>
-                          <td className="py-3.5 px-5 text-right font-google-display text-[18px] font-normal text-[#202124] tabular-nums-google">
+                          <td className="py-3.5 px-5 text-right font-google-display text-[18px] font-normal text-ink tabular-nums-google">
                             ฿{formatSatangToThbString(item.priceSatang)}
                           </td>
                           <td className="py-3.5 px-5 text-right">
-                            <span className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[#dadce0] text-[#1a73e8]">
+                            <button
+                              type="button"
+                              aria-label={`เพิ่ม ${item.itemName} ลงบิล`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleProductSelect(item);
+                              }}
+                              className={`inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-canvas text-primary hover:border-primary hover:bg-primary hover:text-white ${UI_INTERACTION.focusButton}`}
+                            >
                               <Plus className="h-4 w-4" />
-                            </span>
+                            </button>
                           </td>
                         </tr>
                       );
@@ -1435,13 +1446,13 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         {/* SUB-VIEW 3: HELD BILLS (พักบิล / เรียกบิลคืน)                        */}
         {/* ================================================================== */}
         {posSubView === 'HELD_BILLS' && (
-          <div className="rounded-[4px] border border-[#dadce0] bg-white overflow-hidden">
-            <div className="border-b border-[#dadce0] bg-[#f8f9fa] px-6 py-4 flex items-center justify-between">
+          <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
+            <div className="border-b border-hairline bg-surface-1 px-6 py-4 flex items-center justify-between">
               <div>
-                <h3 className="font-google-display text-[20px] font-normal text-[#202124]">
+                <h3 className="font-google-display text-[20px] font-normal text-ink">
                   รายการบิลที่พักไว้ชั่วคราว (Held Bills)
                 </h3>
-                <p className="text-sm text-[#5f6368]">
+                <p className="text-sm text-ink-muted">
                   พักบิลลูกค้าที่รอเพื่อนหรือหยิบของเพิ่มโดยไม่ขวางคิวหน้าเคาน์เตอร์ (ปุ่มลัด F8)
                 </p>
               </div>
@@ -1449,34 +1460,34 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
             {heldBills.length === 0 ? (
               <div className="py-16 text-center px-6">
-                <PauseCircle className="h-10 w-10 text-[#80868b] mx-auto mb-3" />
-                <p className="font-google-display text-[18px] text-[#202124]">
+                <PauseCircle className="h-10 w-10 text-ink-muted mx-auto mb-3" />
+                <p className="font-google-display text-[18px] text-ink">
                   ไม่มีรายการบิลที่พักไว้ขณะนี้
                 </p>
-                <p className="text-sm text-[#5f6368] mt-1">
+                <p className="text-sm text-ink-muted mt-1">
                   เมื่อมีสินค้าในตะกร้า สามารถกดปุ่ม &ldquo;พักบิล (F8)&rdquo; เพื่อเก็บรายการไว้ชั่วคราวได้ทันที
                 </p>
               </div>
             ) : (
-              <div className="divide-y divide-[#dadce0]">
+              <div className="divide-y divide-hairline">
                 {heldBills.map((h) => (
                   <div
                     key={h.id}
-                    className="p-6 flex flex-wrap items-center justify-between gap-4 hover:bg-[#f8f9fa] transition-colors"
+                    className="p-6 flex flex-wrap items-center justify-between gap-4 hover:bg-surface-1 transition-colors duration-200"
                   >
                     <div className="space-y-1">
                       <div className="flex items-center gap-2.5">
-                        <span className="font-google-display text-[20px] font-normal text-[#202124]">
+                        <span className="font-google-display text-[20px] font-normal text-ink">
                           {h.referenceLabel}
                         </span>
-                        <span className="rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] px-2 py-0.5 text-xs text-[#5f6368]">
+                        <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-xs text-ink-muted">
                           {h.orderType}
                         </span>
                       </div>
-                      <p className="text-sm text-[#5f6368]">
+                      <p className="text-sm text-ink-muted">
                         {h.cart.map((c) => c.itemName).join(', ')}
                       </p>
-                      <div className="text-xs text-[#80868b] flex items-center gap-2">
+                      <div className="text-xs text-ink-muted flex items-center gap-2">
                         <Clock className="h-3.5 w-3.5" />
                         <span>พักเมื่อ {new Date(h.heldAtIso).toLocaleTimeString('th-TH')}</span>
                         <span>·</span>
@@ -1484,26 +1495,35 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-3">
                       <div className="text-right mr-2">
-                        <div className="text-xs text-[#5f6368]">ยอดสุทธิ</div>
-                        <div className="font-google-display text-[24px] font-normal text-[#202124] tabular-nums-google">
+                        <div className="text-xs text-ink-muted">ยอดสุทธิ</div>
+                        <div className="font-google-display text-[24px] font-normal text-ink tabular-nums-google">
                           ฿{formatSatangToThbString(h.totalSatang)}
                         </div>
                       </div>
                       <button
                         type="button"
                         onClick={() =>
-                          setHeldBills((prev) => prev.filter((item) => item.id !== h.id))
+                          setConfirmAction({
+                            title: `ลบบิลที่พักไว้ "${h.referenceLabel}"?`,
+                            description: `บิลนี้มีสินค้า ${h.cart.length} รายการ (฿${formatSatangToThbString(h.totalSatang)}) หากลบแล้วจะไม่สามารถกู้คืนได้`,
+                            confirmLabel: 'ยืนยันลบบิลที่พัก',
+                            tone: 'danger',
+                            onConfirm: () => {
+                              setHeldBills((prev) => prev.filter((item) => item.id !== h.id));
+                              onToast(`ลบบิลที่พัก "${h.referenceLabel}" แล้ว`, 'warn');
+                            },
+                          })
                         }
-                        className="h-[46px] rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-sm font-medium text-[#5f6368] hover:text-[#202124] cursor-pointer"
+                        className={`h-[46px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-sm font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                       >
                         ลบทิ้ง
                       </button>
                       <button
                         type="button"
                         onClick={() => handleRecallHeldBill(h)}
-                        className="flex h-[46px] items-center gap-2 rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] cursor-pointer"
+                        className={`flex h-[46px] items-center gap-2 rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                       >
                         <PlayCircle className="h-4 w-4" />
                         เรียกบิลคิดเงิน
@@ -1520,13 +1540,13 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         {/* SUB-VIEW 4: COMPLETED RECEIPTS, REPRINT & HISTORICAL-COST VOID      */}
         {/* ================================================================== */}
         {posSubView === 'ORDER_HISTORY' && (
-          <div className="rounded-[4px] border border-[#dadce0] bg-white overflow-hidden">
-            <div className="border-b border-[#dadce0] bg-[#f8f9fa] px-6 py-4 flex flex-wrap items-center justify-between gap-2">
+          <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
+            <div className="border-b border-hairline bg-surface-1 px-6 py-4 flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h3 className="font-google-display text-[20px] font-normal text-[#202124]">
+                <h3 className="font-google-display text-[20px] font-normal text-ink">
                   ประวัติใบเสร็จรับเงิน &amp; ใบกำกับภาษีอย่างย่อ (ABB)
                 </h3>
-                <p className="text-sm text-[#5f6368]">
+                <p className="text-sm text-ink-muted">
                   รองรับการพิมพ์ใบเสร็จซ้ำ และการยกเลิกบิล (Void) โดยคืนสต็อกตามต้นทุนจริง ณ เวลาขาย
                 </p>
               </div>
@@ -1534,41 +1554,41 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="border-b border-[#dadce0] bg-[#f8f9fa] text-xs font-medium text-[#5f6368]">
+                <thead className="border-b border-hairline bg-surface-1 text-xs font-medium text-ink-muted">
                   <tr>
-                    <th className="py-3.5 px-5">เลขที่ใบเสร็จ / ABB</th>
-                    <th className="py-3.5 px-5">รายการที่ขาย</th>
-                    <th className="py-3.5 px-5">วิธีชำระ</th>
-                    <th className="py-3.5 px-5 text-right">ยอดสุทธิ</th>
-                    <th className="py-3.5 px-5 text-center">สถานะ</th>
-                    <th className="py-3.5 px-5 text-right">การทำงาน</th>
+                    <th scope="col" className="py-3.5 px-5">เลขที่ใบเสร็จ / ABB</th>
+                    <th scope="col" className="py-3.5 px-5">รายการที่ขาย</th>
+                    <th scope="col" className="py-3.5 px-5">วิธีชำระ</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">ยอดสุทธิ</th>
+                    <th scope="col" className="py-3.5 px-5 text-center">สถานะ</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">การทำงาน</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#dadce0]">
+                <tbody className="divide-y divide-hairline">
                   {bootstrap.recentOrders.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-14 text-center text-[#5f6368]">
+                      <td colSpan={6} className="py-14 text-center text-ink-muted">
                         ยังไม่มีรายการขายในกะนี้
                       </td>
                     </tr>
                   ) : (
                     bootstrap.recentOrders.map((ord) => (
-                      <tr key={ord.salesOrderId} className="hover:bg-[#f8f9fa]">
+                      <tr key={ord.salesOrderId} className="hover:bg-surface-1 transition-colors duration-150">
                         <td className="py-3.5 px-5 tabular-nums-google">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="font-medium text-[#202124]">{ord.receiptNumber}</span>
+                            <span className="font-medium text-ink">{ord.receiptNumber}</span>
                             {ord.tableOrQueueNo && (
-                              <span className="rounded-[48px] bg-[#e8f0fe] px-2 py-0.5 text-[11px] font-medium text-[#1a73e8]">
+                              <span className="rounded-[48px] bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary-dark">
                                 {ord.tableOrQueueNo}
                               </span>
                             )}
                           </div>
-                          <div className="text-xs text-[#5f6368]">
+                          <div className="text-xs text-ink-muted">
                             {ord.abbTaxInvoiceNo ?? '—'} · {ord.orderType}
                           </div>
                         </td>
                         <td className="py-3.5 px-5">
-                          <div className="text-[#202124] max-w-xs truncate">
+                          <div className="text-ink max-w-xs truncate">
                             {ord.lines
                               .map((l) => {
                                 const qtyTxt = formatMilliUnitsToQtyString(l.quantityMilli, l.unitName).replace(/\.000 /, ' ');
@@ -1580,20 +1600,20 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                               })
                               .join(', ')}
                           </div>
-                          <div className="text-xs text-[#5f6368]">
+                          <div className="text-xs text-ink-muted">
                             โดย {ord.cashierName} ·{' '}
                             {new Date(ord.createdAt).toLocaleTimeString('th-TH')}
                           </div>
                           {ord.status === 'VOIDED' && ord.voidReason && (
-                            <div className="text-[11px] text-[#202124] mt-0.5">
+                            <div className="text-[11px] text-ink mt-0.5">
                               เหตุผลยกเลิก: {ord.voidReason}
                             </div>
                           )}
                         </td>
-                        <td className="py-3.5 px-5 text-xs text-[#3c4043] tabular-nums-google">
+                        <td className="py-3.5 px-5 text-xs text-ink-soft tabular-nums-google">
                           <div>{ord.paymentSummaryLabel || ord.paymentMethod}</div>
                           {ord.payments && ord.payments.length > 1 ? (
-                            <div className="text-[11px] text-[#5f6368] space-y-0.5 mt-0.5">
+                            <div className="text-[11px] text-ink-muted space-y-0.5 mt-0.5">
                               {ord.payments.map((p, idx) => (
                                 <div key={`${p.paymentMethod}-${idx}`}>
                                   • {p.paymentMethod}: ฿{formatSatangToThbString(p.amountSatang)}
@@ -1603,25 +1623,25 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             </div>
                           ) : (
                             ord.slipTransRefLast4 && (
-                              <div className="text-[#5f6368]">Ref *{ord.slipTransRefLast4}</div>
+                              <div className="text-ink-muted">Ref *{ord.slipTransRefLast4}</div>
                             )
                           )}
                         </td>
-                        <td className="py-3.5 px-5 text-right font-google-display text-[18px] text-[#202124] tabular-nums-google">
+                        <td className="py-3.5 px-5 text-right font-google-display text-[18px] text-ink tabular-nums-google">
                           ฿{formatSatangToThbString(ord.totalSatang)}
                         </td>
                         <td className="py-3.5 px-5 text-center">
                           <span
                             className={`inline-block rounded-[4px] border px-2.5 py-0.5 text-xs font-medium ${
                               ord.status === 'COMPLETED'
-                                ? 'border-[#dadce0] bg-[#f8f9fa] text-[#202124]'
-                                : 'border-[#dadce0] bg-[#f8f9fa] text-[#5f6368] line-through'
+                                ? 'border-hairline bg-surface-1 text-ink'
+                                : 'border-hairline bg-surface-1 text-ink-muted line-through'
                             }`}
                           >
                             {ord.status}
                           </span>
                         </td>
-                        <td className="py-3.5 px-5 text-right space-x-2">
+                        <td className="py-3.5 px-5 text-right space-x-2 whitespace-nowrap">
                           <button
                             type="button"
                             onClick={() =>
@@ -1631,7 +1651,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                 ord.abbTaxInvoiceNo
                               )
                             }
-                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
+                            className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                           >
                             <Printer className="h-3.5 w-3.5" /> พิมพ์ซ้ำ
                           </button>
@@ -1639,9 +1659,15 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             <button
                               type="button"
                               onClick={() =>
-                                void handleVoidOrder(ord.salesOrderId, ord.receiptNumber)
+                                setConfirmAction({
+                                  title: `ยืนยันยกเลิกบิล ${ord.receiptNumber}?`,
+                                  description: `การยกเลิกบิล (Void) ยอด ฿${formatSatangToThbString(ord.totalSatang)} จะคืนสต็อกตามต้นทุนเดิม ณ เวลาขาย และบันทึกลงสมุดบัญชีห้ามลบ`,
+                                  confirmLabel: 'ยืนยันยกเลิกบิล (Void)',
+                                  tone: 'danger',
+                                  onConfirm: () => handleVoidOrder(ord.salesOrderId, ord.receiptNumber),
+                                })
                               }
-                              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#3c4043] hover:border-[#202124] hover:text-[#202124] cursor-pointer"
+                              className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                             >
                               <RotateCcw className="h-3.5 w-3.5" /> ยกเลิกบิล
                             </button>
@@ -1661,18 +1687,18 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       {/* RIGHT COLUMN (4 COLS): STICKY CUSTOMER DISPLAY HERO + REGISTER BILL  */}
       {/* ==================================================================== */}
       <aside className="lg:col-span-5 xl:col-span-4 lg:sticky lg:top-[76px]">
-        <div className="rounded-[4px] border border-[#dadce0] bg-white overflow-hidden">
+        <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
           {/* 1. CANONICAL NEAR-BLACK HERO BAND (`#000000` hero-bg, weight-400 -0.5px display!) */}
-          <div className="bg-[#000000] px-6 py-6 text-white">
-            <div className="flex items-center justify-between text-xs text-[#80868b]">
-              <span className="font-google-display uppercase tracking-[0.5px] text-white/75">
+          <div className="bg-hero px-6 py-6 text-white">
+            <div className="flex items-center justify-between text-xs text-white/75">
+              <span className="font-google-display uppercase tracking-[0.5px] text-white/80">
                 ยอดชำระสุทธิ · {cartSummary.totalItemUnitsCount} รายการ
               </span>
               {lastPrintedReceipt && (
                 <button
                   type="button"
                   onClick={() => setReceiptModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 rounded-[48px] border border-white/25 px-3 py-1 font-google-display text-xs text-white hover:border-white cursor-pointer"
+                  className={`inline-flex items-center gap-1.5 rounded-[48px] border border-white/30 px-3 py-1 font-google-display text-xs text-white hover:border-white hover:bg-white/10 ${UI_INTERACTION.focusButton}`}
                 >
                   <Printer className="h-3.5 w-3.5" /> ใบเสร็จล่าสุด
                 </button>
@@ -1680,28 +1706,28 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             </div>
 
             {/* Canonical Google Display-LG: 48px, weight 400, -0.5px letter-spacing */}
-            <div className="mt-2 font-google-display text-[48px] font-normal leading-[56px] tracking-[-0.5px] text-white tabular-nums-google">
+            <div className="mt-2 font-google-display text-[40px] sm:text-[48px] font-normal leading-[48px] sm:leading-[56px] tracking-[-0.5px] text-white tabular-nums-google">
               ฿{formatSatangToThbString(cartSummary.totalSatang)}
             </div>
 
             {/* Order Context Controls on Hero Band */}
-            <div className="mt-4 grid grid-cols-2 gap-2.5">
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <select
                 aria-label="รูปแบบออเดอร์"
                 value={orderType}
                 onChange={(e) => setOrderType(e.target.value as CheckoutOrderRequest['orderType'])}
-                className="h-10 rounded-[4px] border border-white/20 bg-white/10 px-3 text-xs font-medium text-white focus:border-[#1a73e8] focus:outline-none cursor-pointer"
+                className="h-10 rounded-[4px] border border-white/25 bg-white/10 px-3 text-xs font-medium text-white transition-colors duration-200 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary cursor-pointer"
               >
-                <option value="TAKEAWAY" className="bg-white text-[#202124]">
+                <option value="TAKEAWAY" className="bg-canvas text-ink">
                   สั่งกลับบ้าน (Takeaway)
                 </option>
-                <option value="DINE_IN" className="bg-white text-[#202124]">
+                <option value="DINE_IN" className="bg-canvas text-ink">
                   ทานที่ร้าน (Dine-In)
                 </option>
-                <option value="RETAIL" className="bg-white text-[#202124]">
+                <option value="RETAIL" className="bg-canvas text-ink">
                   ขายปลีกหน้าร้าน (Retail)
                 </option>
-                <option value="DELIVERY" className="bg-white text-[#202124]">
+                <option value="DELIVERY" className="bg-canvas text-ink">
                   เดลิเวอรี (Delivery)
                 </option>
               </select>
@@ -1712,20 +1738,20 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 value={queueOrTableLabel}
                 onChange={(e) => setQueueOrTableLabel(e.target.value)}
                 placeholder="ป้ายคิว / โต๊ะ (เช่น A-04)"
-                className="h-10 rounded-[4px] border border-white/20 bg-white/10 px-3 text-xs text-white placeholder:text-white/50 focus:border-[#1a73e8] focus:outline-none"
+                className="h-10 rounded-[4px] border border-white/25 bg-white/10 px-3 text-xs text-white placeholder:text-white/65 transition-colors duration-200 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary"
               />
             </div>
           </div>
 
           {/* 2. CART LINE ITEMS ON PURE WHITE CANVAS */}
-          <div className="divide-y divide-[#dadce0] max-h-[360px] min-h-[220px] overflow-y-auto bg-white">
+          <div className="divide-y divide-hairline max-h-[360px] min-h-[220px] overflow-y-auto bg-canvas">
             {cartSummary.lines.length === 0 ? (
               <div className="py-16 px-6 text-center">
-                <ScanBarcode className="h-9 w-9 text-[#dadce0] mx-auto mb-2.5" />
-                <p className="font-google-display text-[18px] font-normal text-[#202124]">
+                <ScanBarcode className="h-9 w-9 text-ink-muted mx-auto mb-2.5" />
+                <p className="font-google-display text-[18px] font-normal text-ink">
                   พร้อมรับรายการขายใหม่
                 </p>
-                <p className="text-sm text-[#5f6368] mt-1">
+                <p className="text-sm text-ink-muted mt-1">
                   แตะเลือกสินค้าด้านซ้าย หรือยิงบาร์โค้ดเข้าสู่รายการขายทันที
                 </p>
               </div>
@@ -1733,7 +1759,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               cartSummary.lines.map((line) => {
                 const isEditingQty = editingCartKey === line.cartKey;
                 return (
-                  <div key={line.cartKey} className="px-5 py-3.5 hover:bg-[#f8f9fa] transition-colors">
+                  <div key={line.cartKey} className="px-5 py-3.5 hover:bg-surface-1 transition-colors duration-150">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <button
@@ -1750,7 +1776,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                               );
                             }
                           }}
-                          className="font-google-display text-[16px] font-medium text-[#202124] hover:text-[#1a73e8] text-left cursor-pointer"
+                          className={`font-google-display text-[16px] font-medium text-ink hover:text-primary text-left rounded-[4px] ${UI_INTERACTION.focusButton}`}
                         >
                           {line.itemName}
                         </button>
@@ -1760,7 +1786,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             {line.mods.map((m) => (
                               <span
                                 key={m.id}
-                                className="rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] px-2 py-0.5 text-xs text-[#5f6368]"
+                                className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-xs text-ink-muted"
                               >
                                 {m.name}
                                 {m.priceDeltaSatang > 0
@@ -1772,15 +1798,15 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         )}
 
                         {line.scaleBadgeText && (
-                          <div className="mt-1 text-xs text-[#1a73e8]">{line.scaleBadgeText}</div>
+                          <div className="mt-1 text-xs text-primary-hover">{line.scaleBadgeText}</div>
                         )}
                       </div>
 
                       <div className="text-right shrink-0 tabular-nums-google">
-                        <div className="font-google-display text-[18px] font-normal text-[#202124]">
+                        <div className="font-google-display text-[18px] font-normal text-ink">
                           ฿{formatSatangToThbString(line.lineTotalSatang)}
                         </div>
-                        <div className="text-xs text-[#5f6368]">
+                        <div className="text-xs text-ink-muted">
                           @฿{formatSatangToThbString(line.effectiveUnitSatang)}/{line.unitName}
                         </div>
                       </div>
@@ -1804,7 +1830,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                 .filter((c) => c.quantityMilli > 0)
                             );
                           }}
-                          className="flex h-[40px] w-[40px] items-center justify-center rounded-full border border-[#dadce0] bg-white text-[#202124] hover:border-[#1a73e8] hover:text-[#1a73e8] cursor-pointer"
+                          className={`flex h-[40px] w-[40px] items-center justify-center rounded-full border border-hairline bg-canvas text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                         >
                           <Minus className="h-4 w-4" />
                         </button>
@@ -1840,14 +1866,16 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           >
                             <input
                               type="text"
+                              aria-label={`แก้ไขจำนวน ${line.itemName}`}
                               autoFocus
                               value={editingQtyInput}
                               onChange={(e) => setEditingQtyInput(e.target.value)}
-                              className="h-9 w-20 rounded-[4px] border border-[#1a73e8] bg-white px-2 text-center text-sm text-[#202124] tabular-nums-google focus:outline-none"
+                              className={`h-9 w-20 rounded-[4px] border border-primary bg-canvas px-2 text-center text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                             />
                             <button
                               type="submit"
-                              className="flex h-9 w-9 items-center justify-center rounded-full bg-[#1a73e8] text-white cursor-pointer"
+                              aria-label={`ยืนยันจำนวน ${line.itemName}`}
+                              className={`flex h-9 w-9 items-center justify-center rounded-full bg-primary text-white hover:bg-primary-hover ${UI_INTERACTION.focusButton}`}
                             >
                               <Check className="h-4 w-4" />
                             </button>
@@ -1864,7 +1892,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                   : String(Math.round(line.quantityMilli / 1000))
                               );
                             }}
-                            className="min-w-[78px] rounded-[4px] border border-transparent px-2 py-1 text-center font-google-display text-sm font-medium text-[#202124] hover:border-[#dadce0] tabular-nums-google cursor-pointer"
+                            className={`min-w-[78px] rounded-[4px] border border-transparent px-2 py-1 text-center font-google-display text-sm font-medium text-ink hover:border-hairline tabular-nums-google ${UI_INTERACTION.focusButton}`}
                           >
                             {line.isWeightedScale
                               ? formatMilliUnitsToQtyString(line.quantityMilli, line.unitName)
@@ -1885,7 +1913,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                               )
                             );
                           }}
-                          className="flex h-[40px] w-[40px] items-center justify-center rounded-full border border-[#dadce0] bg-white text-[#202124] hover:border-[#1a73e8] hover:text-[#1a73e8] cursor-pointer"
+                          className={`flex h-[40px] w-[40px] items-center justify-center rounded-full border border-hairline bg-canvas text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                         >
                           <Plus className="h-4 w-4" />
                         </button>
@@ -1897,7 +1925,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         onClick={() =>
                           setCart((prev) => prev.filter((c) => c.cartKey !== line.cartKey))
                         }
-                        className="flex h-[40px] w-[40px] items-center justify-center rounded-full text-[#5f6368] hover:bg-[#f8f9fa] hover:text-[#202124] cursor-pointer"
+                        className={`flex h-[40px] w-[40px] items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -1909,10 +1937,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           </div>
 
           {/* 3. SINGLE SOFT-BLUE `#e8f0fe` FINANCIAL & SHORTCUT RAIL (rounded-[8px]) */}
-          <div className="p-4 bg-white border-t border-[#dadce0] space-y-4">
-            <div className="rounded-[8px] bg-[#e8f0fe] p-4 space-y-2.5 text-sm text-[#202124]">
+          <div className="p-4 bg-canvas border-t border-hairline space-y-4">
+            <div className="rounded-[8px] bg-primary-soft p-4 space-y-2.5 text-sm text-ink">
               <div className="flex items-center justify-between">
-                <span className="text-[#3c4043]">ยอดรวมสินค้า (Subtotal)</span>
+                <span className="text-ink-soft">ยอดรวมสินค้า (Subtotal)</span>
                 <span className="font-medium tabular-nums-google">
                   ฿{formatSatangToThbString(cartSummary.subtotalSatang)}
                 </span>
@@ -1920,53 +1948,59 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
               {/* Discount Row with Baht / Percent Toggle */}
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[#3c4043] flex items-center gap-1.5">
-                  <Tag className="h-3.5 w-3.5 text-[#1a73e8]" />
+                <label
+                  htmlFor={`${uid}-discount`}
+                  className="text-ink-soft flex items-center gap-1.5"
+                >
+                  <Tag className="h-3.5 w-3.5 text-primary-dark" />
                   ส่วนลด (F9)
-                </span>
+                </label>
                 <div className="flex items-center gap-1.5">
-                  <div className="inline-flex rounded-[48px] border border-[#dadce0] bg-white p-0.5">
+                  <div className="inline-flex rounded-[48px] border border-hairline bg-canvas p-0.5">
                     <button
                       type="button"
+                      aria-label="ส่วนลดเป็นบาท"
                       onClick={() => setDiscountMode('BAHT')}
-                      className={`rounded-[48px] px-2.5 py-0.5 text-xs font-medium cursor-pointer ${
+                      className={`rounded-[48px] px-2.5 py-0.5 text-xs font-medium ${UI_INTERACTION.focusButton} ${
                         discountMode === 'BAHT'
-                          ? 'bg-[#1a73e8] text-white'
-                          : 'text-[#5f6368]'
+                          ? 'bg-primary text-white hover:bg-primary-hover'
+                          : 'text-ink-muted hover:text-ink'
                       }`}
                     >
                       ฿
                     </button>
                     <button
                       type="button"
+                      aria-label="ส่วนลดเป็นเปอร์เซ็นต์"
                       onClick={() => setDiscountMode('PERCENT')}
-                      className={`rounded-[48px] px-2.5 py-0.5 text-xs font-medium cursor-pointer ${
+                      className={`rounded-[48px] px-2.5 py-0.5 text-xs font-medium ${UI_INTERACTION.focusButton} ${
                         discountMode === 'PERCENT'
-                          ? 'bg-[#1a73e8] text-white'
-                          : 'text-[#5f6368]'
+                          ? 'bg-primary text-white hover:bg-primary-hover'
+                          : 'text-ink-muted hover:text-ink'
                       }`}
                     >
                       %
                     </button>
                   </div>
                   <input
+                    id={`${uid}-discount`}
                     ref={discountInputRef}
                     type="text"
                     aria-label="ส่วนลดท้ายบิล"
                     value={discountInput}
                     onChange={(e) => setDiscountInput(e.target.value)}
-                    className="h-8 w-20 rounded-[4px] border border-[#dadce0] bg-white px-2.5 text-right text-sm text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+                    className={`h-8 w-20 rounded-[4px] border border-hairline bg-canvas px-2.5 text-right text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                   />
                 </div>
               </div>
 
               {/* Tax Mode & VAT 7% Readout */}
-              <div className="flex items-center justify-between gap-2 pt-1 border-t border-[#1a73e8]/15 text-xs text-[#3c4043]">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-primary/15 text-xs text-ink-soft">
                 <select
                   aria-label="โหมดภาษีมูลค่าเพิ่ม"
                   value={taxMode}
                   onChange={(e) => setTaxMode(e.target.value as TaxMode)}
-                  className="rounded-[4px] border border-[#dadce0] bg-white px-2 py-1 text-xs text-[#202124] focus:border-[#1a73e8] focus:outline-none cursor-pointer"
+                  className={`rounded-[4px] border border-hairline bg-canvas px-2 py-1 text-xs text-ink ${UI_INTERACTION.focusSelect}`}
                 >
                   <option value="INCLUSIVE">VAT 7% รวมในราคา</option>
                   <option value="EXCLUSIVE">VAT 7% แยกนอก</option>
@@ -1985,22 +2019,22 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 type="button"
                 disabled={cart.length === 0 || processingCheckout}
                 onClick={() => void openCheckoutModal('CASH')}
-                className="flex h-[50px] w-full items-center justify-center gap-2 rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-[16px] font-medium tracking-[0.5px] text-white transition-colors duration-200 hover:bg-[#1967d2] disabled:opacity-40 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] focus-visible:ring-offset-2"
+                className={`flex h-[50px] w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-6 font-google-display text-[15px] sm:text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                <Banknote className="h-5 w-5" />
+                <Banknote className="h-5 w-5 shrink-0" />
                 <span>
                   ชำระเงิน / แยกจ่าย · ฿{formatSatangToThbString(cartSummary.totalSatang)} (F10)
                 </span>
               </button>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <button
                   type="button"
                   disabled={cart.length === 0 || processingCheckout}
                   onClick={() => void executeFinalCheckout('CASH', undefined, true)}
-                  className="flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-[#1a73e8] bg-[#e8f0fe]/60 px-3 font-google-display text-xs font-medium tracking-[0.25px] text-[#1a73e8] transition-colors duration-200 hover:bg-[#e8f0fe] disabled:opacity-40 cursor-pointer"
+                  className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-primary bg-primary-soft/60 px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary-dark hover:bg-primary-soft ${UI_INTERACTION.focusButton}`}
                 >
-                  <Banknote className="h-4 w-4" />
+                  <Banknote className="h-4 w-4 shrink-0" />
                   <span>รับเงินสดด่วน (F12)</span>
                 </button>
 
@@ -2008,43 +2042,52 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   type="button"
                   disabled={cart.length === 0 || processingCheckout}
                   onClick={() => void openCheckoutModal('SPLIT')}
-                  className="flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-[#dadce0] bg-white px-3 font-google-display text-xs font-medium tracking-[0.25px] text-[#202124] transition-colors duration-200 hover:border-[#1a73e8] hover:text-[#1a73e8] disabled:opacity-40 cursor-pointer"
+                  className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                 >
-                  <Layers className="h-4 w-4 text-[#1a73e8]" />
+                  <Layers className="h-4 w-4 text-primary shrink-0" />
                   <span>แยกจ่าย (เงินสด + QR/บัตร)</span>
                 </button>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <button
                   type="button"
                   disabled={cart.length === 0}
                   onClick={() => void openCheckoutModal('PROMPTPAY_QR')}
-                  className="flex h-[42px] items-center justify-center gap-1.5 rounded-[48px] border border-[#dadce0] bg-white px-3 font-google-display text-xs font-medium tracking-[0.25px] text-[#1a73e8] transition-colors duration-200 hover:border-[#1a73e8] hover:bg-[#f8f9fa] disabled:opacity-40 cursor-pointer"
+                  className={`flex h-[42px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
-                  <QrCode className="h-4 w-4" />
+                  <QrCode className="h-4 w-4 shrink-0" />
                   <span>Thai QR</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={handleHoldCurrentBill}
-                  className="flex h-[42px] items-center justify-center gap-1.5 rounded-[48px] border border-[#dadce0] bg-white px-3 font-google-display text-xs font-medium tracking-[0.25px] text-[#1a73e8] transition-colors duration-200 hover:border-[#1a73e8] hover:bg-[#f8f9fa] cursor-pointer"
+                  className={`flex h-[42px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
-                  <PauseCircle className="h-4 w-4" />
+                  <PauseCircle className="h-4 w-4 shrink-0" />
                   <span>พักบิล {heldBills.length > 0 ? `(${heldBills.length})` : '(F8)'}</span>
                 </button>
 
                 <button
                   type="button"
                   disabled={cart.length === 0}
-                  onClick={() => {
-                    setCart([]);
-                    setDiscountInput('0');
-                  }}
-                  className="flex h-[42px] items-center justify-center gap-1.5 rounded-[48px] border border-[#dadce0] bg-white px-3 font-google-display text-xs font-medium tracking-[0.25px] text-[#5f6368] transition-colors duration-200 hover:border-[#202124] hover:text-[#202124] disabled:opacity-40 cursor-pointer"
+                  onClick={() =>
+                    setConfirmAction({
+                      title: 'ล้างรายการสินค้าทั้งหมดในบิล?',
+                      description: `มีสินค้า ${cartSummary.totalItemUnitsCount} รายการในบิลปัจจุบัน (ยอด ฿${formatSatangToThbString(cartSummary.totalSatang)}) หากล้างแล้วจะไม่สามารถกู้คืนได้`,
+                      confirmLabel: 'ยืนยันล้างบิล',
+                      tone: 'danger',
+                      onConfirm: () => {
+                        setCart([]);
+                        setDiscountInput('0');
+                        onToast('ล้างรายการในตะกร้าเรียบร้อยแล้ว', 'warn');
+                      },
+                    })
+                  }
+                  className={`flex h-[42px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
-                  <Trash2 className="h-4 w-4" />
+                  <Trash2 className="h-4 w-4 shrink-0" />
                   <span>ล้างบิล</span>
                 </button>
               </div>
@@ -2056,16 +2099,21 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       {/* ==================================================================== */}
       {/* DIALOG 1: CAFE ROLE-BASED MODIFIER CUSTOMIZER (Google Clean Spec)    */}
       {/* ==================================================================== */}
-      {customizingVariant && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
-          <div className="w-full max-w-lg rounded-[8px] border border-[#dadce0] bg-white overflow-hidden">
-            <div className="flex items-center justify-between border-b border-[#dadce0] px-6 py-4">
+      <ModalDialog
+        open={Boolean(customizingVariant)}
+        onClose={() => setCustomizingVariant(null)}
+        labelledBy={`${uid}-modifier-title`}
+        maxWidthClass="max-w-lg"
+      >
+        {customizingVariant && (
+          <>
+            <div className="flex items-center justify-between border-b border-hairline px-6 py-4 shrink-0">
               <div>
-                <h3 className="font-google-display text-[22px] font-normal text-[#202124]">
+                <h3 id={`${uid}-modifier-title`} className="font-google-display text-[22px] font-normal text-ink">
                   {customizingVariant.itemName}
                 </h3>
-                <p className="text-xs text-[#5f6368] flex items-center gap-1.5 mt-0.5">
-                  <Sparkles className="h-3.5 w-3.5 text-[#1a73e8]" />
+                <p className="text-xs text-ink-muted flex items-center gap-1.5 mt-0.5">
+                  <Sparkles className="h-3.5 w-3.5 text-primary" />
                   ปรับสัดส่วนวัตถุดิบอัตโนมัติตามบทบาทในสูตร (Stock-Aware Modifiers)
                 </p>
               </div>
@@ -2073,20 +2121,20 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 type="button"
                 aria-label="ปิดหน้าต่างตัวเลือกเสริม"
                 onClick={() => setCustomizingVariant(null)}
-                className="flex h-10 w-10 items-center justify-center rounded-full text-[#5f6368] hover:bg-[#f8f9fa] hover:text-[#202124] cursor-pointer"
+                className={`flex h-10 w-10 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="p-6 space-y-5 max-h-[68vh] overflow-y-auto">
+            <div className="p-6 space-y-5 overflow-y-auto flex-1">
               {bootstrap.modifierGroups.map((group) => (
                 <div key={group.id} className="space-y-2.5">
                   <div className="flex items-center justify-between">
-                    <span className="font-google-display text-sm font-medium text-[#202124]">
+                    <span className="font-google-display text-sm font-medium text-ink">
                       {group.name}
                     </span>
-                    <span className="text-xs text-[#5f6368]">
+                    <span className="text-xs text-ink-muted">
                       {group.selectionType === 'SINGLE' ? 'เลือก 1 รายการ' : 'เลือกได้หลายรายการ'}
                     </span>
                   </div>
@@ -2112,16 +2160,16 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                               );
                             }
                           }}
-                          className={`min-h-[68px] rounded-[4px] border p-3.5 text-left transition-colors duration-150 cursor-pointer ${
+                          className={`min-h-[68px] rounded-[4px] border p-3.5 text-left ${UI_INTERACTION.focusButton} ${
                             active
-                              ? 'border-[#1a73e8] bg-[#e8f0fe]/60 text-[#202124]'
-                              : 'border-[#dadce0] bg-white text-[#3c4043] hover:border-[#1a73e8]'
+                              ? 'border-primary bg-primary-soft/60 text-ink'
+                              : 'border-hairline bg-canvas text-ink-soft hover:border-primary'
                           }`}
                         >
-                          <div className="font-google-display text-sm font-medium text-[#202124]">
+                          <div className="font-google-display text-sm font-medium text-ink">
                             {mod.name}
                           </div>
-                          <div className="text-xs text-[#1a73e8] mt-1 tabular-nums-google">
+                          <div className={`text-xs mt-1 tabular-nums-google ${active ? 'text-primary-dark font-medium' : 'text-primary'}`}>
                             {mod.priceDeltaSatang > 0
                               ? `+฿${formatSatangToThbString(mod.priceDeltaSatang)}`
                               : mod.priceDeltaSatang < 0
@@ -2135,33 +2183,36 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 </div>
               ))}
 
-              <div className="flex items-center justify-between pt-3 border-t border-[#dadce0]">
-                <span className="font-google-display text-sm font-medium text-[#202124]">
+              <div className="flex items-center justify-between pt-3 border-t border-hairline">
+                <label htmlFor={`${uid}-mod-qty`} className="font-google-display text-sm font-medium text-ink">
                   จำนวน ({customizingVariant.unitName})
-                </span>
+                </label>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
+                    aria-label="ลดจำนวน"
                     onClick={() =>
                       setDraftQtyInput((prev) => String(Math.max(1, Number(prev || '1') - 1)))
                     }
-                    className="flex h-11 w-11 items-center justify-center rounded-full border border-[#dadce0] text-[#202124] hover:border-[#1a73e8] cursor-pointer"
+                    className={`flex h-11 w-11 items-center justify-center rounded-full border border-hairline text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                   >
                     <Minus className="h-4 w-4" />
                   </button>
                   <input
+                    id={`${uid}-mod-qty`}
                     type="text"
                     aria-label="จำนวนแก้ว"
                     value={draftQtyInput}
                     onChange={(e) => setDraftQtyInput(e.target.value)}
-                    className="h-11 w-20 rounded-[4px] border border-[#dadce0] text-center font-google-display text-base text-[#202124] tabular-nums-google"
+                    className={`h-11 w-20 rounded-[4px] border border-hairline text-center font-google-display text-base text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                   />
                   <button
                     type="button"
+                    aria-label="เพิ่มจำนวน"
                     onClick={() =>
                       setDraftQtyInput((prev) => String(Math.max(1, Number(prev || '1') + 1)))
                     }
-                    className="flex h-11 w-11 items-center justify-center rounded-full border border-[#dadce0] text-[#202124] hover:border-[#1a73e8] cursor-pointer"
+                    className={`flex h-11 w-11 items-center justify-center rounded-full border border-hairline text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                   >
                     <Plus className="h-4 w-4" />
                   </button>
@@ -2169,11 +2220,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               </div>
             </div>
 
-            <div className="border-t border-[#dadce0] bg-[#f8f9fa] px-6 py-4 flex items-center justify-end gap-3">
+            <div className="border-t border-hairline bg-surface-1 px-6 py-4 flex flex-wrap items-center justify-end gap-3 shrink-0">
               <button
                 type="button"
                 onClick={() => setCustomizingVariant(null)}
-                className="h-[50px] rounded-[48px] border border-[#dadce0] bg-white px-6 font-google-display text-[15px] font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
+                className={`h-[50px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-[15px] font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 ยกเลิก
               </button>
@@ -2191,7 +2242,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     onToast('รูปแบบจำนวนสินค้าไม่ถูกต้อง', 'error');
                   }
                 }}
-                className="h-[50px] rounded-[48px] bg-[#1a73e8] px-8 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] cursor-pointer"
+                className={`h-[50px] rounded-[48px] bg-primary px-8 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
                 เพิ่มลงรายการขาย · ฿
                 {(() => {
@@ -2215,569 +2266,588 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 })()}
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </ModalDialog>
 
       {/* ==================================================================== */}
       {/* DIALOG 2: GOOGLE-SPEC TOUCH CASH NUMPAD + EMVCO QR + SPLIT PAYMENT   */}
       {/* ==================================================================== */}
-      {checkoutModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-4xl rounded-[8px] border border-[#dadce0] bg-white overflow-hidden">
-            {/* Top Bar */}
-            <div className="flex items-center justify-between border-b border-[#dadce0] px-6 h-16 overflow-x-auto">
-              <div className="flex items-center gap-5 h-full shrink-0">
-                {[
-                  { id: 'CASH' as const, label: 'เงินสด (Cash + RJ11)', icon: Banknote },
-                  { id: 'PROMPTPAY_QR' as const, label: 'Thai QR PromptPay', icon: QrCode },
-                  { id: 'CARD' as const, label: 'บัตรเครดิต / EDC', icon: CreditCard },
-                  { id: 'SPLIT' as const, label: 'แยกจ่าย (เงินสด + QR/บัตร)', icon: Layers },
-                ].map((t) => {
-                  const Icon = t.icon;
-                  const active = paymentTab === t.id;
-                  return (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() => {
-                        setPaymentTab(t.id);
-                        setSlipVerificationModal(null);
-                        if (t.id === 'PROMPTPAY_QR') {
-                          void loadPromptPayQr();
-                        } else if (
-                          t.id === 'SPLIT' &&
-                          splitSecondMethod === 'PROMPTPAY_QR' &&
-                          splitRemainingSatang > 0
-                        ) {
-                          void loadPromptPayQr(splitRemainingSatang);
-                        }
-                      }}
-                      className={`relative flex h-full items-center gap-2 px-1 font-google-display text-[14px] font-medium tracking-[0.25px] cursor-pointer whitespace-nowrap ${
-                        active ? 'text-[#202124]' : 'text-[#5f6368] hover:text-[#202124]'
-                      }`}
-                    >
-                      <Icon className={`h-4 w-4 ${active ? 'text-[#1a73e8]' : ''}`} />
-                      <span>{t.label}</span>
-                      {active && (
-                        <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-[#1a73e8]" />
-                      )}
-                    </button>
-                  );
-                })}
+      <ModalDialog
+        open={checkoutModalOpen}
+        onClose={() => setCheckoutModalOpen(false)}
+        ariaLabel="หน้าต่างรับชำระเงิน"
+        maxWidthClass="max-w-4xl"
+      >
+        {/* Top Bar */}
+        <div className="flex items-center justify-between border-b border-hairline px-4 sm:px-6 h-16 shrink-0 gap-3">
+          <div className="flex items-center gap-4 sm:gap-5 h-full overflow-x-auto" role="tablist" aria-label="ช่องทางการรับชำระเงิน">
+            {[
+              { id: 'CASH' as const, label: 'เงินสด (Cash + RJ11)', icon: Banknote },
+              { id: 'PROMPTPAY_QR' as const, label: 'Thai QR PromptPay', icon: QrCode },
+              { id: 'CARD' as const, label: 'บัตรเครดิต / EDC', icon: CreditCard },
+              { id: 'SPLIT' as const, label: 'แยกจ่าย (เงินสด + QR/บัตร)', icon: Layers },
+            ].map((t) => {
+              const Icon = t.icon;
+              const active = paymentTab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => {
+                    setPaymentTab(t.id);
+                    setSlipVerificationModal(null);
+                    if (t.id === 'PROMPTPAY_QR') {
+                      void loadPromptPayQr();
+                    } else if (
+                      t.id === 'SPLIT' &&
+                      splitSecondMethod === 'PROMPTPAY_QR' &&
+                      splitRemainingSatang > 0
+                    ) {
+                      void loadPromptPayQr(splitRemainingSatang);
+                    }
+                  }}
+                  className={`relative flex h-full items-center gap-2 px-1 font-google-display text-[14px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                    active ? 'text-ink' : 'text-ink-muted hover:text-ink'
+                  }`}
+                >
+                  <Icon className={`h-4 w-4 ${active ? 'text-primary' : ''}`} />
+                  <span>{t.label}</span>
+                  {active && (
+                    <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="button"
+            aria-label="ปิดหน้าต่างรับชำระเงิน"
+            onClick={() => setCheckoutModalOpen(false)}
+            className={`flex h-10 w-10 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink shrink-0 ${UI_INTERACTION.focusButton}`}
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-12 overflow-y-auto flex-1">
+          {/* Left Summary Column: Black Hero Total + VAT Breakdown */}
+          <div className="md:col-span-5 border-b md:border-b-0 md:border-r border-hairline bg-surface-1 flex flex-col justify-between">
+            <div>
+              <div className="bg-hero p-6 text-white">
+                <div className="text-xs uppercase tracking-[0.5px] text-white/75">
+                  ยอดที่ต้องชำระสุทธิ
+                </div>
+                <div className="mt-1 font-google-display text-[36px] sm:text-[44px] font-normal leading-[44px] sm:leading-[52px] tracking-[-0.5px] tabular-nums-google">
+                  ฿{formatSatangToThbString(cartSummary.totalSatang)}
+                </div>
               </div>
 
-              <button
-                type="button"
-                aria-label="ปิดหน้าต่างรับชำระเงิน"
-                onClick={() => setCheckoutModalOpen(false)}
-                className="flex h-10 w-10 items-center justify-center rounded-full text-[#5f6368] hover:bg-[#f8f9fa] hover:text-[#202124] cursor-pointer shrink-0"
-              >
-                <X className="h-5 w-5" />
-              </button>
+              <div className="p-6 space-y-2.5 text-sm">
+                <div className="flex justify-between text-ink-muted">
+                  <span>จำนวนสินค้า</span>
+                  <span className="text-ink tabular-nums-google">
+                    {cartSummary.totalItemUnitsCount} รายการ
+                  </span>
+                </div>
+                <div className="flex justify-between text-ink-muted">
+                  <span>มูลค่าก่อนภาษี</span>
+                  <span className="text-ink tabular-nums-google">
+                    ฿{formatSatangToThbString(cartSummary.netBeforeTaxSatang)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-ink-muted">
+                  <span>ภาษีมูลค่าเพิ่ม 7%</span>
+                  <span className="text-ink tabular-nums-google">
+                    ฿{formatSatangToThbString(cartSummary.taxSatang)}
+                  </span>
+                </div>
+                {cartSummary.discountSatang > 0 && (
+                  <div className="flex justify-between text-primary-hover font-medium">
+                    <span>ส่วนลดท้ายบิล</span>
+                    <span className="tabular-nums-google">
+                      -฿{formatSatangToThbString(cartSummary.discountSatang)}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-12">
-              {/* Left Summary Column: Black Hero Total + VAT Breakdown */}
-              <div className="md:col-span-5 border-b md:border-b-0 md:border-r border-[#dadce0] bg-[#f8f9fa] flex flex-col justify-between">
-                <div>
-                  <div className="bg-[#000000] p-6 text-white">
-                    <div className="text-xs uppercase tracking-[0.5px] text-white/70">
-                      ยอดที่ต้องชำระสุทธิ
-                    </div>
-                    <div className="mt-1 font-google-display text-[44px] font-normal leading-[52px] tracking-[-0.5px] tabular-nums-google">
-                      ฿{formatSatangToThbString(cartSummary.totalSatang)}
-                    </div>
-                  </div>
+            {paymentTab === 'CASH' && (
+              <div className="p-6 border-t border-hairline bg-canvas">
+                <div className="text-xs text-ink-muted">เงินทอนลูกค้า (Change Due)</div>
+                <div className="mt-1 font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-primary tabular-nums-google">
+                  ฿
+                  {formatSatangToThbString(
+                    Math.max(0, cashTenderedSatangPreview - cartSummary.totalSatang)
+                  )}
+                </div>
+              </div>
+            )}
 
-                  <div className="p-6 space-y-2.5 text-sm">
-                    <div className="flex justify-between text-[#5f6368]">
-                      <span>จำนวนสินค้า</span>
-                      <span className="text-[#202124] tabular-nums-google">
-                        {cartSummary.totalItemUnitsCount} รายการ
-                      </span>
+            {paymentTab === 'SPLIT' && (
+              <div className="p-6 border-t border-hairline bg-canvas space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-ink-muted">ส่วนที่ 1 (เงินสด)</span>
+                  <span className="font-google-display font-medium text-ink tabular-nums-google">
+                    ฿{formatSatangToThbString(splitCashSatang)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-ink-muted">
+                    ส่วนที่ 2 ({splitSecondMethod === 'PROMPTPAY_QR' ? 'Thai QR' : 'บัตร EDC'})
+                  </span>
+                  <span className="font-google-display text-lg font-medium text-primary tabular-nums-google">
+                    ฿{formatSatangToThbString(splitRemainingSatang)}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right Interactive Payment Surface */}
+          <div className="md:col-span-7 p-6 bg-canvas">
+            {paymentTab === 'CASH' && (
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor={`${uid}-cash-tendered`} className="block text-xs font-medium text-ink-muted mb-1.5">
+                    รับเงินสดจากลูกค้า (บาท)
+                  </label>
+                  <input
+                    id={`${uid}-cash-tendered`}
+                    type="text"
+                    value={cashTenderedBahtInput}
+                    onChange={(e) => {
+                      setCashTenderedBahtInput(e.target.value);
+                      setCashNumpadPristine(false);
+                    }}
+                    className={`h-14 w-full rounded-[4px] border border-hairline bg-canvas px-4 font-google-display text-[28px] font-normal text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                  />
+                </div>
+
+                {/* Quick Thai Banknotes */}
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    {
+                      label: 'รับเงินพอดี',
+                      val: formatSatangToThbString(cartSummary.totalSatang).replace(/,/g, ''),
+                    },
+                    { label: '฿100', val: '100.00' },
+                    { label: '฿500', val: '500.00' },
+                    { label: '฿1,000', val: '1000.00' },
+                  ].map((b) => (
+                    <button
+                      key={b.label}
+                      type="button"
+                      onClick={() => {
+                        setCashTenderedBahtInput(b.val);
+                        setCashNumpadPristine(false);
+                      }}
+                      className={`min-h-[40px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+                    >
+                      {b.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* 12-Key Touchscreen Numpad */}
+                <div className="grid grid-cols-3 gap-2">
+                  {['7', '8', '9', '4', '5', '6', '1', '2', '3', 'CLEAR', '0', 'BACKSPACE'].map(
+                    (k) => (
+                      <button
+                        key={k}
+                        type="button"
+                        aria-label={
+                          k === 'BACKSPACE'
+                            ? 'ลบตัวเลขสุดท้าย'
+                            : k === 'CLEAR'
+                              ? 'ล้างจำนวนเงินสด'
+                              : `ป้อนเลข ${k}`
+                        }
+                        onClick={() => handleCashNumpadPress(k)}
+                        className={`flex h-12 items-center justify-center rounded-[4px] border border-hairline bg-surface-1 font-google-display text-[18px] font-normal text-ink hover:border-primary hover:bg-canvas ${UI_INTERACTION.focusButton}`}
+                      >
+                        {k === 'BACKSPACE' ? (
+                          <Delete className="h-5 w-5 text-ink-muted" />
+                        ) : k === 'CLEAR' ? (
+                          <span className="text-xs font-medium text-ink-muted">ล้างค่า</span>
+                        ) : (
+                          k
+                        )}
+                      </button>
+                    )
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  disabled={
+                    processingCheckout || cashTenderedSatangPreview < cartSummary.totalSatang
+                  }
+                  onClick={() => void executeFinalCheckout('CASH')}
+                  className={`flex h-[50px] w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-6 font-google-display text-[15px] sm:text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                >
+                  {processingCheckout
+                    ? 'กำลังบันทึกบิลและสั่งพิมพ์ใบเสร็จ...'
+                    : 'ยืนยันรับเงินสด · เปิดลิ้นชัก & พิมพ์ใบกำกับภาษี ABB'}
+                </button>
+              </div>
+            )}
+
+            {paymentTab === 'PROMPTPAY_QR' && (
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row items-center gap-5 rounded-[4px] border border-hairline p-4">
+                  {qrDataUrl ? (
+                    <img
+                      src={qrDataUrl}
+                      alt="Thai QR PromptPay Dynamic Code"
+                      className="h-44 w-44 rounded-[4px] border border-hairline shrink-0"
+                    />
+                  ) : (
+                    <div className="h-44 w-44 rounded-[4px] border border-hairline bg-surface-1 flex items-center justify-center text-xs text-ink-muted shrink-0">
+                      กำลังสร้าง QR...
                     </div>
-                    <div className="flex justify-between text-[#5f6368]">
-                      <span>มูลค่าก่อนภาษี</span>
-                      <span className="text-[#202124] tabular-nums-google">
-                        ฿{formatSatangToThbString(cartSummary.netBeforeTaxSatang)}
-                      </span>
+                  )}
+                  <div className="space-y-1.5 text-sm">
+                    <div className="font-google-display text-[18px] text-ink">
+                      สแกนจ่ายพร้อมเพย์ (Offline EMVCo Dynamic QR)
                     </div>
-                    <div className="flex justify-between text-[#5f6368]">
-                      <span>ภาษีมูลค่าเพิ่ม 7%</span>
-                      <span className="text-[#202124] tabular-nums-google">
-                        ฿{formatSatangToThbString(cartSummary.taxSatang)}
-                      </span>
-                    </div>
-                    {cartSummary.discountSatang > 0 && (
-                      <div className="flex justify-between text-[#1a73e8]">
-                        <span>ส่วนลดท้ายบิล</span>
-                        <span className="tabular-nums-google">
-                          -฿{formatSatangToThbString(cartSummary.discountSatang)}
-                        </span>
-                      </div>
+                    <p className="text-xs text-ink-muted">
+                      ล็อกยอดเงินตรงตามบิลอัตโนมัติ คำนวณรหัสตรวจสอบ CRC16 ({qrCrcHex}) โดยไม่ต้องพึ่งอินเทอร์เน็ต
+                    </p>
+                    {qrPayloadText && (
+                      <p className="text-[11px] text-ink-muted break-all line-clamp-2">
+                        {qrPayloadText}
+                      </p>
                     )}
                   </div>
                 </div>
 
-                {paymentTab === 'CASH' && (
-                  <div className="p-6 border-t border-[#dadce0] bg-white">
-                    <div className="text-xs text-[#5f6368]">เงินทอนลูกค้า (Change Due)</div>
-                    <div className="mt-1 font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-[#1a73e8] tabular-nums-google">
-                      ฿
-                      {formatSatangToThbString(
-                        Math.max(0, cashTenderedSatangPreview - cartSummary.totalSatang)
-                      )}
-                    </div>
-                  </div>
-                )}
+                <div className="space-y-2.5">
+                  <label htmlFor={`${uid}-slip-miniqr`} className="block text-xs font-medium text-ink">
+                    ขั้นตอนป้องกันสลิปปลอม: ใช้ปืน 2D สแกน Mini-QR บนสลิปโอนเงินลูกค้า
+                  </label>
+                  <input
+                    id={`${uid}-slip-miniqr`}
+                    type="text"
+                    value={slipMiniQrInput}
+                    onChange={(e) => {
+                      setSlipMiniQrInput(e.target.value);
+                      setSlipVerificationModal(null);
+                    }}
+                    placeholder="วางหรือยิงข้อมูล BOT Mini-QR..."
+                    className={`h-11 w-full rounded-[4px] border border-hairline px-3.5 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
+                  />
 
-                {paymentTab === 'SPLIT' && (
-                  <div className="p-6 border-t border-[#dadce0] bg-white space-y-2 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-[#5f6368]">ส่วนที่ 1 (เงินสด)</span>
-                      <span className="font-google-display font-medium text-[#202124] tabular-nums-google">
-                        ฿{formatSatangToThbString(splitCashSatang)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-[#5f6368]">
-                        ส่วนที่ 2 ({splitSecondMethod === 'PROMPTPAY_QR' ? 'Thai QR' : 'บัตร EDC'})
-                      </span>
-                      <span className="font-google-display text-lg font-medium text-[#1a73e8] tabular-nums-google">
-                        ฿{formatSatangToThbString(splitRemainingSatang)}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Right Interactive Payment Surface */}
-              <div className="md:col-span-7 p-6 bg-white max-h-[75vh] overflow-y-auto">
-                {paymentTab === 'CASH' && (
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-xs font-medium text-[#5f6368] mb-1.5">
-                        รับเงินสดจากลูกค้า (บาท)
-                      </label>
-                      <input
-                        type="text"
-                        value={cashTenderedBahtInput}
-                        onChange={(e) => {
-                          setCashTenderedBahtInput(e.target.value);
-                          setCashNumpadPristine(false);
+                  <div className="flex flex-wrap gap-2">
+                    {SLIP_PRESETS.map((p) => (
+                      <button
+                        key={p.label}
+                        type="button"
+                        onClick={() => {
+                          setSlipMiniQrInput(p.raw);
+                          setSlipVerificationModal(null);
                         }}
-                        className="h-14 w-full rounded-[4px] border border-[#dadce0] bg-white px-4 font-google-display text-[28px] font-normal text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
-                      />
-                    </div>
+                        className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-xs text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
 
-                    {/* Quick Thai Banknotes */}
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        {
-                          label: 'รับเงินพอดี',
-                          val: formatSatangToThbString(cartSummary.totalSatang).replace(/,/g, ''),
-                        },
-                        { label: '฿100', val: '100.00' },
-                        { label: '฿500', val: '500.00' },
-                        { label: '฿1,000', val: '1000.00' },
-                      ].map((b) => (
+                  {!slipVerificationModal?.valid ? (
+                    <>
+                      {slipVerificationModal && !slipVerificationModal.valid && (
+                        <div className="rounded-[4px] border border-ink bg-surface-1 p-3.5 flex items-start gap-2.5 text-xs text-ink">
+                          <ShieldAlert className="h-5 w-5 text-ink shrink-0" />
+                          <div>
+                            <div className="font-medium">{slipVerificationModal.errorCode}</div>
+                            <div className="text-ink-muted mt-0.5">
+                              {slipVerificationModal.errorMessageThai}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        disabled={processingCheckout}
+                        onClick={() => void handleVerifySlipStep1()}
+                        className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                      >
+                        ตรวจสอบโครงสร้างสลิป BOT Mini-QR (Step 1)
+                      </button>
+                    </>
+                  ) : (
+                    <div className="rounded-[8px] bg-primary-soft p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1.5 font-google-display text-sm font-medium text-primary-dark">
+                          <CheckCircle2 className="h-4 w-4" />
+                          สลิปถูกต้องและไม่เคยถูกใช้ซ้ำ
+                        </span>
+                        <span className="text-xs font-medium text-ink tabular-nums-google">
+                          Ref *{slipVerificationModal.transRefLast4}
+                        </span>
+                      </div>
+                      <div className="rounded-[4px] border border-hairline bg-canvas p-3">
+                        <div className="text-xs text-ink-muted">ธนาคารต้นทาง</div>
+                        <div className="font-google-display text-[18px] text-ink">
+                          {slipVerificationModal.bankDisplayNameThai}
+                        </div>
+                        <div className="mt-1.5 text-xs text-ink-soft flex items-center gap-1.5">
+                          <AlertTriangle className="h-4 w-4 text-primary shrink-0" />
+                          โปรดตรวจยอดเงินบนสลิปลูกค้าให้ตรงกับ{' '}
+                          <strong>{slipVerificationModal.expectedAmountFormatted}</strong>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={processingCheckout}
+                        onClick={() =>
+                          void executeFinalCheckout('PROMPTPAY_QR', slipMiniQrInput.trim())
+                        }
+                        className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] sm:text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                      >
+                        ยืนยันยอดเงินตรงกัน · ปิดการขาย &amp; พิมพ์ใบเสร็จ (Step 2)
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {paymentTab === 'CARD' && (
+              <div className="py-10 text-center space-y-5">
+                <Layers className="h-10 w-10 text-primary mx-auto" />
+                <div>
+                  <div className="font-google-display text-[20px] text-ink">
+                    รับชำระผ่านเครื่องรูดบัตร EDC
+                  </div>
+                  <p className="text-sm text-ink-muted mt-1">
+                    ตรวจสอบสลิปอนุมัติจากเครื่อง EDC ยอด{' '}
+                    <strong className="text-ink">
+                      ฿{formatSatangToThbString(cartSummary.totalSatang)}
+                    </strong>{' '}
+                    ก่อนกดยืนยัน
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={processingCheckout}
+                  onClick={() => void executeFinalCheckout('CARD')}
+                  className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                >
+                  ยืนยันรับชำระบัตรเครดิต &amp; พิมพ์ใบเสร็จ ABB
+                </button>
+              </div>
+            )}
+
+            {paymentTab === 'SPLIT' && (
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor={`${uid}-split-cash`} className="block text-xs font-medium text-ink-muted mb-1.5">
+                    ส่วนที่ 1: ยอดรับเงินสด (บาท)
+                  </label>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      id={`${uid}-split-cash`}
+                      type="text"
+                      value={splitCashBahtInput}
+                      onChange={(e) => {
+                        setSplitCashBahtInput(e.target.value);
+                        setSlipVerificationModal(null);
+                      }}
+                      className={`h-12 flex-1 rounded-[4px] border border-hairline bg-canvas px-4 font-google-display text-[22px] text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                    />
+                    {splitSecondMethod === 'PROMPTPAY_QR' && splitRemainingSatang > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => void loadPromptPayQr(splitRemainingSatang)}
+                        className={`min-h-[44px] rounded-[48px] border border-primary bg-primary-soft px-4 font-google-display text-xs font-medium text-primary-dark hover:bg-primary-soft/80 whitespace-nowrap ${UI_INTERACTION.focusButton}`}
+                      >
+                        อัปเดต QR ยอดคงเหลือ
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {[
+                      { label: '฿50', satang: 5_000 },
+                      { label: '฿100', satang: 10_000 },
+                      { label: '฿200', satang: 20_000 },
+                      {
+                        label: 'ครึ่งบิล',
+                        satang: Math.floor(cartSummary.totalSatang / 200) * 100,
+                      },
+                    ]
+                      .filter((x) => x.satang > 0 && x.satang < cartSummary.totalSatang)
+                      .map((preset) => (
                         <button
-                          key={b.label}
+                          key={preset.label}
                           type="button"
                           onClick={() => {
-                            setCashTenderedBahtInput(b.val);
-                            setCashNumpadPristine(false);
+                            setSplitCashBahtInput(
+                              formatSatangToThbString(preset.satang).replace(/,/g, '')
+                            );
+                            setSlipVerificationModal(null);
+                            const rem = Math.max(0, cartSummary.totalSatang - preset.satang);
+                            if (splitSecondMethod === 'PROMPTPAY_QR' && rem > 0) {
+                              void loadPromptPayQr(rem);
+                            }
                           }}
-                          className="min-h-[40px] rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
+                          className={`rounded-[48px] border border-hairline bg-canvas px-3 py-1 text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                         >
-                          {b.label}
+                          {preset.label}
                         </button>
                       ))}
-                    </div>
-
-                    {/* 12-Key Touchscreen Numpad */}
-                    <div className="grid grid-cols-3 gap-2">
-                      {['7', '8', '9', '4', '5', '6', '1', '2', '3', 'CLEAR', '0', 'BACKSPACE'].map(
-                        (k) => (
-                          <button
-                            key={k}
-                            type="button"
-                            onClick={() => handleCashNumpadPress(k)}
-                            className="flex h-12 items-center justify-center rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] font-google-display text-[18px] font-normal text-[#202124] hover:border-[#1a73e8] hover:bg-white cursor-pointer"
-                          >
-                            {k === 'BACKSPACE' ? (
-                              <Delete className="h-5 w-5 text-[#5f6368]" />
-                            ) : k === 'CLEAR' ? (
-                              <span className="text-xs font-medium text-[#5f6368]">ล้างค่า</span>
-                            ) : (
-                              k
-                            )}
-                          </button>
-                        )
-                      )}
-                    </div>
-
-                    <button
-                      type="button"
-                      disabled={
-                        processingCheckout || cashTenderedSatangPreview < cartSummary.totalSatang
-                      }
-                      onClick={() => void executeFinalCheckout('CASH')}
-                      className="flex h-[50px] w-full items-center justify-center gap-2 rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] disabled:opacity-40 cursor-pointer"
-                    >
-                      {processingCheckout
-                        ? 'กำลังบันทึกบิลและสั่งพิมพ์ใบเสร็จ...'
-                        : 'ยืนยันรับเงินสด · เปิดลิ้นชัก & พิมพ์ใบกำกับภาษี ABB'}
-                    </button>
                   </div>
-                )}
+                </div>
 
-                {paymentTab === 'PROMPTPAY_QR' && (
-                  <div className="space-y-4">
-                    <div className="flex flex-col sm:flex-row items-center gap-5 rounded-[4px] border border-[#dadce0] p-4">
-                      {qrDataUrl ? (
-                        <img
-                          src={qrDataUrl}
-                          alt="Thai QR PromptPay Dynamic Code"
-                          className="h-44 w-44 rounded-[4px] border border-[#dadce0] shrink-0"
-                        />
-                      ) : (
-                        <div className="h-44 w-44 rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] flex items-center justify-center text-xs text-[#5f6368] shrink-0">
-                          กำลังสร้าง QR...
-                        </div>
-                      )}
-                      <div className="space-y-1.5 text-sm">
-                        <div className="font-google-display text-[18px] text-[#202124]">
-                          สแกนจ่ายพร้อมเพย์ (Offline EMVCo Dynamic QR)
-                        </div>
-                        <p className="text-xs text-[#5f6368]">
-                          ล็อกยอดเงินตรงตามบิลอัตโนมัติ คำนวณรหัสตรวจสอบ CRC16 ({qrCrcHex}) โดยไม่ต้องพึ่งอินเทอร์เน็ต
-                        </p>
-                        {qrPayloadText && (
-                          <p className="text-[11px] text-[#80868b] break-all line-clamp-2">
-                            {qrPayloadText}
-                          </p>
-                        )}
-                      </div>
+                <div className="border-t border-hairline pt-3 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-ink-muted">
+                      ส่วนที่ 2: ชำระยอดคงเหลือ ฿{formatSatangToThbString(splitRemainingSatang)}{' '}
+                      ด้วย
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSplitSecondMethod('PROMPTPAY_QR');
+                          setSlipVerificationModal(null);
+                          if (splitRemainingSatang > 0) {
+                            void loadPromptPayQr(splitRemainingSatang);
+                          }
+                        }}
+                        className={`rounded-[48px] border px-3.5 py-1.5 text-xs font-medium ${UI_INTERACTION.focusButton} ${
+                          splitSecondMethod === 'PROMPTPAY_QR'
+                            ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                            : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
+                        }`}
+                      >
+                        Thai QR PromptPay
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSplitSecondMethod('CARD');
+                          setSlipVerificationModal(null);
+                        }}
+                        className={`rounded-[48px] border px-3.5 py-1.5 text-xs font-medium ${UI_INTERACTION.focusButton} ${
+                          splitSecondMethod === 'CARD'
+                            ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                            : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
+                        }`}
+                      >
+                        บัตรเครดิต / EDC
+                      </button>
                     </div>
+                  </div>
 
-                    <div className="space-y-2.5">
-                      <label className="block text-xs font-medium text-[#202124]">
-                        ขั้นตอนป้องกันสลิปปลอม: ใช้ปืน 2D สแกน Mini-QR บนสลิปโอนเงินลูกค้า
-                      </label>
+                  {splitSecondMethod === 'PROMPTPAY_QR' ? (
+                    <div className="space-y-3">
+                      <div className="flex flex-col sm:flex-row items-center gap-4 rounded-[4px] border border-hairline p-3">
+                        {qrDataUrl ? (
+                          <img
+                            src={qrDataUrl}
+                            alt="Split PromptPay QR"
+                            className="h-28 w-28 rounded-[4px] border border-hairline shrink-0"
+                          />
+                        ) : (
+                          <div className="h-28 w-28 rounded-[4px] border border-hairline bg-surface-1 flex items-center justify-center text-[11px] text-ink-muted shrink-0">
+                            กดอัปเดต QR
+                          </div>
+                        )}
+                        <div className="text-xs space-y-1">
+                          <div className="font-google-display text-sm font-medium text-ink">
+                            Thai QR ยอดส่วนที่ 2: ฿{formatSatangToThbString(splitRemainingSatang)}
+                          </div>
+                          <p className="text-ink-muted">
+                            สแกน Mini-QR บนสลิปลูกค้าเพื่อป้องกันสลิปซ้ำ หรือกดตรวจสลิป Step 1
+                          </p>
+                        </div>
+                      </div>
+
                       <input
                         type="text"
+                        aria-label="ข้อมูล BOT Mini-QR สำหรับส่วนที่ 2"
                         value={slipMiniQrInput}
                         onChange={(e) => {
                           setSlipMiniQrInput(e.target.value);
                           setSlipVerificationModal(null);
                         }}
-                        placeholder="วางหรือยิงข้อมูล BOT Mini-QR..."
-                        className="h-11 w-full rounded-[4px] border border-[#dadce0] px-3.5 text-xs text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+                        placeholder="ข้อมูล BOT Mini-QR สำหรับส่วนที่ 2..."
+                        className={`h-10 w-full rounded-[4px] border border-hairline px-3 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                       />
 
-                      <div className="flex flex-wrap gap-2">
-                        {SLIP_PRESETS.map((p) => (
-                          <button
-                            key={p.label}
-                            type="button"
-                            onClick={() => {
-                              setSlipMiniQrInput(p.raw);
-                              setSlipVerificationModal(null);
-                            }}
-                            className="rounded-[48px] border border-[#dadce0] bg-white px-3.5 py-1.5 text-xs text-[#3c4043] hover:border-[#1a73e8] hover:text-[#1a73e8] cursor-pointer"
-                          >
-                            {p.label}
-                          </button>
-                        ))}
-                      </div>
-
                       {!slipVerificationModal?.valid ? (
-                        <>
-                          {slipVerificationModal && !slipVerificationModal.valid && (
-                            <div className="rounded-[4px] border border-[#202124] bg-[#f8f9fa] p-3.5 flex items-start gap-2.5 text-xs text-[#202124]">
-                              <ShieldAlert className="h-5 w-5 text-[#202124] shrink-0" />
-                              <div>
-                                <div className="font-medium">{slipVerificationModal.errorCode}</div>
-                                <div className="text-[#5f6368] mt-0.5">
-                                  {slipVerificationModal.errorMessageThai}
-                                </div>
-                              </div>
-                            </div>
-                          )}
-                          <button
-                            type="button"
-                            disabled={processingCheckout}
-                            onClick={() => void handleVerifySlipStep1()}
-                            className="h-[50px] w-full rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-[15px] font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] cursor-pointer"
-                          >
-                            ตรวจสอบโครงสร้างสลิป BOT Mini-QR (Step 1)
-                          </button>
-                        </>
-                      ) : (
-                        <div className="rounded-[8px] bg-[#e8f0fe] p-4 space-y-3">
-                          <div className="flex items-center justify-between">
-                            <span className="inline-flex items-center gap-1.5 font-google-display text-sm font-medium text-[#1a73e8]">
-                              <CheckCircle2 className="h-4 w-4" />
-                              สลิปถูกต้องและไม่เคยถูกใช้ซ้ำ
-                            </span>
-                            <span className="text-xs font-medium text-[#202124] tabular-nums-google">
-                              Ref *{slipVerificationModal.transRefLast4}
-                            </span>
-                          </div>
-                          <div className="rounded-[4px] border border-[#dadce0] bg-white p-3">
-                            <div className="text-xs text-[#5f6368]">ธนาคารต้นทาง</div>
-                            <div className="font-google-display text-[18px] text-[#202124]">
-                              {slipVerificationModal.bankDisplayNameThai}
-                            </div>
-                            <div className="mt-1.5 text-xs text-[#3c4043] flex items-center gap-1.5">
-                              <AlertTriangle className="h-4 w-4 text-[#1a73e8] shrink-0" />
-                              โปรดตรวจยอดเงินบนสลิปลูกค้าให้ตรงกับ{' '}
-                              <strong>{slipVerificationModal.expectedAmountFormatted}</strong>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            disabled={processingCheckout}
-                            onClick={() =>
-                              void executeFinalCheckout('PROMPTPAY_QR', slipMiniQrInput.trim())
-                            }
-                            className="h-[50px] w-full rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] cursor-pointer"
-                          >
-                            ยืนยันยอดเงินตรงกัน · ปิดการขาย &amp; พิมพ์ใบเสร็จ (Step 2)
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {paymentTab === 'CARD' && (
-                  <div className="py-10 text-center space-y-5">
-                    <Layers className="h-10 w-10 text-[#1a73e8] mx-auto" />
-                    <div>
-                      <div className="font-google-display text-[20px] text-[#202124]">
-                        รับชำระผ่านเครื่องรูดบัตร EDC
-                      </div>
-                      <p className="text-sm text-[#5f6368] mt-1">
-                        ตรวจสอบสลิปอนุมัติจากเครื่อง EDC ยอด{' '}
-                        <strong className="text-[#202124]">
-                          ฿{formatSatangToThbString(cartSummary.totalSatang)}
-                        </strong>{' '}
-                        ก่อนกดยืนยัน
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={processingCheckout}
-                      onClick={() => void executeFinalCheckout('CARD')}
-                      className="h-[50px] w-full rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] cursor-pointer"
-                    >
-                      ยืนยันรับชำระบัตรเครดิต &amp; พิมพ์ใบเสร็จ ABB
-                    </button>
-                  </div>
-                )}
-
-                {paymentTab === 'SPLIT' && (
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-xs font-medium text-[#5f6368] mb-1.5">
-                        ส่วนที่ 1: ยอดรับเงินสด (บาท)
-                      </label>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={splitCashBahtInput}
-                          onChange={(e) => {
-                            setSplitCashBahtInput(e.target.value);
-                            setSlipVerificationModal(null);
-                          }}
-                          className="h-12 flex-1 rounded-[4px] border border-[#dadce0] bg-white px-4 font-google-display text-[22px] text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
-                        />
-                        {splitSecondMethod === 'PROMPTPAY_QR' && splitRemainingSatang > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => void loadPromptPayQr(splitRemainingSatang)}
-                            className="rounded-[48px] border border-[#1a73e8] bg-[#e8f0fe] px-4 font-google-display text-xs font-medium text-[#1a73e8] hover:bg-[#d2e3fc] cursor-pointer whitespace-nowrap"
-                          >
-                            อัปเดต QR ยอดคงเหลือ
-                          </button>
-                        )}
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {[
-                          { label: '฿50', satang: 5_000 },
-                          { label: '฿100', satang: 10_000 },
-                          { label: '฿200', satang: 20_000 },
-                          {
-                            label: 'ครึ่งบิล',
-                            satang: Math.floor(cartSummary.totalSatang / 200) * 100,
-                          },
-                        ]
-                          .filter((x) => x.satang > 0 && x.satang < cartSummary.totalSatang)
-                          .map((preset) => (
-                            <button
-                              key={preset.label}
-                              type="button"
-                              onClick={() => {
-                                setSplitCashBahtInput(
-                                  formatSatangToThbString(preset.satang).replace(/,/g, '')
-                                );
-                                setSlipVerificationModal(null);
-                                const rem = Math.max(0, cartSummary.totalSatang - preset.satang);
-                                if (splitSecondMethod === 'PROMPTPAY_QR' && rem > 0) {
-                                  void loadPromptPayQr(rem);
-                                }
-                              }}
-                              className="rounded-[48px] border border-[#dadce0] bg-white px-3 py-1 text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
-                            >
-                              {preset.label}
-                            </button>
-                          ))}
-                      </div>
-                    </div>
-
-                    <div className="border-t border-[#dadce0] pt-3 space-y-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-xs font-medium text-[#5f6368]">
-                          ส่วนที่ 2: ชำระยอดคงเหลือ ฿{formatSatangToThbString(splitRemainingSatang)}{' '}
-                          ด้วย
-                        </span>
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSplitSecondMethod('PROMPTPAY_QR');
-                              setSlipVerificationModal(null);
-                              if (splitRemainingSatang > 0) {
-                                void loadPromptPayQr(splitRemainingSatang);
-                              }
-                            }}
-                            className={`rounded-[48px] border px-3.5 py-1.5 text-xs font-medium cursor-pointer ${
-                              splitSecondMethod === 'PROMPTPAY_QR'
-                                ? 'border-[#1a73e8] bg-[#1a73e8] text-white'
-                                : 'border-[#dadce0] bg-white text-[#3c4043]'
-                            }`}
-                          >
-                            Thai QR PromptPay
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSplitSecondMethod('CARD');
-                              setSlipVerificationModal(null);
-                            }}
-                            className={`rounded-[48px] border px-3.5 py-1.5 text-xs font-medium cursor-pointer ${
-                              splitSecondMethod === 'CARD'
-                                ? 'border-[#1a73e8] bg-[#1a73e8] text-white'
-                                : 'border-[#dadce0] bg-white text-[#3c4043]'
-                            }`}
-                          >
-                            บัตรเครดิต / EDC
-                          </button>
-                        </div>
-                      </div>
-
-                      {splitSecondMethod === 'PROMPTPAY_QR' ? (
-                        <div className="space-y-3">
-                          <div className="flex items-center gap-4 rounded-[4px] border border-[#dadce0] p-3">
-                            {qrDataUrl ? (
-                              <img
-                                src={qrDataUrl}
-                                alt="Split PromptPay QR"
-                                className="h-28 w-28 rounded-[4px] border border-[#dadce0] shrink-0"
-                              />
-                            ) : (
-                              <div className="h-28 w-28 rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] flex items-center justify-center text-[11px] text-[#5f6368] shrink-0">
-                                กดอัปเดต QR
-                              </div>
-                            )}
-                            <div className="text-xs space-y-1">
-                              <div className="font-google-display text-sm font-medium text-[#202124]">
-                                Thai QR ยอดส่วนที่ 2: ฿{formatSatangToThbString(splitRemainingSatang)}
-                              </div>
-                              <p className="text-[#5f6368]">
-                                สแกน Mini-QR บนสลิปลูกค้าเพื่อป้องกันสลิปซ้ำ หรือกดตรวจสลิป Step 1
-                              </p>
-                            </div>
-                          </div>
-
-                          <input
-                            type="text"
-                            value={slipMiniQrInput}
-                            onChange={(e) => {
-                              setSlipMiniQrInput(e.target.value);
-                              setSlipVerificationModal(null);
-                            }}
-                            placeholder="ข้อมูล BOT Mini-QR สำหรับส่วนที่ 2..."
-                            className="h-10 w-full rounded-[4px] border border-[#dadce0] px-3 text-xs text-[#202124] focus:border-[#1a73e8] focus:outline-none"
-                          />
-
-                          {!slipVerificationModal?.valid ? (
-                            <button
-                              type="button"
-                              disabled={
-                                processingCheckout ||
-                                splitCashSatang <= 0 ||
-                                splitRemainingSatang <= 0
-                              }
-                              onClick={() => void handleVerifySlipStep1(splitRemainingSatang)}
-                              className="h-[48px] w-full rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-sm font-medium text-white hover:bg-[#1967d2] disabled:opacity-40 cursor-pointer"
-                            >
-                              ตรวจสลิป BOT Mini-QR (ยอด ฿
-                              {formatSatangToThbString(splitRemainingSatang)})
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              disabled={
-                                processingCheckout ||
-                                splitCashSatang <= 0 ||
-                                splitRemainingSatang <= 0
-                              }
-                              onClick={() =>
-                                void executeFinalCheckout('SPLIT', slipMiniQrInput.trim())
-                              }
-                              className="h-[50px] w-full rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-[15px] font-medium text-white hover:bg-[#1967d2] cursor-pointer"
-                            >
-                              ยืนยันแยกจ่าย (เงินสด + Thai QR) · เปิดลิ้นชัก &amp; พิมพ์ใบเสร็จ
-                            </button>
-                          )}
-                        </div>
+                        <button
+                          type="button"
+                          disabled={
+                            processingCheckout ||
+                            splitCashSatang <= 0 ||
+                            splitRemainingSatang <= 0
+                          }
+                          onClick={() => void handleVerifySlipStep1(splitRemainingSatang)}
+                          className={`h-[48px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                        >
+                          ตรวจสลิป BOT Mini-QR (ยอด ฿
+                          {formatSatangToThbString(splitRemainingSatang)})
+                        </button>
                       ) : (
                         <button
                           type="button"
                           disabled={
-                            processingCheckout || splitCashSatang <= 0 || splitRemainingSatang <= 0
+                            processingCheckout ||
+                            splitCashSatang <= 0 ||
+                            splitRemainingSatang <= 0
                           }
-                          onClick={() => void executeFinalCheckout('SPLIT')}
-                          className="h-[50px] w-full rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-[15px] font-medium text-white hover:bg-[#1967d2] disabled:opacity-40 cursor-pointer"
+                          onClick={() =>
+                            void executeFinalCheckout('SPLIT', slipMiniQrInput.trim())
+                          }
+                          className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                         >
-                          ยืนยันแยกจ่าย (เงินสด + บัตร EDC) · เปิดลิ้นชัก &amp; พิมพ์ใบเสร็จ
+                          ยืนยันแยกจ่าย (เงินสด + Thai QR) · เปิดลิ้นชัก &amp; พิมพ์ใบเสร็จ
                         </button>
                       )}
                     </div>
-                  </div>
-                )}
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={
+                        processingCheckout || splitCashSatang <= 0 || splitRemainingSatang <= 0
+                      }
+                      onClick={() => void executeFinalCheckout('SPLIT')}
+                      className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                    >
+                      ยืนยันแยกจ่าย (เงินสด + บัตร EDC) · เปิดลิ้นชัก &amp; พิมพ์ใบเสร็จ
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
-      )}
+      </ModalDialog>
 
       {/* ==================================================================== */}
       {/* DIALOG 3: 203-DPI CANVAS THAI RASTER & 80mm/58mm RECEIPT MODAL       */}
       {/* ==================================================================== */}
-      {receiptModalOpen && lastPrintedReceipt && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
-          <div className="w-full max-w-lg rounded-[8px] border border-[#dadce0] bg-white overflow-hidden">
-            <div className="flex items-center justify-between border-b border-[#dadce0] px-5 py-4">
+      <ModalDialog
+        open={receiptModalOpen && Boolean(lastPrintedReceipt)}
+        onClose={() => setReceiptModalOpen(false)}
+        labelledBy={`${uid}-receipt-title`}
+        maxWidthClass="max-w-lg"
+      >
+        {lastPrintedReceipt && (
+          <>
+            <div className="flex items-center justify-between border-b border-hairline px-5 py-4 shrink-0">
               <div>
-                <h3 className="font-google-display text-[18px] font-normal text-[#202124]">
+                <h3 id={`${uid}-receipt-title`} className="font-google-display text-[18px] font-normal text-ink">
                   ใบเสร็จรับเงิน / ใบกำกับภาษีอย่างย่อ ({printPaperWidthMm}mm)
                 </h3>
-                <p className="text-xs text-[#5f6368]">
+                <p className="text-xs text-ink-muted">
                   {lastPrintedReceipt.spoolStatus === 'PRINTED_IMMEDIATELY'
                     ? `ส่งออกชุดคำสั่ง 203-DPI สำเร็จ (${lastPrintedReceipt.packetsCount} แถบ GS v 0)`
                     : `เก็บเข้าคิวรอพิมพ์อัตโนมัติ (${lastPrintedReceipt.pendingQueueLength} ใบค้างคิว)`}
@@ -2790,22 +2860,22 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 type="button"
                 aria-label="ปิดหน้าต่างตัวอย่างใบเสร็จ"
                 onClick={() => setReceiptModalOpen(false)}
-                className="flex h-9 w-9 items-center justify-center rounded-full text-[#5f6368] hover:bg-[#f8f9fa] cursor-pointer"
+                className={`flex h-9 w-9 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
             {/* 203-DPI Raster vs Text & 80mm/58mm Toolbar */}
-            <div className="border-b border-[#dadce0] bg-white px-5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <div className="inline-flex rounded-[48px] border border-[#dadce0] p-0.5">
+            <div className="border-b border-hairline bg-canvas px-5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
+              <div className="inline-flex rounded-[48px] border border-hairline p-0.5">
                 <button
                   type="button"
                   onClick={() => setReceiptViewMode('CANVAS_203DPI')}
-                  className={`rounded-[48px] px-3 py-1 font-medium cursor-pointer ${
+                  className={`rounded-[48px] px-3 py-1 font-medium ${UI_INTERACTION.focusButton} ${
                     receiptViewMode === 'CANVAS_203DPI'
-                      ? 'bg-[#1a73e8] text-white'
-                      : 'text-[#5f6368]'
+                      ? 'bg-primary text-white hover:bg-primary-hover'
+                      : 'text-ink-muted hover:text-ink'
                   }`}
                 >
                   ฟอนต์ไทย 203-DPI (1-Bit)
@@ -2813,15 +2883,17 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 <button
                   type="button"
                   onClick={() => setReceiptViewMode('TEXT')}
-                  className={`rounded-[48px] px-3 py-1 font-medium cursor-pointer ${
-                    receiptViewMode === 'TEXT' ? 'bg-[#1a73e8] text-white' : 'text-[#5f6368]'
+                  className={`rounded-[48px] px-3 py-1 font-medium ${UI_INTERACTION.focusButton} ${
+                    receiptViewMode === 'TEXT'
+                      ? 'bg-primary text-white hover:bg-primary-hover'
+                      : 'text-ink-muted hover:text-ink'
                   }`}
                 >
                   ข้อความ (Text)
                 </button>
               </div>
 
-              <div className="inline-flex rounded-[48px] border border-[#dadce0] p-0.5">
+              <div className="inline-flex rounded-[48px] border border-hairline p-0.5">
                 {([80, 58] as const).map((w) => (
                   <button
                     key={w}
@@ -2837,8 +2909,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         );
                       }
                     }}
-                    className={`rounded-[48px] px-3 py-1 font-medium cursor-pointer ${
-                      printPaperWidthMm === w ? 'bg-[#202124] text-white' : 'text-[#5f6368]'
+                    className={`rounded-[48px] px-3 py-1 font-medium ${UI_INTERACTION.focusButton} ${
+                      printPaperWidthMm === w
+                        ? 'bg-ink text-white hover:bg-hero'
+                        : 'text-ink-muted hover:text-ink'
                     }`}
                   >
                     {w}mm
@@ -2847,7 +2921,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               </div>
             </div>
 
-            <div className="p-5 bg-[#f8f9fa] max-h-[60vh] overflow-y-auto flex justify-center">
+            <div className="p-5 bg-surface-1 overflow-y-auto flex-1 flex justify-center">
               <div
                 id="rube-printable-receipt"
                 className={`thermal-receipt-paper rounded-[4px] p-3 overflow-x-auto ${
@@ -2869,12 +2943,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               </div>
             </div>
 
-            <div className="border-t border-[#dadce0] bg-white px-5 py-3.5 flex flex-wrap items-center justify-between gap-2">
+            <div className="border-t border-hairline bg-canvas px-5 py-3.5 flex flex-wrap items-center justify-between gap-2 shrink-0">
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => window.print()}
-                  className="flex h-[42px] items-center gap-1.5 rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
+                  className={`flex h-[42px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
                   <Printer className="h-4 w-4" />
                   Windows Print ({printPaperWidthMm}mm)
@@ -2894,7 +2968,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       )
                       .catch((e) => onToast(e instanceof Error ? e.message : String(e), 'error'));
                   }}
-                  className="h-[42px] rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#3c4043] hover:border-[#202124] cursor-pointer"
+                  className={`h-[42px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
                   เตะลิ้นชัก RJ11
                 </button>
@@ -2902,14 +2976,35 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <button
                 type="button"
                 onClick={() => setReceiptModalOpen(false)}
-                className="h-[42px] rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] cursor-pointer"
+                className={`h-[42px] rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
                 เสร็จสิ้น (บิลถัดไป)
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </ModalDialog>
+
+      <ConfirmDialog
+        open={Boolean(confirmAction)}
+        title={confirmAction?.title ?? ''}
+        description={confirmAction?.description ?? ''}
+        confirmLabel={confirmAction?.confirmLabel ?? 'ยืนยัน'}
+        tone={confirmAction?.tone ?? 'danger'}
+        busy={confirmBusy}
+        onCancel={() => {
+          if (!confirmBusy) setConfirmAction(null);
+        }}
+        onConfirm={() => {
+          if (!confirmAction) return;
+          setConfirmBusy(true);
+          Promise.resolve(confirmAction.onConfirm())
+            .finally(() => {
+              setConfirmBusy(false);
+              setConfirmAction(null);
+            });
+        }}
+      />
     </div>
   );
 };

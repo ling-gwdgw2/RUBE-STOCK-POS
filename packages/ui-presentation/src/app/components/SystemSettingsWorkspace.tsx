@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import {
   Building2,
   CheckCircle2,
@@ -18,6 +18,7 @@ import type {
   StaffUserDto,
   UserRole,
 } from '../types.ts';
+import { UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface SystemSettingsWorkspaceProps {
   bootstrap: BootstrapPayload;
@@ -32,6 +33,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
   onRefreshState,
   onToast,
 }) => {
+  const uid = useId();
   const [storeName, setStoreName] = useState(bootstrap.storeSettings.storeName);
   const [taxId, setTaxId] = useState(bootstrap.storeSettings.taxId);
   const [branchCode, setBranchCode] = useState(bootstrap.storeSettings.branchCode);
@@ -236,16 +238,16 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
   return (
     <div className="space-y-6">
       {/* 1. Polymorphic Business Profile Selector */}
-      <section className="rounded-[4px] border border-[#dadce0] bg-white p-6 space-y-5">
+      <section className="rounded-[4px] border border-hairline bg-canvas p-6 space-y-5">
         <div className="flex items-start gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#e8f0fe] text-[#1a73e8]">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary-dark">
             <Sliders className="h-5 w-5" />
           </div>
           <div>
-            <h2 className="font-google-display text-[22px] font-normal leading-[28px] text-[#202124]">
+            <h2 className="font-google-display text-[22px] font-normal leading-[28px] text-ink">
               โหมดรูปแบบธุรกิจอัจฉริยะ (Polymorphic Business Profile · HMAC Protected)
             </h2>
-            <p className="text-xs text-[#5f6368] mt-1">
+            <p className="text-xs text-ink-muted mt-1">
               ปรับเปลี่ยนหน้าจอขายและเปิด-ปิดฟีเจอร์อัตโนมัติบนฐานข้อมูลชุดเดียวกันโดยข้อมูลไม่สูญหาย
             </p>
           </div>
@@ -276,19 +278,19 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                 type="button"
                 disabled={busy}
                 onClick={() => void handleSwitchProfile(prof.id)}
-                className={`rounded-[4px] border p-5 text-left transition-colors cursor-pointer ${
+                className={`rounded-[4px] border p-5 text-left ${UI_INTERACTION.focusButton} ${
                   active
-                    ? 'border-[#1a73e8] bg-[#e8f0fe]/50'
-                    : 'border-[#dadce0] bg-white hover:border-[#1a73e8]'
+                    ? 'border-primary bg-primary-soft/50'
+                    : 'border-hairline bg-canvas hover:border-primary'
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-google-display text-base font-medium text-[#202124]">
+                  <span className="font-google-display text-base font-medium text-ink">
                     {prof.title}
                   </span>
-                  {active && <CheckCircle2 className="h-5 w-5 text-[#1a73e8] shrink-0" />}
+                  {active && <CheckCircle2 className="h-5 w-5 text-primary shrink-0" />}
                 </div>
-                <p className="text-xs text-[#5f6368] mt-2 leading-relaxed">{prof.desc}</p>
+                <p className="text-xs text-ink-muted mt-2 leading-relaxed">{prof.desc}</p>
               </button>
             );
           })}
@@ -296,17 +298,17 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
       </section>
 
       {/* 1.5 Physical Thermal Printer Port & First-Run Setup Wizard Launcher */}
-      <section className="rounded-[4px] border border-[#dadce0] bg-white p-6 space-y-5">
+      <section className="rounded-[4px] border border-hairline bg-canvas p-6 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#e8f0fe] text-[#1a73e8]">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary-dark">
               <Printer className="h-5 w-5" />
             </div>
             <div>
-              <h2 className="font-google-display text-[20px] font-normal leading-[28px] text-[#202124]">
+              <h2 className="font-google-display text-[20px] font-normal leading-[28px] text-ink">
                 พอร์ตเครื่องพิมพ์ความร้อนจริง (TCP 9100 / Windows Raw USB) &amp; ลิ้นชักเก็บเงิน RJ11
               </h2>
-              <p className="text-xs text-[#5f6368] mt-1">
+              <p className="text-xs text-ink-muted mt-1">
                 รองรับการวาดฟอนต์ไทยผ่าน HTML5 Canvas 203-DPI แปลงเป็น 1-Bit Monochrome Raster (ไม่สระลอย 100%)
               </p>
             </div>
@@ -316,7 +318,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             type="button"
             disabled={busy}
             onClick={() => void handleLaunchSetupWizard()}
-            className="flex h-[42px] items-center gap-2 rounded-[48px] border border-[#dadce0] bg-white px-5 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] hover:bg-[#f8f9fa] transition-colors cursor-pointer"
+            className={`flex h-[42px] items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
           >
             <RotateCcw className="h-3.5 w-3.5" />
             <span>เปิดหน้า First-Run Setup Wizard / ส่งออก .recovery-kit</span>
@@ -325,11 +327,14 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
           <div>
-            <label className="block text-[#5f6368] mb-1">โหมดการเชื่อมต่อเครื่องพิมพ์</label>
+            <label htmlFor={`${uid}-prn-mode`} className="block text-ink-muted mb-1">
+              โหมดการเชื่อมต่อเครื่องพิมพ์
+            </label>
             <select
+              id={`${uid}-prn-mode`}
               value={prnMode}
               onChange={(e) => setPrnMode(e.target.value as PrinterTransportMode)}
-              className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+              className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
             >
               <option value="SIMULATED_MEMORY">จำลองในหน่วยความจำ (Preview)</option>
               <option value="WINDOWS_RAW_USB">สาย USB (Windows Raw Spooler)</option>
@@ -341,21 +346,27 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           {prnMode === 'LAN_TCP_9100' && (
             <>
               <div>
-                <label className="block text-[#5f6368] mb-1">IP เครื่องพิมพ์ใบเสร็จ</label>
+                <label htmlFor={`${uid}-prn-host`} className="block text-ink-muted mb-1">
+                  IP เครื่องพิมพ์ใบเสร็จ
+                </label>
                 <input
+                  id={`${uid}-prn-host`}
                   type="text"
                   value={prnHost}
                   onChange={(e) => setPrnHost(e.target.value)}
-                  className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               </div>
               <div>
-                <label className="block text-[#5f6368] mb-1">พอร์ต TCP</label>
+                <label htmlFor={`${uid}-prn-port`} className="block text-ink-muted mb-1">
+                  พอร์ต TCP
+                </label>
                 <input
+                  id={`${uid}-prn-port`}
                   type="text"
                   value={prnPort}
                   onChange={(e) => setPrnPort(e.target.value)}
-                  className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               </div>
             </>
@@ -363,12 +374,15 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
 
           {prnMode === 'WINDOWS_RAW_USB' && (
             <div className="md:col-span-2">
-              <label className="block text-[#5f6368] mb-1">เลือกเครื่องพิมพ์ USB ใน Windows</label>
+              <label htmlFor={`${uid}-prn-win`} className="block text-ink-muted mb-1">
+                เลือกเครื่องพิมพ์ USB ใน Windows
+              </label>
               {winPrinters.length > 0 ? (
                 <select
+                  id={`${uid}-prn-win`}
                   value={prnWinName}
                   onChange={(e) => setPrnWinName(e.target.value)}
-                  className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
                 >
                   <option value="">-- เลือกเครื่องพิมพ์ --</option>
                   {winPrinters.map((p) => (
@@ -379,22 +393,26 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                 </select>
               ) : (
                 <input
+                  id={`${uid}-prn-win`}
                   type="text"
                   placeholder="เช่น XP-80C หรือ EPSON TM-T82"
                   value={prnWinName}
                   onChange={(e) => setPrnWinName(e.target.value)}
-                  className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                 />
               )}
             </div>
           )}
 
           <div>
-            <label className="block text-[#5f6368] mb-1">ขนาดกระดาษความร้อน</label>
+            <label htmlFor={`${uid}-prn-width`} className="block text-ink-muted mb-1">
+              ขนาดกระดาษความร้อน
+            </label>
             <select
+              id={`${uid}-prn-width`}
               value={prnWidthMm}
               onChange={(e) => setPrnWidthMm(Number(e.target.value) === 58 ? 58 : 80)}
-              className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+              className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
             >
               <option value={80}>80mm (576 dots @ 203-DPI)</option>
               <option value={58}>58mm (384 dots @ 203-DPI)</option>
@@ -402,23 +420,23 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-4 border-t border-[#dadce0] pt-4">
-          <label className="flex items-center gap-2 text-xs text-[#3c4043] cursor-pointer">
+        <div className="flex flex-wrap items-center justify-between gap-4 border-t border-hairline pt-4">
+          <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer rounded-[4px] p-1 focus-within:ring-2 focus-within:ring-primary/25">
             <input
               type="checkbox"
               checked={prnAutoDrawer}
               onChange={(e) => setPrnAutoDrawer(e.target.checked)}
-              className="accent-[#1a73e8]"
+              className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
             />
             ส่งสัญญาณพัลส์เปิดลิ้นชักเก็บเงิน RJ11 อัตโนมัติเมื่อรับเงินสด (ESC p 0 25 250)
           </label>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
               disabled={busy}
               onClick={() => void handleTestKickDrawer()}
-              className="h-[44px] rounded-[48px] border border-[#dadce0] bg-white px-5 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
+              className={`h-[44px] rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
             >
               ทดสอบเตะลิ้นชัก RJ11
             </button>
@@ -426,7 +444,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               type="button"
               disabled={busy}
               onClick={() => void handleSavePrinterHardware()}
-              className="h-[44px] rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] cursor-pointer"
+              className={`h-[44px] rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
               บันทึกตั้งค่าเครื่องพิมพ์
             </button>
@@ -436,58 +454,71 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         {/* 2. Store Identity & PromptPay Settings */}
-        <section className="xl:col-span-6 rounded-[4px] border border-[#dadce0] bg-white p-6 space-y-5">
-          <h3 className="font-google-display text-[20px] font-normal text-[#202124] flex items-center gap-2.5">
-            <Building2 className="h-5 w-5 text-[#1a73e8]" />
+        <section className="xl:col-span-6 rounded-[4px] border border-hairline bg-canvas p-6 space-y-5">
+          <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
+            <Building2 className="h-5 w-5 text-primary" />
             <span>ข้อมูลกิจการ ใบกำกับภาษี ABB &amp; บัญชี PromptPay</span>
           </h3>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
             <div className="sm:col-span-2">
-              <label className="block text-[#5f6368] mb-1">ชื่อร้านค้าบนหัวใบเสร็จ</label>
+              <label htmlFor={`${uid}-store-name`} className="block text-ink-muted mb-1">
+                ชื่อร้านค้าบนหัวใบเสร็จ
+              </label>
               <input
+                id={`${uid}-store-name`}
                 type="text"
                 value={storeName}
                 onChange={(e) => setStoreName(e.target.value)}
-                className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3.5 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink ${UI_INTERACTION.focusControl}`}
               />
             </div>
             <div>
-              <label className="block text-[#5f6368] mb-1">เลขประจำตัวผู้เสียภาษี 13 หลัก</label>
+              <label htmlFor={`${uid}-tax-id`} className="block text-ink-muted mb-1">
+                เลขประจำตัวผู้เสียภาษี 13 หลัก
+              </label>
               <input
+                id={`${uid}-tax-id`}
                 type="text"
                 value={taxId}
                 onChange={(e) => setTaxId(e.target.value)}
-                className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3.5 text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
               />
             </div>
             <div>
-              <label className="block text-[#5f6368] mb-1">รหัสสาขา (00000 = สำนักงานใหญ่)</label>
+              <label htmlFor={`${uid}-branch-code`} className="block text-ink-muted mb-1">
+                รหัสสาขา (00000 = สำนักงานใหญ่)
+              </label>
               <input
+                id={`${uid}-branch-code`}
                 type="text"
                 value={branchCode}
                 onChange={(e) => setBranchCode(e.target.value)}
-                className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3.5 text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
               />
             </div>
             <div>
-              <label className="block text-[#5f6368] mb-1">เลขทะเบียนเครื่องเก็บเงินกรมสรรพากร</label>
+              <label htmlFor={`${uid}-rd-reg`} className="block text-ink-muted mb-1">
+                เลขทะเบียนเครื่องเก็บเงินกรมสรรพากร
+              </label>
               <input
+                id={`${uid}-rd-reg`}
                 type="text"
                 value={rdPosRegNo}
                 onChange={(e) => setRdPosRegNo(e.target.value)}
-                className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3.5 text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
               />
             </div>
             <div>
-              <label className="block text-[#1a73e8] font-medium mb-1">
+              <label htmlFor={`${uid}-promptpay`} className="block text-primary-dark font-medium mb-1">
                 เบอร์ / เลขนิติบุคคล PromptPay (ล็อก HMAC)
               </label>
               <input
+                id={`${uid}-promptpay`}
                 type="text"
                 value={promptPayId}
                 onChange={(e) => setPromptPayId(e.target.value)}
-                className="h-11 w-full rounded-[4px] border border-[#1a73e8] bg-white px-3.5 font-medium text-[#202124] tabular-nums-google focus:outline-none"
+                className={`h-11 w-full rounded-[4px] border border-primary bg-canvas px-3.5 font-medium text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
               />
             </div>
           </div>
@@ -496,38 +527,41 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             type="button"
             disabled={busy}
             onClick={() => void handleSaveStoreSettings()}
-            className="h-[46px] w-full rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] transition-colors cursor-pointer"
+            className={`h-[46px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
           >
             บันทึกข้อมูลกิจการ &amp; ลงลายมือชื่อ HMAC-SHA256
           </button>
         </section>
 
         {/* 3. Staff & RBAC PIN Management */}
-        <section className="xl:col-span-6 rounded-[4px] border border-[#dadce0] bg-white p-6 space-y-5">
-          <h3 className="font-google-display text-[20px] font-normal text-[#202124] flex items-center gap-2.5">
-            <UserPlus className="h-5 w-5 text-[#1a73e8]" />
+        <section className="xl:col-span-6 rounded-[4px] border border-hairline bg-canvas p-6 space-y-5">
+          <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
+            <UserPlus className="h-5 w-5 text-primary" />
             <span>จัดการพนักงานและสิทธิ์การใช้งาน (RBAC &amp; PIN)</span>
           </h3>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
             <input
               type="text"
+              aria-label="Username พนักงาน"
               placeholder="Username"
               value={newUsername}
               onChange={(e) => setNewUsername(e.target.value)}
-              className="h-11 rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+              className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
             />
             <input
               type="text"
+              aria-label="ชื่อที่แสดงของพนักงาน"
               placeholder="ชื่อที่แสดง"
               value={newDisplayName}
               onChange={(e) => setNewDisplayName(e.target.value)}
-              className="h-11 rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+              className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
             />
             <select
+              aria-label="บทบาทสิทธิ์พนักงาน"
               value={newRole}
               onChange={(e) => setNewRole(e.target.value as UserRole)}
-              className="h-11 rounded-[4px] border border-[#dadce0] bg-white px-2.5 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+              className={`h-11 rounded-[4px] border border-hairline bg-canvas px-2.5 text-ink ${UI_INTERACTION.focusSelect}`}
             >
               <option value="CASHIER">CASHIER</option>
               <option value="MANAGER">MANAGER</option>
@@ -537,10 +571,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             </select>
             <input
               type="password"
+              aria-label="รหัส PIN พนักงาน 4 ถึง 8 หลัก"
               placeholder="PIN (4–8 หลัก)"
               value={newPin}
               onChange={(e) => setNewPin(e.target.value)}
-              className="h-11 rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+              className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
             />
           </div>
 
@@ -549,7 +584,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               type="button"
               disabled={busy}
               onClick={() => void handleCreateOrUpdateStaff()}
-              className="flex-1 h-[46px] rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] transition-colors cursor-pointer"
+              className={`flex-1 h-[46px] rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
               {editingStaffId
                 ? 'บันทึกการแก้ไข / ตั้งรหัส PIN ใหม่'
@@ -565,30 +600,30 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                   setNewRole('CASHIER');
                   setNewPin('');
                 }}
-                className="h-[46px] rounded-[48px] border border-[#dadce0] bg-white px-5 font-google-display text-xs font-medium text-[#5f6368] hover:border-[#202124] hover:text-[#202124] cursor-pointer"
+                className={`h-[46px] rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
               >
                 ยกเลิกแก้ไข
               </button>
             )}
           </div>
 
-          <div className="divide-y divide-[#dadce0] rounded-[4px] border border-[#dadce0] max-h-48 overflow-y-auto">
+          <div className="divide-y divide-hairline rounded-[4px] border border-hairline max-h-48 overflow-y-auto">
             {bootstrap.staffUsers.length === 0 ? (
-              <div className="py-6 text-center text-xs text-[#5f6368]">
+              <div className="py-6 text-center text-xs text-ink-muted">
                 ยังไม่มีบัญชีผู้ใช้งานพนักงานในระบบ
               </div>
             ) : (
               bootstrap.staffUsers.map((u) => (
                 <div
                   key={u.id}
-                  className="bg-white px-4 py-2.5 flex items-center justify-between gap-2 text-xs hover:bg-[#f8f9fa]"
+                  className="bg-canvas px-4 py-2.5 flex items-center justify-between gap-2 text-xs hover:bg-surface-1 transition-colors duration-150"
                 >
                   <div>
-                    <span className="font-medium text-[#202124]">{u.displayName}</span>
-                    <span className="text-[#5f6368] ml-2">@{u.username}</span>
+                    <span className="font-medium text-ink">{u.displayName}</span>
+                    <span className="text-ink-muted ml-2">@{u.username}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="rounded-[48px] border border-[#dadce0] bg-[#f8f9fa] px-2.5 py-0.5 text-[11px] font-medium text-[#1a73e8]">
+                    <span className="rounded-[48px] border border-hairline bg-surface-1 px-2.5 py-0.5 text-[11px] font-medium text-primary-dark">
                       {u.role}
                     </span>
                     <button
@@ -600,7 +635,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                         setNewRole(u.role);
                         setNewPin('');
                       }}
-                      className="rounded-[48px] border border-[#dadce0] bg-white px-3 py-1 text-[11px] font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
+                      className={`rounded-[48px] border border-hairline bg-canvas px-3 py-1 text-[11px] font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                     >
                       แก้ไข / PIN
                     </button>
@@ -614,25 +649,25 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
 
       {/* 4. LAN Cluster & Security Audit Logs */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-        <section className="xl:col-span-5 rounded-[4px] border border-[#dadce0] bg-white p-6 space-y-4">
-          <h3 className="font-google-display text-[20px] font-normal text-[#202124] flex items-center gap-2.5">
-            <Network className="h-5 w-5 text-[#1a73e8]" />
+        <section className="xl:col-span-5 rounded-[4px] border border-hairline bg-canvas p-6 space-y-4">
+          <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
+            <Network className="h-5 w-5 text-primary" />
             <span>คลัสเตอร์วงแลน mDNS &amp; mTLS Pairing</span>
           </h3>
-          <div className="rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] p-4 text-xs space-y-2 tabular-nums-google">
+          <div className="rounded-[4px] border border-hairline bg-surface-1 p-4 text-xs space-y-2 tabular-nums-google">
             <div className="flex justify-between">
-              <span className="text-[#5f6368]">โหมดเครือข่าย:</span>
-              <span className="font-medium text-[#202124]">{bootstrap.cluster.operatingMode}</span>
+              <span className="text-ink-muted">โหมดเครือข่าย:</span>
+              <span className="font-medium text-ink">{bootstrap.cluster.operatingMode}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-[#5f6368]">บทบาทโหนด / Epoch:</span>
-              <span className="font-medium text-[#1a73e8]">
+              <span className="text-ink-muted">บทบาทโหนด / Epoch:</span>
+              <span className="font-medium text-primary-hover">
                 {bootstrap.cluster.roleState} (epoch={bootstrap.cluster.currentEpoch})
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-[#5f6368]">สถิติ IPC (Read / Write):</span>
-              <span className="font-medium text-[#202124]">
+              <span className="text-ink-muted">สถิติ IPC (Read / Write):</span>
+              <span className="font-medium text-ink">
                 {bootstrap.cluster.ipcStats.readsRouted} / {bootstrap.cluster.ipcStats.writesRouted}
               </span>
             </div>
@@ -642,46 +677,46 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             type="button"
             disabled={busy}
             onClick={() => void handleOpenPairingPin()}
-            className="flex h-[46px] w-full items-center justify-center gap-2 rounded-[48px] border border-[#dadce0] bg-white px-5 font-google-display text-xs font-medium tracking-[0.25px] text-[#1a73e8] hover:border-[#1a73e8] hover:bg-[#f8f9fa] transition-colors cursor-pointer"
+            className={`flex h-[46px] w-full items-center justify-center gap-2 rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
           >
             <KeyRound className="h-4 w-4" />
             <span>เปิดโหมด LAN Cluster &amp; สร้างรหัสจับคู่ 6-Digit mTLS PIN</span>
           </button>
 
           {pairingPinInfo && (
-            <div className="rounded-[8px] bg-[#e8f0fe] p-5 text-center space-y-1.5">
-              <div className="text-xs text-[#3c4043]">
+            <div className="rounded-[8px] bg-primary-soft p-5 text-center space-y-1.5">
+              <div className="text-xs text-ink-soft">
                 รหัสจับคู่เครื่องลูกข่าย / จอครัว KDS (ใช้ครั้งเดียว)
               </div>
-              <div className="font-google-display text-[36px] font-normal tracking-widest text-[#202124] tabular-nums-google">
+              <div className="font-google-display text-[36px] font-normal tracking-widest text-ink tabular-nums-google">
                 {pairingPinInfo.pairingPin}
               </div>
-              <div className="text-[11px] text-[#5f6368] tabular-nums-google">
+              <div className="text-[11px] text-ink-muted tabular-nums-google">
                 mDNS _rube-pos._tcp.local. · {pairingPinInfo.mdnsRecords.join(' | ')}
               </div>
             </div>
           )}
         </section>
 
-        <section className="xl:col-span-7 rounded-[4px] border border-[#dadce0] bg-white p-6 space-y-4">
-          <h3 className="font-google-display text-[20px] font-normal text-[#202124] flex items-center gap-2.5">
-            <Shield className="h-5 w-5 text-[#1a73e8]" />
+        <section className="xl:col-span-7 rounded-[4px] border border-hairline bg-canvas p-6 space-y-4">
+          <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
+            <Shield className="h-5 w-5 text-primary" />
             <span>บันทึกเหตุการณ์ความปลอดภัยห้ามลบ/แก้ไข (security_audit_logs)</span>
           </h3>
-          <div className="overflow-x-auto max-h-64 rounded-[4px] border border-[#dadce0]">
+          <div className="overflow-x-auto max-h-64 rounded-[4px] border border-hairline">
             <table className="w-full text-left text-xs">
-              <thead className="bg-[#f8f9fa] text-[#5f6368] font-medium border-b border-[#dadce0]">
+              <thead className="bg-surface-1 text-ink-muted font-medium border-b border-hairline">
                 <tr>
-                  <th className="py-2.5 px-3">เวลา</th>
-                  <th className="py-2.5 px-3">เหตุการณ์</th>
-                  <th className="py-2.5 px-3">ผู้กระทำ</th>
-                  <th className="py-2.5 px-3">รายละเอียด</th>
+                  <th scope="col" className="py-2.5 px-3">เวลา</th>
+                  <th scope="col" className="py-2.5 px-3">เหตุการณ์</th>
+                  <th scope="col" className="py-2.5 px-3">ผู้กระทำ</th>
+                  <th scope="col" className="py-2.5 px-3">รายละเอียด</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#dadce0] bg-white tabular-nums-google text-[11px]">
+              <tbody className="divide-y divide-hairline bg-canvas tabular-nums-google text-[11px]">
                 {auditLogs.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="py-10 text-center text-xs text-[#5f6368]">
+                    <td colSpan={4} className="py-10 text-center text-xs text-ink-muted">
                       ยังไม่มีบันทึกเหตุการณ์ด้านความปลอดภัย
                     </td>
                   </tr>
@@ -692,13 +727,13 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                         log.actorUserId)
                       : '—';
                     return (
-                      <tr key={log.id} className="hover:bg-[#f8f9fa]">
-                        <td className="py-2.5 px-3 text-[#5f6368]">
+                      <tr key={log.id} className="hover:bg-surface-1 transition-colors duration-150">
+                        <td className="py-2.5 px-3 text-ink-muted">
                           {new Date(log.createdAt).toLocaleString('th-TH')}
                         </td>
-                        <td className="py-2.5 px-3 font-medium text-[#202124]">{log.eventType}</td>
-                        <td className="py-2.5 px-3 text-[#3c4043]">{actorName}</td>
-                        <td className="py-2.5 px-3 text-[#5f6368] truncate max-w-xs">
+                        <td className="py-2.5 px-3 font-medium text-ink">{log.eventType}</td>
+                        <td className="py-2.5 px-3 text-ink-soft">{actorName}</td>
+                        <td className="py-2.5 px-3 text-ink-muted truncate max-w-xs">
                           {log.targetKey ?? '—'}:{' '}
                           {log.oldValueRedacted ? `${log.oldValueRedacted} → ` : ''}
                           {log.newValueRedacted ?? ''}

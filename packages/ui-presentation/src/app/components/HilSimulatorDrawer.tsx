@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import {
   BatteryCharging,
   BatteryWarning,
@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { posTransport } from '../api/pos-transport.ts';
 import type { BootstrapPayload, PrintedReceiptPreview } from '../types.ts';
+import { UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface HilSimulatorDrawerProps {
   open: boolean;
@@ -32,9 +33,37 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
   onRefreshState,
   onToast,
 }) => {
+  const uid = useId();
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  const prevFocusRef = useRef<HTMLElement | null>(null);
   const [customBarcode, setCustomBarcode] = useState('2010045015004');
   const [lastHilLog, setLastHilLog] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    prevFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const t = window.setTimeout(() => {
+      if (drawerRef.current && !drawerRef.current.contains(document.activeElement)) {
+        drawerRef.current.focus({ preventScroll: true });
+      }
+    }, 0);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener('keydown', onKeyDown);
+      if (prevFocusRef.current && document.contains(prevFocusRef.current)) {
+        prevFocusRef.current.focus({ preventScroll: true });
+      }
+    };
+  }, [onClose, open]);
 
   if (!open) return null;
 
@@ -98,18 +127,30 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/45">
-      <div className="w-full max-w-xl bg-white border-l border-[#dadce0] h-full flex flex-col">
-        <div className="flex items-center justify-between border-b border-[#dadce0] px-6 h-16">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#e8f0fe] text-[#1a73e8]">
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/45 transition-opacity duration-200"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`${uid}-hil-title`}
+        tabIndex={-1}
+        className="w-full max-w-xl bg-canvas border-l border-hairline h-full flex flex-col focus:outline-none"
+      >
+        <div className="flex items-center justify-between border-b border-hairline px-6 h-16 shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary-dark">
               <Cpu className="h-5 w-5" />
             </div>
-            <div>
-              <h2 className="font-google-display text-[18px] font-normal text-[#202124]">
+            <div className="min-w-0">
+              <h2 id={`${uid}-hil-title`} className="font-google-display text-[18px] font-normal text-ink truncate">
                 แผงจำลองฮาร์ดแวร์ (HIL Hardware Bench)
               </h2>
-              <p className="text-xs text-[#5f6368]">
+              <p className="text-xs text-ink-muted truncate">
                 ทดสอบปืนบาร์โค้ดคีย์ไทย, ตราชั่ง EAN-13, เครื่องพิมพ์ 203-DPI, UPS และ USB
               </p>
             </div>
@@ -118,27 +159,27 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
             type="button"
             aria-label="ปิดแผงจำลองฮาร์ดแวร์"
             onClick={onClose}
-            className="flex h-10 w-10 items-center justify-center rounded-full text-[#5f6368] hover:bg-[#f8f9fa] hover:text-[#202124] cursor-pointer"
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-5 bg-white">
+        <div className="flex-1 overflow-y-auto p-6 space-y-5 bg-canvas">
           {lastHilLog && (
-            <div className="rounded-[8px] bg-[#e8f0fe] px-4 py-3 text-xs text-[#202124]">
+            <div role="status" className="rounded-[8px] bg-primary-soft px-4 py-3 text-xs text-ink">
               {lastHilLog}
             </div>
           )}
 
           {/* 1. Barcode & Scale Simulator */}
-          <section className="rounded-[4px] border border-[#dadce0] p-5 space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-google-display text-[16px] font-medium text-[#202124] flex items-center gap-2">
-                <ScanBarcode className="h-4 w-4 text-[#1a73e8]" />
+          <section className="rounded-[4px] border border-hairline p-5 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
+                <ScanBarcode className="h-4 w-4 text-primary shrink-0" />
                 1. ปืนยิงบาร์โค้ด USB &amp; บาร์โค้ดตราชั่งสด
               </h3>
-              <span className="text-xs text-[#5f6368]">&lt; 50ms KeyCode</span>
+              <span className="text-xs text-ink-muted shrink-0">&lt; 50ms KeyCode</span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {[
@@ -151,10 +192,10 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
                   type="button"
                   disabled={busy}
                   onClick={() => void fireSimulatedScan(preset.code)}
-                  className="rounded-[4px] border border-[#dadce0] bg-white p-3 text-left hover:border-[#1a73e8] cursor-pointer"
+                  className={`rounded-[4px] border border-hairline bg-canvas p-3 text-left hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
-                  <div className="text-xs font-medium text-[#202124]">{preset.title}</div>
-                  <div className="text-[11px] text-[#1a73e8] mt-0.5 tabular-nums-google">
+                  <div className="text-xs font-medium text-ink">{preset.title}</div>
+                  <div className="text-[11px] text-primary-hover mt-0.5 tabular-nums-google">
                     {preset.code}
                   </div>
                 </button>
@@ -163,15 +204,16 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
             <div className="flex gap-2 pt-1">
               <input
                 type="text"
+                aria-label="รหัสบาร์โค้ดสำหรับจำลองยิงสแกน"
                 value={customBarcode}
                 onChange={(e) => setCustomBarcode(e.target.value)}
-                className="h-11 flex-1 rounded-[4px] border border-[#dadce0] px-3.5 text-sm text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+                className={`h-11 flex-1 rounded-[4px] border border-hairline px-3.5 text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
               />
               <button
                 type="button"
                 disabled={busy || !customBarcode.trim()}
                 onClick={() => void fireSimulatedScan(customBarcode.trim())}
-                className="h-11 rounded-[48px] bg-[#1a73e8] px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] cursor-pointer"
+                className={`h-11 rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
                 ยิงสแกน
               </button>
@@ -179,24 +221,24 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
           </section>
 
           {/* 2. Thermal Printer Spooler */}
-          <section className="rounded-[4px] border border-[#dadce0] p-5 space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-google-display text-[16px] font-medium text-[#202124] flex items-center gap-2">
-                <Printer className="h-4 w-4 text-[#1a73e8]" />
+          <section className="rounded-[4px] border border-hairline p-5 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
+                <Printer className="h-4 w-4 text-primary shrink-0" />
                 2. เครื่องพิมพ์ใบเสร็จ 203-DPI (Chunked GS v 0)
               </h3>
-              <span className="text-xs font-medium text-[#5f6368]">
+              <span className="text-xs font-medium text-ink-muted">
                 {bootstrap.printer.ready
                   ? 'พร้อมพิมพ์'
                   : `กระดาษหมด · ค้าง ${bootstrap.printer.pendingQueueLength} ใบ`}
               </span>
             </div>
-            <div className="grid grid-cols-2 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <button
                 type="button"
                 disabled={busy}
                 onClick={() => void togglePrinterPaper(false)}
-                className="h-11 rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#202124] hover:border-[#202124] cursor-pointer"
+                className={`h-11 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink hover:border-ink hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 จำลองกระดาษหมด / เปิดฝา
               </button>
@@ -204,7 +246,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
                 type="button"
                 disabled={busy}
                 onClick={() => void togglePrinterPaper(true)}
-                className="h-11 rounded-[48px] bg-[#1a73e8] px-4 font-google-display text-xs font-medium text-white hover:bg-[#1967d2] cursor-pointer"
+                className={`h-11 rounded-[48px] bg-primary px-4 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
                 ใส่กระดาษ &amp; พิมพ์คิวค้าง
               </button>
@@ -218,55 +260,55 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
           </section>
 
           {/* 3. UPS Power State */}
-          <section className="rounded-[4px] border border-[#dadce0] p-5 space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-google-display text-[16px] font-medium text-[#202124] flex items-center gap-2">
-                <BatteryCharging className="h-4 w-4 text-[#1a73e8]" />
+          <section className="rounded-[4px] border border-hairline p-5 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
+                <BatteryCharging className="h-4 w-4 text-primary shrink-0" />
                 3. เครื่องสำรองไฟ UPS USB-HID
               </h3>
-              <span className="text-xs text-[#5f6368]">
+              <span className="text-xs text-ink-muted shrink-0">
                 แบตเตอรี่ {bootstrap.upsBanner.batteryChargePercent}%
               </span>
             </div>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <button
                 type="button"
                 disabled={busy}
                 onClick={() => void triggerUps(true, 100)}
-                className="flex flex-col items-center gap-1 rounded-[4px] border border-[#dadce0] p-3 text-xs font-medium text-[#202124] hover:border-[#1a73e8] cursor-pointer"
+                className={`flex flex-col items-center gap-1 rounded-[4px] border border-hairline p-3 text-xs font-medium text-ink hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
-                <BatteryCharging className="h-4 w-4 text-[#1a73e8]" />
+                <BatteryCharging className="h-4 w-4 text-primary" />
                 ไฟปกติ (100%)
               </button>
               <button
                 type="button"
                 disabled={busy}
                 onClick={() => void triggerUps(false, 65)}
-                className="flex flex-col items-center gap-1 rounded-[4px] border border-[#dadce0] p-3 text-xs font-medium text-[#202124] hover:border-[#1a73e8] cursor-pointer"
+                className={`flex flex-col items-center gap-1 rounded-[4px] border border-hairline p-3 text-xs font-medium text-ink hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
-                <ZapOff className="h-4 w-4 text-[#5f6368]" />
+                <ZapOff className="h-4 w-4 text-ink-muted" />
                 ไฟดับ (65%)
               </button>
               <button
                 type="button"
                 disabled={busy}
                 onClick={() => void triggerUps(false, 15)}
-                className="flex flex-col items-center gap-1 rounded-[4px] border border-[#dadce0] p-3 text-xs font-medium text-[#202124] hover:border-[#1a73e8] cursor-pointer"
+                className={`flex flex-col items-center gap-1 rounded-[4px] border border-hairline p-3 text-xs font-medium text-ink hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
-                <BatteryWarning className="h-4 w-4 text-[#202124]" />
+                <BatteryWarning className="h-4 w-4 text-ink" />
                 วิกฤต (15%)
               </button>
             </div>
           </section>
 
           {/* 4. USB Ring Buffer */}
-          <section className="rounded-[4px] border border-[#dadce0] p-5 space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-google-display text-[16px] font-medium text-[#202124] flex items-center gap-2">
-                <Usb className="h-4 w-4 text-[#1a73e8]" />
+          <section className="rounded-[4px] border border-hairline p-5 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
+                <Usb className="h-4 w-4 text-primary shrink-0" />
                 4. จำลองดึงแฟลชไดรฟ์ USB หลุดกลางคัน
               </h3>
-              <span className="text-xs text-[#5f6368]">
+              <span className="text-xs text-ink-muted">
                 สำรองแล้ว {bootstrap.usbBackups.length}/14 กะ
               </span>
             </div>
@@ -274,7 +316,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
               type="button"
               disabled={busy}
               onClick={() => void triggerYankUsb()}
-              className="h-11 w-full rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
+              className={`h-11 w-full rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
             >
               จำลองดึง USB ออกขณะสำรองข้อมูล (.part)
             </button>
@@ -283,13 +325,13 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
                 {bootstrap.usbBackups.map((f) => (
                   <div
                     key={f.filename}
-                    className="flex items-center justify-between rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] px-3 py-1.5 text-xs"
+                    className="flex items-center justify-between rounded-[4px] border border-hairline bg-surface-1 px-3 py-1.5 text-xs"
                   >
-                    <span className="truncate flex items-center gap-1.5 text-[#202124]">
-                      <HardDrive className="h-3.5 w-3.5 text-[#5f6368] shrink-0" />
+                    <span className="truncate flex items-center gap-1.5 text-ink">
+                      <HardDrive className="h-3.5 w-3.5 text-ink-muted shrink-0" />
                       {f.filename}
                     </span>
-                    <span className="text-[#5f6368] shrink-0 ml-2 tabular-nums-google">
+                    <span className="text-ink-muted shrink-0 ml-2 tabular-nums-google">
                       {Math.max(1, Math.round(f.sizeBytes / 1024))} KB
                     </span>
                   </div>

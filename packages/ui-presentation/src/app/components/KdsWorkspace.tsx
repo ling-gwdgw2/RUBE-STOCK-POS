@@ -3,6 +3,7 @@ import { CheckCircle2, ChefHat, Clock, Flame, RefreshCw, Sparkles } from 'lucide
 import { formatMilliUnitsToQtyString } from '../../../../shared-contracts/src/fixed-point.ts';
 import { posTransport } from '../api/pos-transport.ts';
 import type { KdsTicketDto } from '../types.ts';
+import { UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface KdsWorkspaceProps {
   initialTickets: KdsTicketDto[];
@@ -83,14 +84,14 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
   return (
     <div className="space-y-6">
       {/* Near-Black Hero Strip + Canonical Status Summary (`google.design.md`) */}
-      <section className="overflow-hidden rounded-[4px] border border-[#dadce0] bg-white">
-        <div className="bg-[#000000] px-6 py-7 text-white flex flex-wrap items-center justify-between gap-6">
+      <section className="overflow-hidden rounded-[4px] border border-hairline bg-canvas">
+        <div className="bg-hero px-6 py-7 text-white flex flex-wrap items-center justify-between gap-6">
           <div className="space-y-1.5">
-            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.5px] text-white/70">
-              <ChefHat className="h-4 w-4 text-[#1a73e8]" />
+            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.5px] text-white/75">
+              <ChefHat className="h-4 w-4 text-primary" />
               <span>Kitchen Display System · Monotonic sequence_id Sync</span>
             </div>
-            <h1 className="font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-white">
+            <h1 className="font-google-display text-[28px] sm:text-[36px] font-normal leading-[36px] sm:leading-[44px] tracking-[-0.25px] text-white">
               หน้าจอรับออเดอร์ครัวและบาร์น้ำ
             </h1>
             <p className="text-sm text-white/75">
@@ -100,21 +101,21 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
 
           <div className="flex flex-wrap items-center gap-6">
             <div>
-              <div className="text-xs text-white/65">รอเข้าคิว (Queued)</div>
+              <div className="text-xs text-white/70">รอเข้าคิว (Queued)</div>
               <div className="font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-white tabular-nums-google">
                 {queuedCount}
               </div>
             </div>
             <div className="h-10 w-[1px] bg-white/20" />
             <div>
-              <div className="text-xs text-white/65">กำลังทำ (Preparing)</div>
-              <div className="font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-[#1a73e8] tabular-nums-google">
+              <div className="text-xs text-white/70">กำลังทำ (Preparing)</div>
+              <div className="font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-primary tabular-nums-google">
                 {preparingCount}
               </div>
             </div>
             <div className="h-10 w-[1px] bg-white/20" />
             <div>
-              <div className="text-xs text-white/65">พร้อมเสิร์ฟ (Ready)</div>
+              <div className="text-xs text-white/70">พร้อมเสิร์ฟ (Ready)</div>
               <div className="font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-white tabular-nums-google">
                 {readyCount}
               </div>
@@ -123,8 +124,8 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
         </div>
 
         {/* Canonical Google Underline Station Tabs + Controls */}
-        <div className="border-t border-[#dadce0] bg-white px-6 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-1 overflow-x-auto" role="tablist">
+        <div className="border-t border-hairline bg-canvas px-4 sm:px-6 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-1 overflow-x-auto" role="tablist" aria-label="สถานีครัว">
             {['ALL', 'BAR', 'MAIN', 'PREP'].map((st) => {
               const active = stationFilter === st;
               return (
@@ -134,13 +135,13 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                   role="tab"
                   aria-selected={active}
                   onClick={() => setStationFilter(st)}
-                  className={`relative flex h-12 items-center px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
-                    active ? 'text-[#202124]' : 'text-[#5f6368] hover:text-[#202124]'
+                  className={`relative flex h-12 items-center px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                    active ? 'text-ink' : 'text-ink-muted hover:text-ink'
                   }`}
                 >
                   <span>{st === 'ALL' ? 'ทุกสถานี (All)' : `สถานี ${st}`}</span>
                   {active && (
-                    <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-[#1a73e8]" />
+                    <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                   )}
                 </button>
               );
@@ -148,7 +149,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 py-2.5">
-            <label className="flex h-10 items-center gap-2 rounded-[48px] border border-[#dadce0] bg-white px-4 text-xs font-medium text-[#3c4043] hover:border-[#1a73e8] transition-colors cursor-pointer">
+            <label className="flex h-10 items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-4 text-xs font-medium text-ink-soft hover:border-primary transition-colors duration-200 cursor-pointer focus-within:ring-2 focus-within:ring-primary/25">
               <input
                 type="checkbox"
                 checked={includeServed}
@@ -156,7 +157,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                   setIncludeServed(e.target.checked);
                   void reloadTickets(e.target.checked);
                 }}
-                className="accent-[#1a73e8]"
+                className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
               />
               แสดงรายการที่เสิร์ฟแล้ว
             </label>
@@ -164,7 +165,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
             <button
               type="button"
               onClick={() => void reloadTickets(includeServed)}
-              className="flex h-10 items-center gap-1.5 rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium tracking-[0.25px] text-[#1a73e8] hover:border-[#1a73e8] hover:bg-[#f8f9fa] transition-colors cursor-pointer"
+              className={`flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
             >
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
               <span>รีเฟรชคิว</span>
@@ -175,14 +176,14 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
 
       {/* Tickets Grid */}
       {filteredTickets.length === 0 ? (
-        <div className="rounded-[4px] border border-[#dadce0] bg-white py-20 px-6 flex flex-col items-center justify-center text-center">
-          <div className="h-12 w-12 rounded-full bg-[#e8f0fe] text-[#1a73e8] flex items-center justify-center mb-3">
+        <div className="rounded-[4px] border border-hairline bg-canvas py-20 px-6 flex flex-col items-center justify-center text-center">
+          <div className="h-12 w-12 rounded-full bg-primary-soft text-primary-dark flex items-center justify-center mb-3">
             <Sparkles className="h-6 w-6" />
           </div>
-          <p className="font-google-display text-[20px] font-normal text-[#202124]">
+          <p className="font-google-display text-[20px] font-normal text-ink">
             ไม่มีออเดอร์ค้างในครัวขณะนี้
           </p>
-          <p className="text-sm text-[#5f6368] mt-1">
+          <p className="text-sm text-ink-muted mt-1">
             เมื่อแคชเชียร์กดคิดเงินเมนูคาเฟ่หรืออาหาร รายการจะแสดงบนจอนี้พร้อมเลขคิวทันที
           </p>
         </div>
@@ -196,12 +197,12 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
             return (
               <div
                 key={ticket.kitchenOrderId}
-                className={`rounded-[4px] border bg-white flex flex-col justify-between overflow-hidden transition-colors duration-200 ${
+                className={`rounded-[4px] border bg-canvas flex flex-col justify-between overflow-hidden transition-colors duration-200 ${
                   isActivePreparing
-                    ? 'border-[#1a73e8]'
+                    ? 'border-primary'
                     : isReady
-                      ? 'border-[#202124]'
-                      : 'border-[#dadce0]'
+                      ? 'border-ink'
+                      : 'border-hairline'
                 } ${ticket.status === 'SERVED' ? 'opacity-65' : ''}`}
               >
                 <div>
@@ -209,10 +210,10 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                   <div
                     className={`px-5 py-4 border-b flex items-center justify-between ${
                       isActivePreparing
-                        ? 'bg-[#000000] text-white border-[#000000]'
+                        ? 'bg-hero text-white border-hero'
                         : isReady
-                          ? 'bg-[#e8f0fe] text-[#202124] border-[#dadce0]'
-                          : 'bg-[#f8f9fa] text-[#202124] border-[#dadce0]'
+                          ? 'bg-primary-soft text-ink border-hairline'
+                          : 'bg-surface-1 text-ink border-hairline'
                     }`}
                   >
                     <div>
@@ -223,8 +224,8 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                         <span
                           className={`rounded-[48px] px-2.5 py-0.5 text-[11px] font-medium tabular-nums-google ${
                             isActivePreparing
-                              ? 'bg-[#1a73e8] text-white'
-                              : 'border border-[#dadce0] bg-white text-[#3c4043]'
+                              ? 'bg-primary text-white'
+                              : 'border border-hairline bg-canvas text-ink-soft'
                           }`}
                         >
                           SEQ #{ticket.sequenceId}
@@ -232,7 +233,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                       </div>
                       <div
                         className={`text-xs mt-1 ${
-                          isActivePreparing ? 'text-white/75' : 'text-[#5f6368]'
+                          isActivePreparing ? 'text-white/75' : 'text-ink-muted'
                         }`}
                       >
                         สถานี: <span className="font-medium">{ticket.station}</span>
@@ -245,8 +246,8 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                           isActivePreparing
                             ? 'bg-white/15 text-white'
                             : elapsed.mins >= 5 && ticket.status !== 'SERVED'
-                              ? 'bg-[#202124] text-white'
-                              : 'border border-[#dadce0] bg-white text-[#202124]'
+                              ? 'bg-ink text-white'
+                              : 'border border-hairline bg-canvas text-ink'
                         }`}
                       >
                         <Clock className="h-3 w-3" />
@@ -254,7 +255,11 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                       </span>
                       <div
                         className={`text-[11px] font-medium uppercase tracking-[0.5px] mt-1.5 ${
-                          isActivePreparing ? 'text-[#e8f0fe]' : 'text-[#1a73e8]'
+                          isActivePreparing
+                            ? 'text-primary-soft'
+                            : isReady
+                              ? 'text-primary-dark'
+                              : 'text-primary-hover'
                         }`}
                       >
                         {ticket.status}
@@ -263,19 +268,19 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                   </div>
 
                   {/* Ticket Line Items */}
-                  <div className="p-5 divide-y divide-[#dadce0]">
+                  <div className="p-5 divide-y divide-hairline">
                     {ticket.items.map((item) => (
                       <div key={item.id} className="py-3 first:pt-0 last:pb-0">
                         <div className="flex items-start justify-between gap-2.5">
-                          <span className="font-google-display text-[15px] font-medium text-[#202124]">
+                          <span className="font-google-display text-[15px] font-medium text-ink">
                             {item.itemSummaryText}
                           </span>
-                          <span className="rounded-[48px] bg-[#e8f0fe] px-2.5 py-0.5 text-xs font-medium text-[#1a73e8] tabular-nums-google shrink-0">
+                          <span className="rounded-[48px] bg-primary-soft px-2.5 py-0.5 text-xs font-medium text-primary-dark tabular-nums-google shrink-0">
                             ×{formatMilliUnitsToQtyString(item.quantityMilli).replace(/\.000$/, '')}
                           </span>
                         </div>
                         {item.modifiersSummaryText && (
-                          <div className="mt-1.5 rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] px-2.5 py-1 text-xs text-[#3c4043]">
+                          <div className="mt-1.5 rounded-[4px] border border-hairline bg-surface-1 px-2.5 py-1 text-xs text-ink-soft">
                             {item.modifiersSummaryText}
                           </div>
                         )}
@@ -285,12 +290,12 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                 </div>
 
                 {/* Canonical 48px-Pill Touch Bump Footer */}
-                <div className="p-4 bg-[#f8f9fa] border-t border-[#dadce0]">
+                <div className="p-4 bg-surface-1 border-t border-hairline">
                   {ticket.status === 'QUEUED' && (
                     <button
                       type="button"
                       onClick={() => void handleBump(ticket, 'PREPARING')}
-                      className="flex h-[48px] w-full items-center justify-center gap-2 rounded-[48px] border border-[#1a73e8] bg-white px-5 font-google-display text-sm font-medium tracking-[0.5px] text-[#1a73e8] hover:bg-[#e8f0fe] transition-colors cursor-pointer"
+                      className={`flex h-[48px] w-full items-center justify-center gap-2 rounded-[48px] border border-primary bg-canvas px-5 font-google-display text-sm font-medium tracking-[0.5px] text-primary hover:bg-primary-soft hover:text-primary-dark ${UI_INTERACTION.focusButtonPrimary}`}
                     >
                       <Flame className="h-4 w-4" />
                       <span>เริ่มทำออเดอร์ (Prepare)</span>
@@ -300,7 +305,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                     <button
                       type="button"
                       onClick={() => void handleBump(ticket, 'READY')}
-                      className="flex h-[48px] w-full items-center justify-center gap-2 rounded-[48px] bg-[#1a73e8] px-5 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] transition-colors cursor-pointer"
+                      className={`flex h-[48px] w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-5 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                     >
                       <CheckCircle2 className="h-4 w-4" />
                       <span>ทำเสร็จพร้อมเสิร์ฟ (Ready)</span>
@@ -310,14 +315,14 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                     <button
                       type="button"
                       onClick={() => void handleBump(ticket, 'SERVED')}
-                      className="flex h-[48px] w-full items-center justify-center gap-2 rounded-[48px] bg-[#202124] px-5 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-[#000000] transition-colors cursor-pointer"
+                      className={`flex h-[48px] w-full items-center justify-center gap-2 rounded-[48px] bg-ink px-5 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-hero ${UI_INTERACTION.focusButtonPrimary}`}
                     >
                       <CheckCircle2 className="h-4 w-4" />
                       <span>ส่งมอบลูกค้าแล้ว (Served)</span>
                     </button>
                   )}
                   {ticket.status === 'SERVED' && (
-                    <div className="text-center py-2 text-xs font-medium text-[#5f6368]">
+                    <div className="text-center py-2 text-xs font-medium text-ink-muted">
                       ส่งมอบลูกค้าเรียบร้อยแล้ว
                     </div>
                   )}

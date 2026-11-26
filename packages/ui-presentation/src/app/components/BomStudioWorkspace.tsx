@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useState } from 'react';
 import { GitBranch, Layers, Plus, ShieldAlert, Sparkles, Trash2 } from 'lucide-react';
 import {
   formatMicroBahtToThbString,
@@ -10,6 +10,7 @@ import {
 } from '../../../../shared-contracts/src/fixed-point.ts';
 import { posTransport } from '../api/pos-transport.ts';
 import type { BootstrapPayload, ComponentRole } from '../types.ts';
+import { ConfirmDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface BomStudioWorkspaceProps {
   bootstrap: BootstrapPayload;
@@ -59,6 +60,13 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
   const [edgeQtyInput, setEdgeQtyInput] = useState<string>('120.000');
   const [edgeWastagePctInput, setEdgeWastagePctInput] = useState<string>('2.00');
   const [cycleErrorAlert, setCycleErrorAlert] = useState<string | null>(null);
+
+  const uid = useId();
+  const [confirmDeleteComp, setConfirmDeleteComp] = useState<{
+    compId: string;
+    compName: string;
+  } | null>(null);
+  const [deletingEdge, setDeletingEdge] = useState(false);
 
   const catalogMap = useMemo(
     () => new Map(bootstrap.catalogDetailed.map((v) => [v.id, v])),
@@ -166,30 +174,31 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
     <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
       {/* LEFT: Recipe Parent Selector & DAG Edge Editor */}
       <div className="xl:col-span-7 space-y-5">
-        <div className="rounded-[4px] border border-[#dadce0] bg-white p-6 space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#dadce0] pb-5">
+        <div className="rounded-[4px] border border-hairline bg-canvas p-6 space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-hairline pb-5">
             <div className="flex items-start gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#e8f0fe] text-[#1a73e8]">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary-dark">
                 <GitBranch className="h-5 w-5" />
               </div>
               <div>
-                <h2 className="font-google-display text-[22px] font-normal leading-[28px] text-[#202124]">
+                <h2 className="font-google-display text-[22px] font-normal leading-[28px] text-ink">
                   สตูดิโอผูกสูตรการผลิตหลายระดับ (Multi-Level BOM DAG)
                 </h2>
-                <p className="text-xs text-[#5f6368] mt-1">
+                <p className="text-xs text-ink-muted mt-1">
                   ตรวจจับสูตรวนลูปด้วย DFS อัตโนมัติ (HTTP 422) พร้อมกฎหยุดแตกแขนงที่โหนดต้มล่วงหน้า
                 </p>
               </div>
             </div>
 
             <select
+              aria-label="เลือกเมนูผูกสูตร BOM"
               value={selectedParentId}
               disabled={compositeVariants.length === 0}
               onChange={(e) => {
                 setSelectedParentId(e.target.value);
                 setCycleErrorAlert(null);
               }}
-              className="h-11 rounded-[4px] border border-[#dadce0] bg-white px-3.5 text-xs font-medium text-[#202124] focus:border-[#1a73e8] focus:outline-none disabled:opacity-50 cursor-pointer"
+              className={`h-11 max-w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-xs font-medium text-ink ${UI_INTERACTION.focusSelect}`}
             >
               {compositeVariants.length === 0 ? (
                 <option value="">ยังไม่มีเมนูผูกสูตร BOM</option>
@@ -204,7 +213,7 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
           </div>
 
           {compositeVariants.length === 0 && (
-            <div className="rounded-[8px] bg-[#e8f0fe] p-4 text-xs text-[#202124]">
+            <div className="rounded-[8px] bg-primary-soft p-4 text-xs text-ink">
               ยังไม่มีเมนูที่เปิดใช้งาน <strong className="font-medium">ผูกสูตร BOM</strong> —
               กรุณาไปที่แท็บ <strong className="font-medium">&ldquo;คลังสินค้า &amp; PO&rdquo;</strong>{' '}
               เพื่อเพิ่มเมนูเครื่องดื่ม/อาหารหรือติ๊กเลือก &ldquo;ผูกสูตร BOM&rdquo; ก่อนกำหนดส่วนผสม
@@ -212,80 +221,86 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
           )}
 
           {cycleErrorAlert && (
-            <div className="rounded-[4px] border border-[#202124] bg-[#f8f9fa] p-4 flex items-start gap-3 text-xs text-[#202124]">
-              <ShieldAlert className="h-5 w-5 text-[#202124] shrink-0 mt-0.5" />
+            <div role="alert" className="rounded-[4px] border border-ink bg-surface-1 p-4 flex items-start gap-3 text-xs text-ink">
+              <ShieldAlert className="h-5 w-5 text-ink shrink-0 mt-0.5" />
               <div>
-                <div className="font-google-display text-sm font-medium text-[#202124]">
+                <div className="font-google-display text-sm font-medium text-ink">
                   บล็อกสูตรวนลูปอัตโนมัติ (Circular BOM Dependency Blocked)
                 </div>
-                <div className="mt-0.5 text-[#5f6368] tabular-nums-google">{cycleErrorAlert}</div>
+                <div className="mt-0.5 text-ink-muted tabular-nums-google">{cycleErrorAlert}</div>
               </div>
             </div>
           )}
 
           {/* Direct Ingredients Table */}
-          <div className="overflow-x-auto rounded-[4px] border border-[#dadce0]">
+          <div className="overflow-x-auto rounded-[4px] border border-hairline">
             <table className="w-full text-left text-xs">
-              <thead className="bg-[#f8f9fa] text-[#5f6368] font-medium border-b border-[#dadce0]">
+              <thead className="bg-surface-1 text-ink-muted font-medium border-b border-hairline">
                 <tr>
-                  <th className="py-3 px-4">วัตถุดิบ / ส่วนประกอบย่อย</th>
-                  <th className="py-3 px-4">บทบาท (Role)</th>
-                  <th className="py-3 px-4 text-right">ปริมาณต่อสูตร</th>
-                  <th className="py-3 px-4 text-right">เผื่อสูญเสีย</th>
-                  <th className="py-3 px-4 text-center">โหมดตัดสต็อก</th>
-                  <th className="py-3 px-4 text-right">ลบ</th>
+                  <th scope="col" className="py-3 px-4">วัตถุดิบ / ส่วนประกอบย่อย</th>
+                  <th scope="col" className="py-3 px-4">บทบาท (Role)</th>
+                  <th scope="col" className="py-3 px-4 text-right">ปริมาณต่อสูตร</th>
+                  <th scope="col" className="py-3 px-4 text-right">เผื่อสูญเสีย</th>
+                  <th scope="col" className="py-3 px-4 text-center">โหมดตัดสต็อก</th>
+                  <th scope="col" className="py-3 px-4 text-right">ลบ</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#dadce0] bg-white">
+              <tbody className="divide-y divide-hairline bg-canvas">
                 {directEdges.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-10 text-center text-[#5f6368]">
+                    <td colSpan={6} className="py-10 text-center text-ink-muted">
                       ยังไม่มีส่วนประกอบในสูตรนี้
                     </td>
                   </tr>
                 ) : (
                   directEdges.map((edge) => {
                     const child = catalogMap.get(edge.componentVariantId);
+                    const childName = child?.itemName ?? edge.componentVariantId;
                     return (
-                      <tr key={edge.componentVariantId} className="hover:bg-[#f8f9fa]">
+                      <tr key={edge.componentVariantId} className="hover:bg-surface-1 transition-colors duration-150">
                         <td className="py-3 px-4">
-                          <div className="font-google-display text-sm font-medium text-[#202124]">
-                            {child?.itemName ?? edge.componentVariantId}
+                          <div className="font-google-display text-sm font-medium text-ink">
+                            {childName}
                           </div>
-                          <div className="text-[11px] text-[#5f6368] tabular-nums-google">
+                          <div className="text-[11px] text-ink-muted tabular-nums-google">
                             {edge.componentVariantId}
                           </div>
                         </td>
                         <td className="py-3 px-4">
-                          <span className="rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] px-2 py-0.5 text-[11px] font-medium text-[#202124]">
+                          <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-[11px] font-medium text-ink">
                             {edge.componentRole}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-right text-[#202124] tabular-nums-google">
+                        <td className="py-3 px-4 text-right text-ink tabular-nums-google">
                           {formatMilliUnitsToQtyString(edge.quantityMilli, child?.unitName ?? '')}
                         </td>
-                        <td className="py-3 px-4 text-right text-[#5f6368] tabular-nums-google">
+                        <td className="py-3 px-4 text-right text-ink-muted tabular-nums-google">
                           {(edge.wastageBasisPoints / 100).toFixed(2)}%
                         </td>
                         <td className="py-3 px-4 text-center">
                           {child?.useProduction ? (
-                            <span className="rounded-[48px] bg-[#e8f0fe] px-2.5 py-0.5 text-[11px] font-medium text-[#1a73e8]">
+                            <span className="rounded-[48px] bg-primary-soft px-2.5 py-0.5 text-[11px] font-medium text-primary-dark">
                               หยุดที่ Pre-Built
                             </span>
                           ) : child?.isComposite ? (
-                            <span className="rounded-[48px] border border-[#1a73e8] px-2.5 py-0.5 text-[11px] font-medium text-[#1a73e8]">
+                            <span className="rounded-[48px] border border-primary px-2.5 py-0.5 text-[11px] font-medium text-primary-hover">
                               แตกแขนงต่อ
                             </span>
                           ) : (
-                            <span className="text-[11px] text-[#5f6368]">ตัดวัตถุดิบตรง</span>
+                            <span className="text-[11px] text-ink-muted">ตัดวัตถุดิบตรง</span>
                           )}
                         </td>
                         <td className="py-3 px-4 text-right">
                           <button
                             type="button"
-                            aria-label={`ลบ ${child?.itemName ?? edge.componentVariantId}`}
-                            onClick={() => void handleDeleteEdge(edge.componentVariantId)}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-full text-[#5f6368] hover:bg-[#f8f9fa] hover:text-[#202124] cursor-pointer"
+                            aria-label={`ลบ ${childName}`}
+                            onClick={() =>
+                              setConfirmDeleteComp({
+                                compId: edge.componentVariantId,
+                                compName: childName,
+                              })
+                            }
+                            className={`inline-flex h-8 w-8 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
                           >
                             <Trash2 className="h-4 w-4" />
                           </button>
@@ -299,10 +314,10 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
           </div>
 
           {/* Add / Update Edge Form */}
-          <div className="rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] p-5 space-y-4">
+          <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-google-display text-sm font-medium text-[#202124] flex items-center gap-1.5">
-                <Plus className="h-4 w-4 text-[#1a73e8]" />
+              <span className="font-google-display text-sm font-medium text-ink flex items-center gap-1.5">
+                <Plus className="h-4 w-4 text-primary" />
                 เพิ่มหรือปรับสัดส่วนวัตถุดิบในสูตร
               </span>
               <button
@@ -316,7 +331,7 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
                     wastageBasisPoints: 0,
                   })
                 }
-                className="rounded-[48px] border border-[#dadce0] bg-white px-3.5 py-1.5 text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] cursor-pointer"
+                className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
               >
                 ทดสอบจำลองสูตรวนลูป (Test DFS Guard)
               </button>
@@ -324,11 +339,14 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
 
             <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 text-xs">
               <div className="sm:col-span-5">
-                <label className="block text-[#5f6368] mb-1">เลือกวัตถุดิบ</label>
+                <label htmlFor={`${uid}-comp`} className="block text-ink-muted mb-1">
+                  เลือกวัตถุดิบ
+                </label>
                 <select
+                  id={`${uid}-comp`}
                   value={childVariantId}
                   onChange={(e) => setChildVariantId(e.target.value)}
-                  className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
                 >
                   {bootstrap.catalogDetailed
                     .filter((v) => v.id !== selectedParentId)
@@ -340,11 +358,14 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
                 </select>
               </div>
               <div className="sm:col-span-3">
-                <label className="block text-[#5f6368] mb-1">บทบาท (Role)</label>
+                <label htmlFor={`${uid}-role`} className="block text-ink-muted mb-1">
+                  บทบาท (Role)
+                </label>
                 <select
+                  id={`${uid}-role`}
                   value={edgeRole}
                   onChange={(e) => setEdgeRole(e.target.value as ComponentRole)}
-                  className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-[#202124] focus:border-[#1a73e8] focus:outline-none"
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
                 >
                   {COMPONENT_ROLES.map((r) => (
                     <option key={r} value={r}>
@@ -354,21 +375,27 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
                 </select>
               </div>
               <div className="sm:col-span-2">
-                <label className="block text-[#5f6368] mb-1">ปริมาณ</label>
+                <label htmlFor={`${uid}-qty`} className="block text-ink-muted mb-1">
+                  ปริมาณ
+                </label>
                 <input
+                  id={`${uid}-qty`}
                   type="text"
                   value={edgeQtyInput}
                   onChange={(e) => setEdgeQtyInput(e.target.value)}
-                  className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-right text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-right text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               </div>
               <div className="sm:col-span-2">
-                <label className="block text-[#5f6368] mb-1">สูญเสีย (%)</label>
+                <label htmlFor={`${uid}-waste`} className="block text-ink-muted mb-1">
+                  สูญเสีย (%)
+                </label>
                 <input
+                  id={`${uid}-waste`}
                   type="text"
                   value={edgeWastagePctInput}
                   onChange={(e) => setEdgeWastagePctInput(e.target.value)}
-                  className="h-11 w-full rounded-[4px] border border-[#dadce0] bg-white px-3 text-right text-[#202124] tabular-nums-google focus:border-[#1a73e8] focus:outline-none"
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-right text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               </div>
             </div>
@@ -377,7 +404,7 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
               type="button"
               disabled={!selectedParent || nonParentCatalog.length === 0}
               onClick={() => void handleUpsertEdge()}
-              className="h-[48px] w-full rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] disabled:opacity-40 transition-colors cursor-pointer"
+              className={`h-[48px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
               {selectedParent
                 ? `บันทึกส่วนประกอบเข้าสูตร ${selectedParent.itemName}`
@@ -388,43 +415,43 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
       </div>
 
       {/* RIGHT: Live Recipe Costing, Margin & Role-Modifier Simulator */}
-      <div className="xl:col-span-5 rounded-[4px] border border-[#dadce0] bg-white overflow-hidden">
+      <div className="xl:col-span-5 rounded-[4px] border border-hairline bg-canvas overflow-hidden">
         {/* Canonical Near-Black Hero KPI Band */}
-        <div className="bg-[#000000] p-6 text-white space-y-4">
-          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.5px] text-white/70">
-            <Layers className="h-4 w-4 text-[#1a73e8]" />
+        <div className="bg-hero p-6 text-white space-y-4">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.5px] text-white/75">
+            <Layers className="h-4 w-4 text-primary" />
             <span>Live COGS &amp; Gross Margin Simulator</span>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
-              <div className="text-xs text-white/65">ราคาขายรวม</div>
+              <div className="text-xs text-white/70">ราคาขายรวม</div>
               <div className="mt-1 font-google-display text-[26px] font-normal leading-[32px] tracking-[-0.25px] text-white tabular-nums-google">
                 ฿{formatSatangToThbString(sellingSatang)}
               </div>
             </div>
             <div>
-              <div className="text-xs text-white/65">ต้นทุนสูตร (COGS)</div>
+              <div className="text-xs text-white/70">ต้นทุนสูตร (COGS)</div>
               <div className="mt-1 font-google-display text-[26px] font-normal leading-[32px] tracking-[-0.25px] text-white tabular-nums-google">
                 ฿{formatMicroBahtToThbString(totalCogsMicroBaht)}
               </div>
             </div>
             <div>
-              <div className="text-xs text-white/65">กำไรขั้นต้น (GP)</div>
-              <div className="mt-1 font-google-display text-[26px] font-normal leading-[32px] tracking-[-0.25px] text-[#1a73e8] tabular-nums-google">
+              <div className="text-xs text-white/70">กำไรขั้นต้น (GP)</div>
+              <div className="mt-1 font-google-display text-[26px] font-normal leading-[32px] tracking-[-0.25px] text-primary tabular-nums-google">
                 {grossMarginPct}%
               </div>
             </div>
           </div>
         </div>
 
-        <div className="p-6 space-y-5 bg-white">
+        <div className="p-6 space-y-5 bg-canvas">
           <div>
-            <div className="font-google-display text-sm font-medium text-[#202124] mb-2">
+            <div className="font-google-display text-sm font-medium text-ink mb-2">
               ทดลองเลือกตัวเลือกเสริม (ความหวาน / ท็อปปิ้ง)
             </div>
             {bootstrap.modifiers.length === 0 ? (
-              <div className="rounded-[4px] border border-[#dadce0] bg-[#f8f9fa] px-3.5 py-2.5 text-xs text-[#5f6368]">
+              <div className="rounded-[4px] border border-hairline bg-surface-1 px-3.5 py-2.5 text-xs text-ink-muted">
                 ยังไม่มีตัวเลือกเสริม — สามารถเพิ่มได้ที่แท็บ &ldquo;คลังสินค้า &amp; PO → ตัวเลือกเสริม&rdquo;
               </div>
             ) : (
@@ -440,10 +467,10 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
                           prev.includes(mod.id) ? prev.filter((x) => x !== mod.id) : [...prev, mod.id]
                         )
                       }
-                      className={`min-h-[38px] rounded-[48px] border px-3.5 text-xs font-medium transition-colors cursor-pointer ${
+                      className={`min-h-[38px] rounded-[48px] border px-3.5 text-xs font-medium ${UI_INTERACTION.focusButton} ${
                         active
-                          ? 'border-[#1a73e8] bg-[#1a73e8] text-white'
-                          : 'border-[#dadce0] bg-white text-[#3c4043] hover:border-[#1a73e8] hover:text-[#1a73e8]'
+                          ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                          : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
                       }`}
                     >
                       {mod.name}
@@ -454,15 +481,15 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
             )}
           </div>
 
-          <div className="border-t border-[#dadce0] pt-4 space-y-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-[#5f6368]">
-              <Sparkles className="h-4 w-4 text-[#1a73e8]" />
+          <div className="border-t border-hairline pt-4 space-y-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-ink-muted">
+              <Sparkles className="h-4 w-4 text-primary" />
               <span>รายการวัตถุดิบที่จะถูกตัดออกจากคลังจริงเมื่อขาย 1 หน่วย</span>
             </div>
 
-            <div className="divide-y divide-[#dadce0] rounded-[4px] border border-[#dadce0]">
+            <div className="divide-y divide-hairline rounded-[4px] border border-hairline">
               {!simPreview || simPreview.deductions.length === 0 ? (
-                <div className="py-8 px-4 text-center text-xs text-[#5f6368]">
+                <div className="py-8 px-4 text-center text-xs text-ink-muted">
                   ยังไม่มีรายการวัตถุดิบที่จะถูกตัดสต็อกในสูตรนี้
                 </div>
               ) : (
@@ -471,21 +498,21 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
                   return (
                     <div
                       key={`${d.variantId}-${idx}`}
-                      className="px-4 py-3 flex items-center justify-between text-xs bg-white hover:bg-[#f8f9fa]"
+                      className="px-4 py-3 flex items-center justify-between text-xs bg-canvas hover:bg-surface-1 transition-colors duration-150"
                     >
                       <div>
-                        <div className="font-google-display text-sm font-medium text-[#202124]">
+                        <div className="font-google-display text-sm font-medium text-ink">
                           {v?.itemName ?? d.variantId}
                         </div>
-                        <div className="text-[11px] text-[#5f6368] tabular-nums-google">
+                        <div className="text-[11px] text-ink-muted tabular-nums-google">
                           {d.transactionType} · MAC ฿{formatMicroBahtToThbString(d.unitCostMicroBaht)}
                         </div>
                       </div>
                       <div className="text-right tabular-nums-google">
-                        <div className="font-google-display text-sm font-medium text-[#202124]">
+                        <div className="font-google-display text-sm font-medium text-ink">
                           {formatMilliUnitsToQtyString(d.quantityChangeMilli, v?.unitName ?? '')}
                         </div>
-                        <div className="text-[11px] text-[#1a73e8]">
+                        <div className="text-[11px] text-primary-hover">
                           ทุน ฿{formatMicroBahtToThbString(d.lineCogsMicroBaht)}
                         </div>
                       </div>
@@ -497,6 +524,26 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={Boolean(confirmDeleteComp)}
+        title={`ลบส่วนประกอบ "${confirmDeleteComp?.compName ?? ''}" ออกจากสูตร?`}
+        description="การลบส่วนประกอบจะมีผลต่อการคำนวณต้นทุน COGS และการตัดสต็อกวัตถุดิบสำหรับการขายครั้งถัดไป"
+        confirmLabel="ยืนยันลบส่วนประกอบ"
+        tone="danger"
+        busy={deletingEdge}
+        onCancel={() => {
+          if (!deletingEdge) setConfirmDeleteComp(null);
+        }}
+        onConfirm={() => {
+          if (!confirmDeleteComp) return;
+          setDeletingEdge(true);
+          void handleDeleteEdge(confirmDeleteComp.compId).finally(() => {
+            setDeletingEdge(false);
+            setConfirmDeleteComp(null);
+          });
+        }}
+      />
     </div>
   );
 };

@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle,
+  CheckCircle2,
   Cpu,
   Lock,
   Printer,
   RefreshCw,
   ShieldCheck,
   Wallet,
+  XCircle,
 } from 'lucide-react';
 import { parseScaleBarcodeEan13 } from '../../../hal-drivers/src/scanner/mod.ts';
 import {
@@ -22,6 +24,7 @@ import { PinLockModal } from './components/PinLockModal.tsx';
 import { PosRegisterWorkspace } from './components/PosRegisterWorkspace.tsx';
 import { ShiftAndReportsWorkspace } from './components/ShiftAndReportsWorkspace.tsx';
 import { SystemSettingsWorkspace } from './components/SystemSettingsWorkspace.tsx';
+import { UI_INTERACTION } from './components/ui/UiPrimitives.tsx';
 import { WarehouseWorkspace } from './components/WarehouseWorkspace.tsx';
 import { useGlobalBarcodeScanner } from './hooks/useGlobalBarcodeScanner.ts';
 import type {
@@ -231,17 +234,17 @@ export const App: React.FC = () => {
 
   if (bootError) {
     return (
-      <div className="min-h-screen bg-white text-[#202124] flex items-center justify-center p-6">
-        <div className="max-w-md w-full rounded-[8px] border border-[#dadce0] bg-white p-8 space-y-4 text-center">
-          <AlertTriangle className="h-10 w-10 text-[#1a73e8] mx-auto" />
+      <div className="min-h-screen bg-canvas text-ink flex items-center justify-center p-6">
+        <div className="max-w-md w-full rounded-[8px] border border-hairline bg-canvas p-8 space-y-4 text-center">
+          <AlertTriangle className="h-10 w-10 text-primary mx-auto" />
           <h1 className="font-google-display text-[24px] font-normal">
             ไม่สามารถเชื่อมต่อฐานข้อมูลท้องถิ่นได้
           </h1>
-          <p className="text-sm text-[#5f6368]">{bootError}</p>
+          <p className="text-sm text-ink-muted">{bootError}</p>
           <button
             type="button"
             onClick={() => void refreshBootstrap()}
-            className="h-[50px] rounded-[48px] bg-[#1a73e8] px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-[#1967d2] cursor-pointer"
+            className={`h-[50px] rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
           >
             ลองเชื่อมต่อใหม่
           </button>
@@ -252,9 +255,9 @@ export const App: React.FC = () => {
 
   if (!bootstrap) {
     return (
-      <div className="min-h-screen bg-white text-[#5f6368] flex items-center justify-center">
+      <div className="min-h-screen bg-canvas text-ink-muted flex items-center justify-center">
         <div className="flex items-center gap-3 font-google-display text-base">
-          <RefreshCw className="h-5 w-5 animate-spin text-[#1a73e8]" />
+          <RefreshCw className="h-5 w-5 animate-spin text-primary" />
           กำลังโหลดระบบ RUBE-STOCK-POS v3.1...
         </div>
       </div>
@@ -331,110 +334,115 @@ export const App: React.FC = () => {
   ];
 
   return (
-    <div className="min-h-screen flex flex-col bg-white text-[#202124]">
-      {/* Emergency UPS Power-Loss Banner */}
-      {bootstrap.upsBanner.visible && (
-        <div className="bg-[#000000] text-white px-6 py-2.5 text-xs font-medium flex items-center justify-center gap-2 border-b border-[#dadce0]">
-          <AlertTriangle className="h-4 w-4 text-[#1a73e8] shrink-0" />
-          <span>{bootstrap.upsBanner.headlineThai}</span>
-        </div>
-      )}
-
-      {/* Canonical Google `top-nav`: 64px height, pure #ffffff surface, 24px horizontal padding, 1px #dadce0 bottom hairline */}
-      <header className="sticky top-0 z-30 h-16 border-b border-[#dadce0] bg-white px-4 lg:px-6 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-6 h-full min-w-0">
-          {/* Brand Wordmark + Single Reserved Four-Color Mark */}
-          <button
-            type="button"
-            onClick={() => setActiveTab('POS')}
-            className="flex items-center gap-2.5 shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] rounded-[4px]"
+    <div className="min-h-screen flex flex-col bg-canvas text-ink">
+      {/* Sticky Top Chrome Wrapper (keeps UPS Power-Loss Banner + Top Nav visible without hiding content) */}
+      <div className="sticky top-0 z-30">
+        {bootstrap.upsBanner.visible && (
+          <div
+            role="alert"
+            className="bg-hero text-white px-4 lg:px-6 py-2.5 text-xs font-medium flex items-center justify-center gap-2 border-b border-hairline"
           >
-            <ReservedFourColorBrandMark />
-            <div className="text-left">
-              <div className="font-google-display text-[18px] font-medium tracking-[-0.25px] text-[#202124] leading-tight">
-                RUBE POS
-              </div>
-              <div className="text-[11px] text-[#5f6368] leading-none">
-                {bootstrap.profile} · v3.1
-              </div>
-            </div>
-          </button>
+            <AlertTriangle className="h-4 w-4 text-primary shrink-0" />
+            <span>{bootstrap.upsBanner.headlineThai}</span>
+          </div>
+        )}
 
-          {/* Canonical `nav-link` Rail: 16px / 500 / 0.25px, 4px #1a73e8 active underline */}
-          <nav className="hidden md:flex items-center gap-1 h-full overflow-x-auto" aria-label="เมนูหลัก">
-            {navItems
-              .filter((n) => !n.hidden)
-              .map((item) => {
-                const active = activeTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => setActiveTab(item.id)}
-                    className={`relative flex h-full items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap transition-colors duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a73e8] ${
-                      active
-                        ? 'text-[#202124]'
-                        : 'text-[#5f6368] hover:text-[#202124]'
-                    }`}
-                  >
-                    <span>{item.label}</span>
-                    {item.badge !== undefined && (
-                      <span className="rounded-[48px] bg-[#1a73e8] px-2 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
-                        {item.badge}
-                      </span>
-                    )}
-                    {active && (
-                      <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-[#1a73e8]" />
-                    )}
-                  </button>
-                );
-              })}
-          </nav>
-        </div>
-
-        {/* Right-Aligned Hairline Pill Controls */}
-        <div className="flex items-center gap-2 shrink-0">
-          {bootstrap.activeShift && (
+        {/* Canonical Google `top-nav`: 64px height, pure #ffffff surface, 24px horizontal padding, 1px #dadce0 bottom hairline */}
+        <header className="h-16 border-b border-hairline bg-canvas px-4 lg:px-6 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-4 lg:gap-6 h-full min-w-0">
+            {/* Brand Wordmark + Single Reserved Four-Color Mark */}
             <button
               type="button"
-              onClick={() => setActiveTab('SHIFTS_REPORTS')}
-              className="hidden xl:flex h-10 items-center gap-2 rounded-[48px] border border-[#dadce0] bg-white px-4 text-xs text-[#3c4043] hover:border-[#1a73e8] hover:text-[#1a73e8] transition-colors cursor-pointer"
+              onClick={() => setActiveTab('POS')}
+              className={`flex items-center gap-2.5 shrink-0 rounded-[4px] hover:opacity-85 ${UI_INTERACTION.focusButton}`}
             >
-              <Wallet className="h-3.5 w-3.5 text-[#1a73e8]" />
-              <span>{bootstrap.activeShift.shiftNumber}:</span>
-              <strong className="font-medium text-[#202124] tabular-nums-google">
-                ฿{formatSatangToThbString(bootstrap.activeShift.expectedCashSatang)}
-              </strong>
+              <ReservedFourColorBrandMark />
+              <div className="text-left">
+                <div className="font-google-display text-[18px] font-medium tracking-[-0.25px] text-ink leading-tight">
+                  RUBE POS
+                </div>
+                <div className="text-[11px] text-ink-muted leading-none">
+                  {bootstrap.profile} · v3.1
+                </div>
+              </div>
             </button>
-          )}
 
-          <button
-            type="button"
-            onClick={() => setHilDrawerOpen(true)}
-            className="flex h-10 items-center gap-1.5 rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#1a73e8] hover:border-[#1a73e8] hover:bg-[#f8f9fa] transition-colors cursor-pointer"
-          >
-            <Cpu className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">HIL Bench</span>
-            {!bootstrap.printer.ready && (
-              <span className="rounded-[48px] bg-[#202124] px-1.5 py-0.5 text-[10px] text-white">
-                คิว {bootstrap.printer.pendingQueueLength}
-              </span>
+            {/* Canonical `nav-link` Rail: 16px / 500 / 0.25px, 4px #1a73e8 active underline */}
+            <nav className="hidden md:flex items-center gap-1 h-full overflow-x-auto" aria-label="เมนูหลัก">
+              {navItems
+                .filter((n) => !n.hidden)
+                .map((item) => {
+                  const active = activeTab === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setActiveTab(item.id)}
+                      className={`relative flex h-full items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                        active ? 'text-ink' : 'text-ink-muted hover:text-ink'
+                      }`}
+                    >
+                      <span>{item.label}</span>
+                      {item.badge !== undefined && (
+                        <span className="rounded-[48px] bg-primary px-2 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
+                          {item.badge}
+                        </span>
+                      )}
+                      {active && (
+                        <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
+                      )}
+                    </button>
+                  );
+                })}
+            </nav>
+          </div>
+
+          {/* Right-Aligned Hairline Pill Controls */}
+          <div className="flex items-center gap-2 shrink-0">
+            {bootstrap.activeShift && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('SHIFTS_REPORTS')}
+                className={`hidden xl:flex h-10 items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-4 text-xs text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+              >
+                <Wallet className="h-3.5 w-3.5 text-primary" />
+                <span>{bootstrap.activeShift.shiftNumber}:</span>
+                <strong className="font-medium text-ink tabular-nums-google">
+                  ฿{formatSatangToThbString(bootstrap.activeShift.expectedCashSatang)}
+                </strong>
+              </button>
             )}
-          </button>
 
-          <button
-            type="button"
-            onClick={() => setPinModalOpen(true)}
-            className="flex h-10 items-center gap-2 rounded-[48px] border border-[#dadce0] bg-white px-4 font-google-display text-xs font-medium text-[#202124] hover:border-[#1a73e8] transition-colors cursor-pointer"
-          >
-            <Lock className="h-3.5 w-3.5 text-[#1a73e8]" />
-            <span className="max-w-[120px] truncate">{activeUser.displayName}</span>
-          </button>
-        </div>
-      </header>
+            <button
+              type="button"
+              onClick={() => setHilDrawerOpen(true)}
+              aria-label="เปิดแผงจำลองฮาร์ดแวร์ HIL Bench"
+              className={`flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 sm:px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+            >
+              <Cpu className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">HIL Bench</span>
+              {!bootstrap.printer.ready && (
+                <span className="rounded-[48px] bg-ink px-1.5 py-0.5 text-[10px] text-white">
+                  คิว {bootstrap.printer.pendingQueueLength}
+                </span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setPinModalOpen(true)}
+              aria-label={`สลับผู้ใช้งาน (ปัจจุบัน: ${activeUser.displayName})`}
+              className={`flex h-10 items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-3 sm:px-4 font-google-display text-xs font-medium text-ink hover:border-primary ${UI_INTERACTION.focusButton}`}
+            >
+              <Lock className="h-3.5 w-3.5 text-primary shrink-0" />
+              <span className="max-w-[96px] sm:max-w-[120px] truncate">{activeUser.displayName}</span>
+            </button>
+          </div>
+        </header>
+      </div>
 
       {/* Mobile Nav Fallback (< md) */}
-      <nav className="md:hidden flex items-center gap-1 overflow-x-auto border-b border-[#dadce0] bg-white px-4">
+      <nav className="md:hidden flex items-center gap-1 overflow-x-auto border-b border-hairline bg-canvas px-4" aria-label="เมนูหลักมือถือ">
         {navItems
           .filter((n) => !n.hidden)
           .map((item) => {
@@ -444,13 +452,18 @@ export const App: React.FC = () => {
                 key={item.id}
                 type="button"
                 onClick={() => setActiveTab(item.id)}
-                className={`relative flex h-11 items-center gap-1.5 px-3 font-google-display text-xs font-medium whitespace-nowrap cursor-pointer ${
-                  active ? 'text-[#202124]' : 'text-[#5f6368]'
+                className={`relative flex h-11 items-center gap-1.5 px-3 font-google-display text-xs font-medium whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                  active ? 'text-ink' : 'text-ink-muted hover:text-ink'
                 }`}
               >
                 <span>{item.label}</span>
+                {item.badge !== undefined && (
+                  <span className="rounded-[48px] bg-primary px-1.5 py-0.5 text-[10px] font-medium text-white tabular-nums-google">
+                    {item.badge}
+                  </span>
+                )}
                 {active && (
-                  <span className="absolute bottom-0 left-0 right-0 h-[3px] bg-[#1a73e8]" />
+                  <span className="absolute bottom-0 left-0 right-0 h-[3px] bg-primary" />
                 )}
               </button>
             );
@@ -458,7 +471,7 @@ export const App: React.FC = () => {
       </nav>
 
       {/* Main Content Canvas: Pure #ffffff across the entire application */}
-      <main className="flex-1 w-full bg-white text-[#202124]">
+      <main className="flex-1 w-full bg-canvas text-ink">
         <div className="max-w-[1440px] w-full mx-auto px-4 lg:px-6 py-6">
           {activeTab === 'POS' && (
             <PosRegisterWorkspace
@@ -523,21 +536,21 @@ export const App: React.FC = () => {
       </main>
 
       {/* Canonical Google Soft-Gray Footer (`#f8f9fa` surface-1, `#5f6368` ink-muted) */}
-      <footer className="border-t border-[#dadce0] bg-[#f8f9fa] px-6 py-4 text-xs text-[#5f6368]">
+      <footer className="border-t border-hairline bg-surface-1 px-4 lg:px-6 py-4 text-xs text-ink-muted">
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-4">
-            <span className="font-medium text-[#202124]">{bootstrap.storeSettings.storeName}</span>
+            <span className="font-medium text-ink">{bootstrap.storeSettings.storeName}</span>
             <span>เลขผู้เสียภาษี {bootstrap.storeSettings.taxId}</span>
-            <span className="inline-flex items-center gap-1 text-[#3c4043]">
-              <ShieldCheck className="h-3.5 w-3.5 text-[#1a73e8]" />
+            <span className="inline-flex items-center gap-1 text-ink-soft">
+              <ShieldCheck className="h-3.5 w-3.5 text-primary" />
               Ledger Invariant: {bootstrap.ledgerInvariant.valid ? '100% ตรงตามสมการบัญชี' : 'ตรวจสอบพบความต่าง'}
             </span>
-            <span className="inline-flex items-center gap-1 text-[#3c4043]">
-              <Printer className="h-3.5 w-3.5 text-[#1a73e8]" />
+            <span className="inline-flex items-center gap-1 text-ink-soft">
+              <Printer className="h-3.5 w-3.5 text-primary" />
               เครื่องพิมพ์ ({bootstrap.printerConfig.paperWidthMm}mm): {bootstrap.printer.ready ? 'พร้อมใช้งาน' : `ค้างคิว ${bootstrap.printer.pendingQueueLength} ใบ`}
             </span>
           </div>
-          <div className="hidden lg:block text-[#5f6368]">
+          <div className="hidden lg:block text-ink-muted">
             คีย์ลัด: F2 ค้นหา · F4 ตัวคูณ · F8 พักบิล · F9 ส่วนลด · F10 แยกจ่าย/เลือกชำระ · F12 รับเงินสดด่วน
           </div>
         </div>
@@ -570,20 +583,38 @@ export const App: React.FC = () => {
         onToast={pushToast}
       />
 
-      {/* Clean Hairline Toast Notifications */}
-      <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-w-md pointer-events-none">
+      {/* Accessible Hairline Toast Notifications with distinct Icons + aria-live */}
+      <div
+        role="region"
+        aria-label="การแจ้งเตือนระบบ"
+        aria-live="polite"
+        className="fixed bottom-5 left-4 right-4 sm:left-auto sm:right-5 z-50 flex flex-col gap-2 sm:max-w-md pointer-events-none"
+      >
         {toasts.map((t) => (
           <div
             key={t.id}
-            className={`pointer-events-auto rounded-[4px] border px-4 py-3 text-sm font-medium transition-colors ${
+            role={t.tone === 'error' ? 'alert' : 'status'}
+            className={`pointer-events-auto rounded-[4px] border px-4 py-3 text-sm font-medium transition-colors duration-200 ${
               t.tone === 'error'
-                ? 'border-[#202124] bg-[#202124] text-white'
-                : 'border-[#dadce0] bg-white text-[#202124]'
+                ? 'border-ink bg-ink text-white'
+                : t.tone === 'warn'
+                  ? 'border-ink bg-primary-soft text-ink'
+                  : 'border-hairline bg-canvas text-ink'
             }`}
           >
-            <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-[#1a73e8] shrink-0" />
-              <span>{t.message}</span>
+            <div className="flex items-start gap-2.5">
+              {t.tone === 'error' ? (
+                <XCircle className="h-4 w-4 text-white shrink-0 mt-0.5" aria-hidden="true" />
+              ) : t.tone === 'warn' ? (
+                <AlertTriangle className="h-4 w-4 text-primary-dark shrink-0 mt-0.5" aria-hidden="true" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4 text-primary shrink-0 mt-0.5" aria-hidden="true" />
+              )}
+              <span className="leading-snug">
+                {t.tone === 'warn' && <strong className="font-medium mr-1">แจ้งเตือน:</strong>}
+                {t.tone === 'error' && <strong className="font-medium mr-1">ข้อผิดพลาด:</strong>}
+                {t.message}
+              </span>
             </div>
           </div>
         ))}

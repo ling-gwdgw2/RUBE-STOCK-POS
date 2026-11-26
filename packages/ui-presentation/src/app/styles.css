@@ -1,10 +1,25 @@
 @import "tailwindcss";
 
+@theme {
+  --color-primary: #1a73e8;
+  --color-primary-hover: #1967d2;
+  --color-primary-dark: #174ea6;
+  --color-primary-soft: #e8f0fe;
+  --color-ink: #202124;
+  --color-ink-soft: #3c4043;
+  --color-ink-muted: #5f6368;
+  --color-hairline: #dadce0;
+  --color-surface-1: #f8f9fa;
+  --color-canvas: #ffffff;
+  --color-hero: #000000;
+}
+
 @layer base {
   :root {
     /* Canonical Google Design System (--glue-*) Tokens from google.design.md */
     --glue-blue-600: #1a73e8;
     --glue-blue-700: #1967d2;
+    --glue-blue-900: #174ea6;
     --glue-blue-50: #e8f0fe;
     --glue-red-500: #ea4335;
     --glue-yellow-500: #fbbc04;
@@ -12,8 +27,7 @@
 
     --glue-grey-900: #202124; /* ink */
     --glue-grey-800: #3c4043; /* ink-soft */
-    --glue-grey-700: #5f6368; /* ink-muted */
-    --glue-grey-600: #80868b; /* ink-quiet */
+    --glue-grey-700: #5f6368; /* ink-muted (6.05:1 on white) */
     --glue-grey-300: #dadce0; /* hairline */
     --glue-grey-100: #f8f9fa; /* surface-1 */
     --glue-grey-0: #ffffff;   /* canvas */
@@ -29,8 +43,8 @@
 
   body {
     margin: 0;
-    background-color: #ffffff;
-    color: #202124;
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
     overflow-x: hidden;
   }
 }
@@ -78,7 +92,7 @@
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #80868b;
+  background: var(--color-ink-muted);
 }
 
 /* 80mm Thermal Receipt Surface (Zero Drop Shadow, 1px Hairline) */
