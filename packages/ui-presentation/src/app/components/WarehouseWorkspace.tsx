@@ -1,19 +1,27 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeftRight,
   Boxes,
+  Camera,
   CheckCircle2,
   ClipboardCheck,
   Factory,
   FileSpreadsheet,
+  FolderPlus,
+  ImagePlus,
   PackagePlus,
   Plus,
+  RefreshCw,
+  ScanBarcode,
   Search,
   ShieldCheck,
   SlidersHorizontal,
+  Store,
+  Tag,
   Trash2,
   Truck,
+  Upload,
   X,
 } from 'lucide-react';
 import {
@@ -22,16 +30,31 @@ import {
   formatSatangToThbString,
   parseDecimalStringToScaledInt,
 } from '../../../../shared-contracts/src/fixed-point.ts';
-import { posTransport } from '../api/pos-transport.ts';
+import { PhysicalScannerStreamBuffer } from '../../hooks/usePhysicalScanner.ts';
+import { posTransport, resolveBackendAssetUrl } from '../api/pos-transport.ts';
 import type {
   BootstrapPayload,
   CatalogVariantDetailDto,
+  CategoryDto,
   ComponentRole,
   StaffUserDto,
 } from '../types.ts';
+import { compressImageFileToDataUrl } from '../utils/image-helper.ts';
+import {
+  getCategoriesForProfile,
+  getCategoryDepartment,
+  getDefaultCategoryForProfile,
+  getDepartmentStationPreset,
+  getDepartmentThaiLabel,
+  getProfileMeta,
+  isVariantInProfileDomain,
+  type ShopCategoryDepartment,
+} from '../utils/profile-domain.ts';
+import { BarcodeCameraScannerModal } from './BarcodeCameraScannerModal.tsx';
 import { ConfirmDialog, ModalDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface WarehouseWorkspaceProps {
+  outletId?: string;
   bootstrap: BootstrapPayload;
   currentUser: StaffUserDto;
   onRefreshState: () => Promise<void>;
@@ -40,6 +63,7 @@ interface WarehouseWorkspaceProps {
 
 type WmsSubTab =
   | 'CATALOG'
+  | 'CATEGORIES'
   | 'MODIFIERS'
   | 'PO_LANDED'
   | 'PREP_BUILD'
@@ -47,6 +71,7 @@ type WmsSubTab =
   | 'LEDGER';
 
 export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
+  outletId = 'OUTLET-HQ',
   bootstrap,
   currentUser,
   onRefreshState,
@@ -55,6 +80,11 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   const uid = useId();
   const [subTab, setSubTab] = useState<WmsSubTab>('CATALOG');
   const [catalogSearch, setCatalogSearch] = useState('');
+  const [warehouseScanInput, setWarehouseScanInput] = useState('');
+  const [catalogFilterMode, setCatalogFilterMode] = useState<'ALL' | 'LOW_STOCK' | 'PAUSED'>(
+    'ALL'
+  );
+  const [showOtherProfileItems, setShowOtherProfileItems] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmDeleteMod, setConfirmDeleteMod] = useState<{
     kind: 'group' | 'item';
@@ -62,6 +92,27 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     name: string;
   } | null>(null);
   const [deletingMod, setDeletingMod] = useState(false);
+  const [confirmDeleteVariant, setConfirmDeleteVariant] = useState<CatalogVariantDetailDto | null>(
+    null
+  );
+  const [deletingVariant, setDeletingVariant] = useState(false);
+  const [confirmDeleteCategory, setConfirmDeleteCategory] = useState<CategoryDto | null>(null);
+  const [deletingCategory, setDeletingCategory] = useState(false);
+
+  // Camera Scanner Modal (shared for Barcode scanning & Product Photo capture)
+  const [cameraModal, setCameraModal] = useState<{
+    mode: 'BARCODE' | 'PHOTO';
+    target: 'CATALOG_SCAN' | 'MODAL_BARCODE' | 'MODAL_PHOTO';
+  } | null>(null);
+
+  // Category CRUD Form State
+  const [catEditingId, setCatEditingId] = useState<string | null>(null);
+  const [catNameInput, setCatNameInput] = useState('');
+  const [catDeptInput, setCatDeptInput] = useState<ShopCategoryDepartment>(
+    bootstrap.profile === 'HOSPITALITY' ? 'HOSPITALITY' : 'RETAIL'
+  );
+  const [inlineCatOpen, setInlineCatOpen] = useState(false);
+  const [inlineCatName, setInlineCatName] = useState('');
 
   // Catalog Create/Edit Modal
   const [productModalOpen, setProductModalOpen] = useState(false);
@@ -69,15 +120,33 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   const [prodName, setProdName] = useState('');
   const [prodSku, setProdSku] = useState('');
   const [prodBarcode, setProdBarcode] = useState('');
-  const [prodCategoryId, setProdCategoryId] = useState('CAT-RETAIL');
-  const [prodUnit, setProdUnit] = useState('ชิ้น');
+  const [prodCategoryId, setProdCategoryId] = useState(
+    getDefaultCategoryForProfile(bootstrap.categories, bootstrap.profile)?.id ?? 'CAT-RETAIL'
+  );
+  const [prodUnit, setProdUnit] = useState(getProfileMeta(bootstrap.profile).defaultUnit);
   const [prodPriceBaht, setProdPriceBaht] = useState('45.00');
   const [prodCostBaht, setProdCostBaht] = useState('22.0000');
-  const [prodInitStock, setProdInitStock] = useState('50.000');
-  const [prodLowStock, setProdLowStock] = useState('10.000');
+  const [prodInitStock, setProdInitStock] = useState('20.000');
+  const [prodLowStock, setProdLowStock] = useState('5.000');
   const [prodIsComposite, setProdIsComposite] = useState(false);
   const [prodUseProduction, setProdUseProduction] = useState(false);
   const [prodIsScale, setProdIsScale] = useState(false);
+  const [prodActive, setProdActive] = useState(true);
+  const [prodImagePreviewUrl, setProdImagePreviewUrl] = useState<string | null>(null);
+  const [prodImagePendingDataUrl, setProdImagePendingDataUrl] = useState<
+    string | null | undefined
+  >(undefined);
+  const prodNameInputRef = useRef<HTMLInputElement | null>(null);
+  const prodImageFileInputRef = useRef<HTMLInputElement | null>(null);
+  const whScannerBufferRef = useRef<PhysicalScannerStreamBuffer>(
+    new PhysicalScannerStreamBuffer(50, 5)
+  );
+  const whFirstKeySnapshotRef = useRef<{
+    el: HTMLInputElement;
+    value: string;
+    selStart: number | null;
+    selEnd: number | null;
+  } | null>(null);
 
   // Quick Stock Adjustment Modal
   const [adjTarget, setAdjTarget] = useState<CatalogVariantDetailDto | null>(null);
@@ -274,40 +343,72 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
 
   useEffect(() => {
     if (subTab === 'PO_LANDED') {
-      void posTransport.listPoHistory().then((r) => setPoHistory(r.purchaseOrders));
+      void posTransport.listPoHistory(outletId).then((r) => setPoHistory(r.purchaseOrders));
     } else if (subTab === 'STOCKTAKE_TRANSFER') {
       void posTransport.listTransfers().then((r) => {
         setTransfersList(r.transfers);
-        const secondary = r.outlets.find((o) => o.id !== 'OUTLET-HQ');
-        if (secondary && !trDestOutletId) {
+        const secondary = r.outlets.find((o) => o.id !== outletId);
+        if (secondary && (!trDestOutletId || trDestOutletId === outletId)) {
           setTrDestOutletId(secondary.id);
         }
       });
     } else if (subTab === 'LEDGER') {
       void posTransport
-        .listInventoryLedger('OUTLET-HQ', ledgerVariantFilter || undefined)
+        .listInventoryLedger(outletId, ledgerVariantFilter || undefined)
         .then((r) => setLedgerRows(r.ledger));
     }
-  }, [subTab, ledgerVariantFilter, trDestOutletId]);
+  }, [subTab, ledgerVariantFilter, outletId, trDestOutletId]);
 
-  const openCreateProductModal = () => {
-    setEditingVariantId(undefined);
-    setProdName('');
-    setProdSku(`SKU-${Date.now().toString().slice(-5)}`);
-    setProdBarcode(`885999${Date.now().toString().slice(-7)}`);
-    setProdCategoryId(bootstrap.categories[0]?.id ?? 'CAT-RETAIL');
-    setProdUnit('ชิ้น');
-    setProdPriceBaht('55.00');
-    setProdCostBaht('25.0000');
-    setProdInitStock('20.000');
-    setProdLowStock('5.000');
-    setProdIsComposite(false);
-    setProdUseProduction(false);
-    setProdIsScale(false);
-    setProductModalOpen(true);
-  };
+  const profileMeta = useMemo(() => getProfileMeta(bootstrap.profile), [bootstrap.profile]);
+  const profileWarehouseCategories = useMemo(
+    () => getCategoriesForProfile(bootstrap.categories, bootstrap.profile, 'WAREHOUSE'),
+    [bootstrap.categories, bootstrap.profile]
+  );
 
-  const openEditProductModal = (v: CatalogVariantDetailDto) => {
+  // Ensure sub-tab stays valid when switching between RETAIL and HOSPITALITY
+  useEffect(() => {
+    if (
+      bootstrap.profile === 'RETAIL' &&
+      (subTab === 'MODIFIERS' || subTab === 'PREP_BUILD')
+    ) {
+      setSubTab('CATALOG');
+    }
+    setCatDeptInput(bootstrap.profile === 'HOSPITALITY' ? 'HOSPITALITY' : 'RETAIL');
+  }, [bootstrap.profile, subTab]);
+
+  const openCreateProductModal = useCallback(
+    (prefillBarcode = '') => {
+      const defaultCat = getDefaultCategoryForProfile(bootstrap.categories, bootstrap.profile);
+      const cleanBarcode = prefillBarcode.trim();
+      setEditingVariantId(undefined);
+      setProdName('');
+      setProdSku(
+        cleanBarcode
+          ? `SKU-${cleanBarcode.slice(-6)}`
+          : `SKU-${Date.now().toString().slice(-5)}`
+      );
+      setProdBarcode(cleanBarcode);
+      setProdCategoryId(defaultCat?.id ?? bootstrap.categories[0]?.id ?? 'CAT-RETAIL');
+      setProdUnit(getProfileMeta(bootstrap.profile).defaultUnit);
+      setProdPriceBaht('55.00');
+      setProdCostBaht('25.0000');
+      setProdInitStock('20.000');
+      setProdLowStock('5.000');
+      setProdIsComposite(false);
+      setProdUseProduction(false);
+      setProdIsScale(false);
+      setProdActive(true);
+      setProdImagePreviewUrl(null);
+      setProdImagePendingDataUrl(undefined);
+      setInlineCatOpen(false);
+      setInlineCatName('');
+      setProductModalOpen(true);
+      window.setTimeout(() => prodNameInputRef.current?.focus(), 60);
+    },
+    [bootstrap.categories, bootstrap.profile]
+  );
+
+  const openEditProductModal = useCallback((v: CatalogVariantDetailDto) => {
     setEditingVariantId(v.id);
     setProdName(v.itemName);
     setProdSku(v.sku);
@@ -321,8 +422,178 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     setProdIsComposite(v.isComposite);
     setProdUseProduction(v.useProduction);
     setProdIsScale(v.isWeightedScale);
+    setProdActive(v.active);
+    setProdImagePreviewUrl(resolveBackendAssetUrl(v.imageUrl));
+    setProdImagePendingDataUrl(undefined);
+    setInlineCatOpen(false);
+    setInlineCatName('');
     setProductModalOpen(true);
-  };
+  }, []);
+
+  const handleWarehouseBarcodeLookupOrCreate = useCallback(
+    (rawCode: string) => {
+      const code = rawCode.trim();
+      if (!code) return;
+      const matched = bootstrap.catalogDetailed.find(
+        (v) => v.barcode === code || v.sku.toLowerCase() === code.toLowerCase()
+      );
+      if (matched) {
+        openEditProductModal(matched);
+        onToast(
+          `พบบาร์โค้ด "${code}" (${matched.itemName}) — เปิดหน้าแก้ไขสินค้าแล้ว`,
+          'success'
+        );
+      } else {
+        openCreateProductModal(code);
+        onToast(
+          `ยังไม่พบบาร์โค้ด "${code}" ในระบบ — เปิดฟอร์มเพิ่มสินค้าใหม่พร้อมใส่บาร์โค้ดให้แล้ว`,
+          'success'
+        );
+      }
+      setWarehouseScanInput('');
+    },
+    [bootstrap.catalogDetailed, onToast, openCreateProductModal, openEditProductModal]
+  );
+
+  // Dedicated USB/Bluetooth Physical Barcode Gun Listener inside Warehouse Catalog & Add/Edit Product Modal
+  useEffect(() => {
+    whFirstKeySnapshotRef.current = null;
+    if (cameraModal || confirmDeleteVariant || confirmDeleteCategory || confirmDeleteMod || adjTarget) {
+      return;
+    }
+    const listenInModal = productModalOpen;
+    const listenInCatalog = !productModalOpen && subTab === 'CATALOG';
+    if (!listenInModal && !listenInCatalog) return;
+
+    const settersById: Record<string, React.Dispatch<React.SetStateAction<string>>> = {
+      [`${uid}-wh-scan`]: setWarehouseScanInput,
+      [`${uid}-catalog-search`]: setCatalogSearch,
+      [`${uid}-prod-name`]: setProdName,
+      [`${uid}-prod-sku`]: setProdSku,
+      [`${uid}-prod-barcode`]: setProdBarcode,
+      [`${uid}-prod-price`]: setProdPriceBaht,
+      [`${uid}-prod-cost`]: setProdCostBaht,
+      [`${uid}-prod-unit`]: setProdUnit,
+      [`${uid}-prod-init`]: setProdInitStock,
+      [`${uid}-prod-low`]: setProdLowStock,
+      [`${uid}-inline-cat-name`]: setInlineCatName,
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) {
+        return;
+      }
+
+      const activeDialogs =
+        typeof document !== 'undefined'
+          ? document.querySelectorAll('[role="dialog"], [role="alertdialog"]')
+          : null;
+      if (listenInCatalog && activeDialogs && activeDialogs.length > 0) {
+        return;
+      }
+      if (listenInModal && activeDialogs && activeDialogs.length > 1) {
+        return;
+      }
+
+      const target = e.target as HTMLElement | null;
+      const scanAttr = target?.dataset.whBarcodeScan;
+      const isAnyCatalogScanTarget =
+        scanAttr === 'true' || scanAttr === 'catalog-search';
+
+      // Inside catalog tab (not modal): ignore typing in normal inputs unless it's the scan bar or catalog search
+      if (
+        listenInCatalog &&
+        target &&
+        (target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          (target.tagName === 'INPUT' && !isAnyCatalogScanTarget))
+      ) {
+        return;
+      }
+
+      const prePushSnap =
+        target instanceof HTMLInputElement
+          ? {
+              el: target,
+              value: target.value,
+              selStart: target.selectionStart,
+              selEnd: target.selectionEnd,
+            }
+          : null;
+
+      const buf = whScannerBufferRef.current;
+      const { completedBarcode, shouldPreventDefault } = buf.pushKeystroke(
+        {
+          code: e.code,
+          shiftKey: e.shiftKey,
+          timestampMs: e.timeStamp || performance.now(),
+        },
+        () => {
+          const snap = whFirstKeySnapshotRef.current;
+          whFirstKeySnapshotRef.current = null;
+          if (!snap) return;
+          const { el, value, selStart, selEnd } = snap;
+          if (document.contains(el)) {
+            el.value = value;
+            if (selStart !== null && selEnd !== null) {
+              try {
+                el.setSelectionRange(selStart, selEnd);
+              } catch {
+                // ignore selection errors
+              }
+              window.setTimeout(() => {
+                if (
+                  document.contains(el) &&
+                  document.activeElement === el &&
+                  el.value === value
+                ) {
+                  try {
+                    el.setSelectionRange(selStart, selEnd);
+                  } catch {
+                    // ignore
+                  }
+                }
+              }, 0);
+            }
+          }
+          const setter = settersById[el.id];
+          setter?.(value);
+        },
+        () => {
+          whFirstKeySnapshotRef.current = prePushSnap;
+        }
+      );
+
+      if (shouldPreventDefault) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+
+      if (completedBarcode) {
+        whFirstKeySnapshotRef.current = null;
+        if (listenInModal) {
+          setProdBarcode(completedBarcode);
+          onToast(`รับรหัสบาร์โค้ด "${completedBarcode}" จากปืนสแกนเรียบร้อยแล้ว`, 'success');
+        } else if (listenInCatalog) {
+          handleWarehouseBarcodeLookupOrCreate(completedBarcode);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
+  }, [
+    adjTarget,
+    cameraModal,
+    confirmDeleteCategory,
+    confirmDeleteMod,
+    confirmDeleteVariant,
+    handleWarehouseBarcodeLookupOrCreate,
+    onToast,
+    productModalOpen,
+    subTab,
+    uid,
+  ]);
 
   const handleSaveProduct = async () => {
     setBusy(true);
@@ -332,7 +603,8 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       const initialStockMilli = parseDecimalStringToScaledInt(prodInitStock || '0', 3);
       const lowStockThresholdMilli = parseDecimalStringToScaledInt(prodLowStock || '0', 3);
 
-      await posTransport.upsertCatalogVariant({
+      const saved = await posTransport.upsertCatalogVariant({
+        outletId,
         ...(editingVariantId ? { variantId: editingVariantId } : {}),
         itemName: prodName,
         sku: prodSku,
@@ -343,14 +615,110 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         defaultPurchaseCostMicroBaht,
         initialStockMilli,
         lowStockThresholdMilli,
-        isComposite: prodIsComposite,
-        useProduction: prodUseProduction,
-        isWeightedScale: prodIsScale,
+        isComposite: bootstrap.profile === 'RETAIL' ? false : prodIsComposite,
+        useProduction: bootstrap.profile === 'RETAIL' ? false : prodUseProduction,
+        isWeightedScale: bootstrap.profile === 'HOSPITALITY' ? false : prodIsScale,
+        active: prodActive,
         performedByUserId: currentUser.id,
       });
+
+      if (prodImagePendingDataUrl !== undefined) {
+        await posTransport.uploadCatalogVariantImage({
+          variantId: saved.variant.id,
+          dataUrl: prodImagePendingDataUrl,
+          actorUserId: currentUser.id,
+        });
+      }
+
       setProductModalOpen(false);
       await onRefreshState();
       onToast(`บันทึกข้อมูลสินค้า "${prodName}" สำเร็จ`, 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleProductPhotoFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const compressed = await compressImageFileToDataUrl(file);
+      setProdImagePreviewUrl(compressed);
+      setProdImagePendingDataUrl(compressed);
+      onToast('เตรียมรูปภาพสินค้าเรียบร้อย กดบันทึกเพื่อยืนยัน', 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const handleSaveCategory = async (overrideName?: string, overrideDept?: ShopCategoryDepartment) => {
+    const cleanName = (overrideName ?? catNameInput).trim();
+    if (!cleanName) {
+      onToast('กรุณากรอกชื่อหมวดหมู่', 'warn');
+      return;
+    }
+    const targetDept = overrideDept ?? catDeptInput;
+    setBusy(true);
+    try {
+      const res = await posTransport.upsertCategory({
+        ...(catEditingId && !overrideName ? { id: catEditingId } : {}),
+        name: cleanName,
+        displayColor: targetDept === 'RAW_MATERIAL' ? '#5f6368' : '#1a73e8',
+        kitchenStation: getDepartmentStationPreset(targetDept),
+        sortOrder: targetDept === 'RAW_MATERIAL' ? 50 : 10,
+      });
+      await onRefreshState();
+      if (overrideName) {
+        setProdCategoryId(res.category.id);
+        setInlineCatName('');
+        setInlineCatOpen(false);
+      } else {
+        setCatEditingId(null);
+        setCatNameInput('');
+      }
+      onToast(`บันทึกหมวดหมู่ "${res.category.name}" เรียบร้อยแล้ว`, 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleQuickToggleVariantActive = async (v: CatalogVariantDetailDto) => {
+    setBusy(true);
+    try {
+      const nextActive = !v.active;
+      await posTransport.upsertCatalogVariant({
+        outletId,
+        variantId: v.id,
+        itemId: v.itemId,
+        itemName: v.itemName,
+        variantName: v.variantName,
+        categoryId: v.categoryId,
+        sku: v.sku,
+        barcode: v.barcode,
+        unitName: v.unitName,
+        priceSatang: v.priceSatang,
+        defaultPurchaseCostMicroBaht: v.defaultPurchaseCostMicroBaht,
+        initialStockMilli: 0,
+        lowStockThresholdMilli: v.lowStockThresholdMilli,
+        optimalStockMilli: v.optimalStockMilli,
+        isComposite: v.isComposite,
+        useProduction: v.useProduction,
+        isWeightedScale: v.isWeightedScale,
+        active: nextActive,
+        performedByUserId: currentUser.id,
+      });
+      await onRefreshState();
+      onToast(
+        nextActive
+          ? `เปิดขาย "${v.itemName}" บนหน้าจอ POS อีกครั้งแล้ว`
+          : `พักการขาย "${v.itemName}" ชั่วคราวแล้ว (ซ่อนจากหน้าขาย POS)`,
+        nextActive ? 'success' : 'warn'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -364,6 +732,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     try {
       const deltaMilli = parseDecimalStringToScaledInt(adjDeltaInput, 3);
       await posTransport.adjustStock({
+        outletId,
         variantId: adjTarget.id,
         quantityDeltaMilli: deltaMilli,
         reason: adjReason,
@@ -405,6 +774,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     try {
       const { items, landedCosts } = buildParsedPoPayload();
       const res = await posTransport.previewPurchaseOrder({
+        outletId,
         supplierId: poSupplierId,
         items,
         landedCosts,
@@ -423,13 +793,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     try {
       const { items, landedCosts } = buildParsedPoPayload();
       const res = await posTransport.receivePurchaseOrder({
+        outletId,
         supplierId: poSupplierId,
         createdByUserId: currentUser.id,
         items,
         landedCosts,
       });
       setPoPreviewLines(null);
-      const hist = await posTransport.listPoHistory();
+      const hist = await posTransport.listPoHistory(outletId);
       setPoHistory(hist.purchaseOrders);
       await onRefreshState();
       onToast(`รับสินค้าเข้าคลังเลขที่ ${res.poNumber} พร้อมคำนวณ MAC ใหม่สำเร็จ`, 'success');
@@ -445,6 +816,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     try {
       const qtyMilli = parseDecimalStringToScaledInt(prepQtyInput, 3);
       const res = await posTransport.executePrepBuild({
+        outletId,
         compositeVariantId: prepVariantId,
         buildQtyMilli: qtyMilli,
         performedByUserId: currentUser.id,
@@ -474,6 +846,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         countedStockMilli: parseDecimalStringToScaledInt(val, 3),
       }));
       const res = await posTransport.executeStocktake({
+        outletId,
         createdByUserId: currentUser.id,
         items,
       });
@@ -519,7 +892,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     try {
       const qtyMilli = parseDecimalStringToScaledInt(trQtyInput, 3);
       const res = await posTransport.dispatchTransfer({
-        sourceOutletId: 'OUTLET-HQ',
+        sourceOutletId: outletId,
         destinationOutletId: trDestOutletId,
         dispatchedByUserId: currentUser.id,
         items: [{ variantId: trVariantId, quantityMilli: qtyMilli }],
@@ -553,7 +926,39 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     }
   };
 
-  const filteredCatalog = bootstrap.catalogDetailed.filter((item) => {
+  const profileScopedCatalog = useMemo(
+    () =>
+      showOtherProfileItems
+        ? bootstrap.catalogDetailed
+        : bootstrap.catalogDetailed.filter((v) =>
+            isVariantInProfileDomain(v, bootstrap.profile, 'WAREHOUSE')
+          ),
+    [bootstrap.catalogDetailed, bootstrap.profile, showOtherProfileItems]
+  );
+
+  const otherProfileItemsCount = useMemo(
+    () =>
+      bootstrap.catalogDetailed.filter(
+        (v) => !isVariantInProfileDomain(v, bootstrap.profile, 'WAREHOUSE')
+      ).length,
+    [bootstrap.catalogDetailed, bootstrap.profile]
+  );
+
+  const lowStockCount = profileScopedCatalog.filter(
+    (v) => (!v.isComposite || v.useProduction) && v.inStockMilli <= v.lowStockThresholdMilli
+  ).length;
+  const pausedCount = profileScopedCatalog.filter((v) => !v.active).length;
+
+  const filteredCatalog = profileScopedCatalog.filter((item) => {
+    if (catalogFilterMode === 'LOW_STOCK') {
+      const isLow =
+        (!item.isComposite || item.useProduction) &&
+        item.inStockMilli <= item.lowStockThresholdMilli;
+      if (!isLow) return false;
+    } else if (catalogFilterMode === 'PAUSED') {
+      if (item.active) return false;
+    }
+
     if (!catalogSearch.trim()) return true;
     const q = catalogSearch.trim().toLowerCase();
     return (
@@ -563,32 +968,52 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     );
   });
 
+  const visibleWarehouseTabs = [
+    { id: 'CATALOG' as const, label: 'ทะเบียนสินค้า & คลัง', icon: Boxes, visible: true },
+    {
+      id: 'CATEGORIES' as const,
+      label: bootstrap.profile === 'HOSPITALITY' ? 'หมวดหมู่เมนู/วัตถุดิบ' : 'หมวดหมู่สินค้า',
+      icon: Tag,
+      visible: true,
+    },
+    {
+      id: 'MODIFIERS' as const,
+      label: 'ตัวเลือกเสริม (Modifiers)',
+      icon: SlidersHorizontal,
+      visible: bootstrap.profile !== 'RETAIL',
+    },
+    { id: 'PO_LANDED' as const, label: 'รับของ PO & ค่าขนส่ง', icon: Truck, visible: true },
+    {
+      id: 'PREP_BUILD' as const,
+      label: 'ผลิตเตรียมขาย (Prep)',
+      icon: Factory,
+      visible: bootstrap.profile !== 'RETAIL',
+    },
+    {
+      id: 'STOCKTAKE_TRANSFER' as const,
+      label: 'ตรวจนับ & โอนสาขา',
+      icon: ArrowLeftRight,
+      visible: true,
+    },
+    {
+      id: 'LEDGER' as const,
+      label: 'สมุดบัญชีสต็อก',
+      icon: FileSpreadsheet,
+      visible: true,
+    },
+  ].filter((t) => t.visible);
+
   return (
     <div className="space-y-6">
       {/* Canonical Google Underline WMS Sub-Navigation + Primary Pill CTA */}
       <div className="border-b border-hairline bg-canvas">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-1 overflow-x-auto" role="tablist" aria-label="หมวดหมู่คลังสินค้าและจัดซื้อ">
-            {[
-              { id: 'CATALOG' as const, label: 'ทะเบียนสินค้า & คลัง', icon: Boxes },
-              {
-                id: 'MODIFIERS' as const,
-                label: 'ตัวเลือกเสริม (Modifiers)',
-                icon: SlidersHorizontal,
-              },
-              { id: 'PO_LANDED' as const, label: 'รับของ PO & ค่าขนส่ง', icon: Truck },
-              { id: 'PREP_BUILD' as const, label: 'ผลิตเตรียมขาย (Prep)', icon: Factory },
-              {
-                id: 'STOCKTAKE_TRANSFER' as const,
-                label: 'ตรวจนับ & โอนสาขา',
-                icon: ArrowLeftRight,
-              },
-              {
-                id: 'LEDGER' as const,
-                label: 'สมุดบัญชีสต็อก',
-                icon: FileSpreadsheet,
-              },
-            ].map((tab) => {
+          <div
+            className="flex items-center gap-1 overflow-x-auto"
+            role="tablist"
+            aria-label="หมวดหมู่คลังสินค้าและจัดซื้อ"
+          >
+            {visibleWarehouseTabs.map((tab) => {
               const Icon = tab.icon;
               const active = subTab === tab.id;
               return (
@@ -614,37 +1039,130 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
 
           <button
             type="button"
-            onClick={openCreateProductModal}
+            onClick={() => openCreateProductModal('')}
             className={`mb-2 sm:mb-0 flex h-[44px] items-center gap-2 rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
           >
             <PackagePlus className="h-4 w-4" />
-            <span>เพิ่มสินค้า / วัตถุดิบใหม่</span>
+            <span>{profileMeta.newItemButtonLabel}</span>
           </button>
         </div>
       </div>
 
-      {/* TAB 1: MASTER CATALOG & STOCK LEVELS */}
+      {/* TAB 1: MASTER CATALOG & STOCK LEVELS (SHOP-SEPARATED + SCAN-TO-ADD + PHOTOS + DELETE) */}
       {subTab === 'CATALOG' && (
         <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
-          <div className="p-5 border-b border-hairline bg-surface-1 flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h3 className="font-google-display text-[20px] font-normal text-ink">
-                ทะเบียนสินค้า วัตถุดิบ และต้นทุนถัวเฉลี่ยเคลื่อนที่ (MAC Micro-Baht)
-              </h3>
-              <p className="text-xs text-ink-muted mt-0.5">
-                คลิก &ldquo;แก้ไข&rdquo; เพื่อปรับราคาขาย/บาร์โค้ด หรือ &ldquo;ปรับสต็อก&rdquo; เพื่อบันทึกของเสีย/ชำรุด
-              </p>
+          <div className="p-5 border-b border-hairline bg-surface-1 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <div className="inline-flex items-center gap-1.5 rounded-[48px] bg-primary-soft px-3 py-0.5 text-[11px] font-medium text-primary-dark mb-1.5">
+                  <Store className="h-3.5 w-3.5" />
+                  <span>{profileMeta.titleThai}</span>
+                </div>
+                <h3 className="font-google-display text-[20px] font-normal text-ink">
+                  {profileMeta.catalogTitleThai} ({outletId})
+                </h3>
+                <p className="text-xs text-ink-muted mt-0.5">
+                  ยิงปืนบาร์โค้ดที่ตัวสินค้าได้เลยเพื่อเปิดแก้ไข หรือเพิ่มสินค้าใหม่พร้อมใส่รูปภาพและลบรายการได้ยืดหยุ่น
+                </p>
+              </div>
+              <div className="relative w-full sm:w-80">
+                <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-muted" />
+                <input
+                  id={`${uid}-catalog-search`}
+                  data-wh-barcode-scan="catalog-search"
+                  type="text"
+                  aria-label="ค้นหาชื่อสินค้า รหัส SKU หรือบาร์โค้ด"
+                  value={catalogSearch}
+                  onChange={(e) => setCatalogSearch(e.target.value)}
+                  placeholder="ค้นหาชื่อสินค้า / SKU / บาร์โค้ด..."
+                  className={`h-11 w-full rounded-[48px] border border-hairline bg-canvas pl-10 pr-4 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
+                />
+              </div>
             </div>
-            <div className="relative w-full sm:w-80">
-              <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-muted" />
-              <input
-                type="text"
-                aria-label="ค้นหาชื่อสินค้า รหัส SKU หรือบาร์โค้ด"
-                value={catalogSearch}
-                onChange={(e) => setCatalogSearch(e.target.value)}
-                placeholder="ค้นหาชื่อสินค้า / SKU / บาร์โค้ด..."
-                className={`h-11 w-full rounded-[48px] border border-hairline bg-canvas pl-10 pr-4 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
-              />
+
+            {/* Quick Barcode Scan-to-Add / Find Bar (USB Gun + Camera) */}
+            <div className="rounded-[8px] border border-primary/25 bg-primary-soft/60 p-3 flex flex-wrap items-center gap-2.5">
+              <div className="flex items-center gap-2 text-xs font-medium text-primary-dark shrink-0">
+                <ScanBarcode className="h-4 w-4" />
+                <span>สแกนบาร์โค้ดเพื่อเพิ่ม/ค้นหาสินค้า:</span>
+              </div>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleWarehouseBarcodeLookupOrCreate(warehouseScanInput);
+                }}
+                className="flex flex-1 min-w-[220px] items-center gap-2"
+              >
+                <input
+                  id={`${uid}-wh-scan`}
+                  type="text"
+                  data-wh-barcode-scan="true"
+                  aria-label="ยิงปืนบาร์โค้ดหรือกรอกบาร์โค้ดเพื่อเพิ่มหรือค้นหาสินค้า"
+                  value={warehouseScanInput}
+                  onChange={(e) => setWarehouseScanInput(e.target.value)}
+                  placeholder="ยิงปืนบาร์โค้ดสินค้าทันที หรือพิมพ์รหัสแล้วกด Enter..."
+                  className={`h-10 flex-1 rounded-[48px] border border-hairline bg-canvas px-4 text-xs text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                />
+                <button
+                  type="submit"
+                  disabled={!warehouseScanInput.trim()}
+                  className={`h-10 rounded-[48px] bg-primary px-4 font-google-display text-xs font-medium text-white hover:bg-primary-hover whitespace-nowrap ${UI_INTERACTION.focusButtonPrimary}`}
+                >
+                  ค้นหา / เพิ่มเลย
+                </button>
+              </form>
+              <button
+                type="button"
+                onClick={() => setCameraModal({ mode: 'BARCODE', target: 'CATALOG_SCAN' })}
+                className={`inline-flex h-10 items-center gap-1.5 rounded-[48px] border border-primary bg-canvas px-4 font-google-display text-xs font-medium text-primary-dark hover:bg-surface-1 whitespace-nowrap ${UI_INTERACTION.focusButton}`}
+              >
+                <Camera className="h-3.5 w-3.5" />
+                <span>สแกนด้วยกล้อง</span>
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {(
+                  [
+                    { id: 'ALL', label: `ทั้งหมด (${profileScopedCatalog.length})` },
+                    { id: 'LOW_STOCK', label: `ต่ำกว่าเกณฑ์ / ของหมด (${lowStockCount})` },
+                    { id: 'PAUSED', label: `พักการขายชั่วคราว (${pausedCount})` },
+                  ] as const
+                ).map((pill) => {
+                  const active = catalogFilterMode === pill.id;
+                  return (
+                    <button
+                      key={pill.id}
+                      type="button"
+                      onClick={() => setCatalogFilterMode(pill.id)}
+                      className={`min-h-[36px] rounded-[48px] border px-4 font-google-display text-xs font-medium ${UI_INTERACTION.focusButton} ${
+                        active
+                          ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                          : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
+                      }`}
+                    >
+                      {pill.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {otherProfileItemsCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowOtherProfileItems((v) => !v)}
+                  className={`min-h-[36px] rounded-[48px] border px-3.5 text-xs font-medium ${UI_INTERACTION.focusButton} ${
+                    showOtherProfileItems
+                      ? 'border-ink bg-ink text-white'
+                      : 'border-hairline bg-canvas text-ink-muted hover:border-primary hover:text-primary'
+                  }`}
+                >
+                  {showOtherProfileItems
+                    ? 'ซ่อนสินค้าต่างโหมดธุรกิจ'
+                    : `มีสินค้าต่างโหมดธุรกิจซ่อนอยู่ ${otherProfileItemsCount} รายการ (คลิกดู)`}
+                </button>
+              )}
             </div>
           </div>
 
@@ -684,10 +1202,36 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                         </div>
                       </td>
                       <td className="py-3 px-4">
-                        <div className="font-google-display text-sm font-medium text-ink">
-                          {v.itemName}
+                        <div className="flex items-center gap-3">
+                          {resolveBackendAssetUrl(v.imageUrl) ? (
+                            <img
+                              src={resolveBackendAssetUrl(v.imageUrl)!}
+                              alt={v.itemName}
+                              loading="lazy"
+                              className="h-11 w-11 rounded-[4px] border border-hairline object-cover shrink-0 bg-surface-1"
+                            />
+                          ) : (
+                            <div
+                              aria-hidden="true"
+                              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[4px] border border-hairline bg-surface-1 text-ink-muted"
+                            >
+                              <ImagePlus className="h-4 w-4" />
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <div className="font-google-display text-sm font-medium text-ink flex flex-wrap items-center gap-1.5">
+                              <span className={!v.active ? 'line-through text-ink-muted' : ''}>
+                                {v.itemName}
+                              </span>
+                              {!v.active && (
+                                <span className="rounded-[4px] bg-ink px-2 py-0.5 text-[10px] font-medium text-white">
+                                  พักขายชั่วคราว
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-ink-muted">ID: {v.id}</div>
+                          </div>
                         </div>
-                        <div className="text-[11px] text-ink-muted">ID: {v.id}</div>
                       </td>
                       <td className="py-3 px-4 space-y-1">
                         <div className="inline-flex items-center gap-1.5 rounded-[48px] border border-hairline bg-surface-1 px-2.5 py-0.5 text-[11px] text-ink">
@@ -729,6 +1273,18 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                       <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
                         <button
                           type="button"
+                          disabled={busy}
+                          onClick={() => void handleQuickToggleVariantActive(v)}
+                          className={`rounded-[48px] border px-3 py-1.5 text-[11px] font-medium ${UI_INTERACTION.focusButton} ${
+                            v.active
+                              ? 'border-hairline bg-surface-1 text-ink-soft hover:border-ink hover:text-ink'
+                              : 'border-primary bg-primary-soft text-primary-dark hover:bg-primary-soft/80'
+                          }`}
+                        >
+                          {v.active ? 'พักขาย' : 'เปิดขาย'}
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => openEditProductModal(v)}
                           className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-[11px] font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                         >
@@ -746,6 +1302,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                             ปรับสต็อก
                           </button>
                         )}
+                        <button
+                          type="button"
+                          aria-label={`ลบสินค้า ${v.itemName}`}
+                          onClick={() => setConfirmDeleteVariant(v)}
+                          className={`inline-flex h-11 w-11 items-center justify-center rounded-full border border-hairline bg-canvas text-ink-muted hover:border-ink hover:bg-surface-1 hover:text-ink align-middle ${UI_INTERACTION.focusButton}`}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
                       </td>
                     </tr>
                   );
@@ -753,6 +1317,147 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 1.2: CUSTOM CATEGORY MANAGER (SEPARATED BY SHOP DEPARTMENT) */}
+      {subTab === 'CATEGORIES' && (
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+          <div className="xl:col-span-5 rounded-[4px] border border-hairline bg-canvas p-6 space-y-4 text-xs">
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary-dark">
+                <FolderPlus className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="font-google-display text-[18px] font-normal text-ink">
+                  {catEditingId ? 'แก้ไขหมวดหมู่สินค้า' : 'เพิ่มหมวดหมู่สินค้า / เมนูใหม่'}
+                </h3>
+                <p className="text-ink-muted">
+                  แยกแผนกหมวดหมู่ตามโหมดร้านค้าชัดเจน ไม่ปะปนกันระหว่างค้าปลีกและคาเฟ่
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <label htmlFor={`${uid}-cat-name`} className="block text-ink-muted mb-1">
+                ชื่อหมวดหมู่ (เช่น กาแฟสด, เบเกอรี่, เครื่องดื่มแช่เย็น, ของใช้ในบ้าน)
+              </label>
+              <input
+                id={`${uid}-cat-name`}
+                type="text"
+                value={catNameInput}
+                onChange={(e) => setCatNameInput(e.target.value)}
+                placeholder="พิมพ์ชื่อหมวดหมู่..."
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
+              />
+            </div>
+
+            <div>
+              <label htmlFor={`${uid}-cat-dept`} className="block text-ink-muted mb-1">
+                ประเภทแผนก / รูปแบบร้านค้า
+              </label>
+              <select
+                id={`${uid}-cat-dept`}
+                value={catDeptInput}
+                onChange={(e) => setCatDeptInput(e.target.value as ShopCategoryDepartment)}
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
+              >
+                {bootstrap.profile !== 'HOSPITALITY' && (
+                  <option value="RETAIL">สินค้าปลีก / ซูเปอร์มาร์เก็ต (สถานี NONE)</option>
+                )}
+                {bootstrap.profile !== 'RETAIL' && (
+                  <>
+                    <option value="HOSPITALITY">เมนูคาเฟ่ / ร้านอาหาร (ส่งจอครัว BAR/MAIN)</option>
+                    <option value="RAW_MATERIAL">วัตถุดิบหลังร้าน / ต้มเตรียม (ซ่อนจากหน้าขาย POS)</option>
+                  </>
+                )}
+              </select>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={busy || !catNameInput.trim()}
+                onClick={() => void handleSaveCategory()}
+                className={`flex-1 h-[46px] rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+              >
+                {catEditingId ? 'บันทึกการแก้ไขหมวดหมู่' : '+ เพิ่มหมวดหมู่ใหม่'}
+              </button>
+              {catEditingId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCatEditingId(null);
+                    setCatNameInput('');
+                  }}
+                  className={`h-[46px] rounded-[48px] border border-hairline bg-canvas px-4 text-xs font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
+                >
+                  ยกเลิก
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="xl:col-span-7 rounded-[4px] border border-hairline bg-canvas overflow-hidden">
+            <div className="border-b border-hairline bg-surface-1 px-5 py-4">
+              <h3 className="font-google-display text-[18px] font-normal text-ink">
+                รายการหมวดหมู่ทั้งหมด ({profileWarehouseCategories.length} หมวดหมู่ในโหมด {bootstrap.profile})
+              </h3>
+            </div>
+            <div className="divide-y divide-hairline">
+              {profileWarehouseCategories.length === 0 ? (
+                <div className="py-12 text-center text-xs text-ink-muted">
+                  ยังไม่มีหมวดหมู่ในโหมดธุรกิจนี้ — สร้างหมวดหมู่ใหม่ได้จากฟอร์มด้านซ้าย
+                </div>
+              ) : (
+                profileWarehouseCategories.map((cat) => {
+                  const dept = getCategoryDepartment(cat);
+                  const countInCat = bootstrap.catalogDetailed.filter(
+                    (v) => v.categoryId === cat.id
+                  ).length;
+                  return (
+                    <div
+                      key={cat.id}
+                      className="px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 text-xs hover:bg-surface-1 transition-colors duration-150"
+                    >
+                      <div className="space-y-0.5">
+                        <div className="font-google-display text-sm font-medium text-ink flex items-center gap-2">
+                          <span>{cat.name}</span>
+                          <span className="rounded-[48px] border border-hairline bg-surface-1 px-2.5 py-0.5 text-[11px] font-medium text-primary-dark">
+                            {getDepartmentThaiLabel(dept)}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-ink-muted tabular-nums-google">
+                          ID: {cat.id} · สถานี {cat.kitchenStation} · มีสินค้า {countInCat} รายการ
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCatEditingId(cat.id);
+                            setCatNameInput(cat.name);
+                            setCatDeptInput(dept);
+                          }}
+                          className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-[11px] font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
+                        >
+                          แก้ไขชื่อ
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`ลบหมวดหมู่ ${cat.name}`}
+                          onClick={() => setConfirmDeleteCategory(cat)}
+                          className={`inline-flex h-11 w-11 items-center justify-center rounded-full border border-hairline bg-canvas text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -1014,9 +1719,9 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           onClick={() =>
                             setConfirmDeleteMod({ kind: 'item', id: mod.id, name: mod.name })
                           }
-                          className={`flex h-8 w-8 items-center justify-center rounded-full text-ink-muted hover:bg-canvas hover:text-ink ${UI_INTERACTION.focusButton}`}
+                          className={`flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-canvas hover:text-ink ${UI_INTERACTION.focusButton}`}
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
+                          <Trash2 className="h-4 w-4" />
                         </button>
                       </div>
                     ))}
@@ -1148,7 +1853,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                         type="button"
                         aria-label={`ลบแถวสินค้าที่ ${idx + 1}`}
                         onClick={() => setPoLines((prev) => prev.filter((_, i) => i !== idx))}
-                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full text-ink-muted hover:bg-canvas hover:text-ink ${UI_INTERACTION.focusButton}`}
+                        className={`inline-flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-canvas hover:text-ink ${UI_INTERACTION.focusButton}`}
                       >
                         <X className="h-4 w-4" />
                       </button>
@@ -1505,20 +2210,20 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             )}
 
             <div className="space-y-3 text-xs">
-              <div>
-                <label htmlFor={`${uid}-tr-dest`} className="block text-ink-muted mb-1">
-                  โอนจากคลังหลัก (OUTLET-HQ) ไปยัง
-                </label>
-                <select
-                  id={`${uid}-tr-dest`}
-                  value={trDestOutletId}
-                  onChange={(e) => setTrDestOutletId(e.target.value)}
-                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
-                >
-                  <option value="">-- เลือกสาขาปลายทาง --</option>
-                  {bootstrap.outlets
-                    .filter((o) => o.id !== 'OUTLET-HQ')
-                    .map((o) => (
+            <div>
+              <label htmlFor={`${uid}-tr-dest`} className="block text-ink-muted mb-1">
+                โอนจากสาขาปัจจุบัน ({outletId}) ไปยัง
+              </label>
+              <select
+                id={`${uid}-tr-dest`}
+                value={trDestOutletId}
+                onChange={(e) => setTrDestOutletId(e.target.value)}
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
+              >
+                <option value="">-- เลือกสาขาปลายทาง --</option>
+                {bootstrap.outlets
+                  .filter((o) => o.id !== outletId)
+                  .map((o) => (
                       <option key={o.id} value={o.id}>
                         {o.code} — {o.name}
                       </option>
@@ -1725,6 +2430,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       {/* MODAL: CREATE / EDIT PRODUCT VARIANT */}
       <ModalDialog
         open={productModalOpen}
+        canDismiss={!confirmDeleteVariant && !cameraModal && !busy && !deletingVariant}
         onClose={() => setProductModalOpen(false)}
         labelledBy={`${uid}-prod-modal-title`}
         maxWidthClass="max-w-xl"
@@ -1744,16 +2450,87 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         </div>
 
         <div className="p-6 grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs overflow-y-auto flex-1">
+          {/* Product Photo Upload & Camera Capture */}
+          <div className="sm:col-span-2 rounded-[8px] border border-hairline bg-surface-1 p-4 flex flex-wrap items-center gap-4">
+            <div className="h-[84px] w-[112px] shrink-0 overflow-hidden rounded-[4px] border border-hairline bg-canvas flex items-center justify-center">
+              {prodImagePreviewUrl ? (
+                <img
+                  src={prodImagePreviewUrl}
+                  alt="ตัวอย่างรูปสินค้า"
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <div className="text-center text-[11px] text-ink-muted px-2">
+                  <ImagePlus className="h-5 w-5 mx-auto mb-1 text-ink-muted" />
+                  <span>ยังไม่มีรูป</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex-1 min-w-[200px] space-y-2">
+              <div className="font-google-display text-sm font-medium text-ink">
+                รูปภาพสินค้า / เมนู (แสดงบนหน้าจอขาย POS และคลังสินค้า)
+              </div>
+              <p className="text-[11px] text-ink-muted">
+                รองรับ JPG / PNG / WebP บีบอัดขนาดอัตโนมัติและเก็บในเครื่องแบบออฟไลน์ 100%
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={prodImageFileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={(e) => void handleProductPhotoFileSelect(e)}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => prodImageFileInputRef.current?.click()}
+                  className={`inline-flex h-9 items-center gap-1.5 rounded-[48px] border border-primary bg-canvas px-3.5 text-xs font-medium text-primary hover:bg-primary-soft/50 ${UI_INTERACTION.focusButton}`}
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  <span>เลือกรูปภาพ</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCameraModal({ mode: 'PHOTO', target: 'MODAL_PHOTO' })}
+                  className={`inline-flex h-9 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3.5 text-xs font-medium text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+                >
+                  <Camera className="h-3.5 w-3.5" />
+                  <span>ถ่ายรูปจากกล้อง</span>
+                </button>
+                {prodImagePreviewUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProdImagePreviewUrl(null);
+                      setProdImagePendingDataUrl(null);
+                    }}
+                    className={`inline-flex h-9 items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-3 text-xs font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>ลบรูป</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
           <div className="sm:col-span-2">
             <label htmlFor={`${uid}-prod-name`} className="block text-ink-muted mb-1">
               ชื่อสินค้า / เมนู / วัตถุดิบ
             </label>
             <input
+              ref={prodNameInputRef}
               id={`${uid}-prod-name`}
               type="text"
               value={prodName}
               onChange={(e) => setProdName(e.target.value)}
-              className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink ${UI_INTERACTION.focusControl}`}
+              placeholder={
+                bootstrap.profile === 'HOSPITALITY'
+                  ? 'เช่น ลาเต้เย็น, ข้าวผัดกะเพรา, ผงชาไทย...'
+                  : 'เช่น น้ำดื่ม 600 มล., ขนมปังโฮลวีต...'
+              }
+              className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
             />
           </div>
           <div>
@@ -1769,33 +2546,101 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             />
           </div>
           <div>
-            <label htmlFor={`${uid}-prod-barcode`} className="block text-ink-muted mb-1">
-              รหัสบาร์โค้ด (เว้นว่างได้สำหรับวัตถุดิบ)
-            </label>
-            <input
-              id={`${uid}-prod-barcode`}
-              type="text"
-              value={prodBarcode}
-              onChange={(e) => setProdBarcode(e.target.value)}
-              className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
-            />
+            <div className="flex items-center justify-between mb-1">
+              <label htmlFor={`${uid}-prod-barcode`} className="block text-ink-muted">
+                รหัสบาร์โค้ด (ยิงปืนสแกนที่ตัวสินค้าได้เลย)
+              </label>
+              <span className="text-[10px] font-medium text-primary-dark">พร้อมรับปืนสแกน</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <input
+                id={`${uid}-prod-barcode`}
+                data-modal-barcode-input="true"
+                type="text"
+                value={prodBarcode}
+                onChange={(e) => setProdBarcode(e.target.value)}
+                placeholder="ยิงปืนสแกน หรือเว้นว่างได้..."
+                className={`h-11 flex-1 min-w-0 rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
+              />
+              <button
+                type="button"
+                title="สแกนบาร์โค้ดด้วยกล้อง"
+                aria-label="สแกนบาร์โค้ดด้วยกล้อง"
+                onClick={() => setCameraModal({ mode: 'BARCODE', target: 'MODAL_BARCODE' })}
+                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-[4px] border border-primary bg-primary-soft text-primary-dark hover:bg-primary-soft/80 ${UI_INTERACTION.focusButton}`}
+              >
+                <Camera className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                title="สุ่มรหัสบาร์โค้ดภายในอัตโนมัติ"
+                aria-label="สุ่มรหัสบาร์โค้ดอัตโนมัติ"
+                onClick={() => setProdBarcode(`885999${Date.now().toString().slice(-7)}`)}
+                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-[4px] border border-hairline bg-surface-1 text-ink-muted hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+              >
+                <RefreshCw className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           <div>
-            <label htmlFor={`${uid}-prod-cat`} className="block text-ink-muted mb-1">
-              หมวดหมู่
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label htmlFor={`${uid}-prod-cat`} className="block text-ink-muted">
+                หมวดหมู่ ({profileMeta.shortBadge})
+              </label>
+              <button
+                type="button"
+                onClick={() => setInlineCatOpen((v) => !v)}
+                className="text-[11px] font-medium text-primary hover:underline cursor-pointer"
+              >
+                {inlineCatOpen ? 'ปิดฟอร์มเพิ่มหมวด' : '+ เพิ่มหมวดหมู่ใหม่'}
+              </button>
+            </div>
             <select
               id={`${uid}-prod-cat`}
               value={prodCategoryId}
               onChange={(e) => setProdCategoryId(e.target.value)}
               className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink ${UI_INTERACTION.focusSelect}`}
             >
-              {bootstrap.categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name} (สถานี {c.kitchenStation})
-                </option>
-              ))}
+              {(() => {
+                const list = [...profileWarehouseCategories];
+                // Keep currently selected category visible if editing an item from another mode
+                if (prodCategoryId && !list.some((c) => c.id === prodCategoryId)) {
+                  const found = bootstrap.categories.find((c) => c.id === prodCategoryId);
+                  if (found) list.unshift(found);
+                }
+                return list.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} · {getDepartmentThaiLabel(getCategoryDepartment(c))}
+                  </option>
+                ));
+              })()}
             </select>
+            {inlineCatOpen && (
+              <div className="mt-2 flex items-center gap-1.5">
+                <input
+                  id={`${uid}-inline-cat-name`}
+                  type="text"
+                  aria-label="ชื่อหมวดหมู่ใหม่ด่วน"
+                  value={inlineCatName}
+                  onChange={(e) => setInlineCatName(e.target.value)}
+                  placeholder="ชื่อหมวดหมู่ใหม่..."
+                  className={`h-9 flex-1 rounded-[4px] border border-primary bg-canvas px-2.5 text-xs text-ink ${UI_INTERACTION.focusControl}`}
+                />
+                <button
+                  type="button"
+                  disabled={busy || !inlineCatName.trim()}
+                  onClick={() =>
+                    void handleSaveCategory(
+                      inlineCatName,
+                      bootstrap.profile === 'HOSPITALITY' ? 'HOSPITALITY' : 'RETAIL'
+                    )
+                  }
+                  className={`h-9 rounded-[48px] bg-primary px-3 text-[11px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                >
+                  สร้าง
+                </button>
+              </div>
+            )}
           </div>
           <div>
             <label htmlFor={`${uid}-prod-unit`} className="block text-ink-muted mb-1">
@@ -1860,56 +2705,91 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             />
           </div>
 
-          <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2">
+          <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2">
             <label className="flex items-center gap-2 rounded-[4px] border border-hairline bg-surface-1 p-3 text-ink cursor-pointer transition-colors duration-200 hover:border-primary focus-within:ring-2 focus-within:ring-primary/25">
               <input
                 type="checkbox"
-                checked={prodIsComposite}
-                onChange={(e) => setProdIsComposite(e.target.checked)}
+                checked={prodActive}
+                onChange={(e) => setProdActive(e.target.checked)}
                 className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
               />
-              <span>ผูกสูตร BOM</span>
+              <span>เปิดจำหน่ายบนหน้าขาย POS</span>
             </label>
-            <label className="flex items-center gap-2 rounded-[4px] border border-hairline bg-surface-1 p-3 text-ink cursor-pointer transition-colors duration-200 hover:border-primary focus-within:ring-2 focus-within:ring-primary/25">
-              <input
-                type="checkbox"
-                checked={prodUseProduction}
-                onChange={(e) => {
-                  setProdUseProduction(e.target.checked);
-                  if (e.target.checked) setProdIsComposite(true);
-                }}
-                className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
-              />
-              <span>ต้มเตรียมล่วงหน้า</span>
-            </label>
-            <label className="flex items-center gap-2 rounded-[4px] border border-hairline bg-surface-1 p-3 text-ink cursor-pointer transition-colors duration-200 hover:border-primary focus-within:ring-2 focus-within:ring-primary/25">
-              <input
-                type="checkbox"
-                checked={prodIsScale}
-                onChange={(e) => setProdIsScale(e.target.checked)}
-                className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
-              />
-              <span>สินค้าชั่ง กก.</span>
-            </label>
+            {bootstrap.profile !== 'RETAIL' && (
+              <>
+                <label className="flex items-center gap-2 rounded-[4px] border border-hairline bg-surface-1 p-3 text-ink cursor-pointer transition-colors duration-200 hover:border-primary focus-within:ring-2 focus-within:ring-primary/25">
+                  <input
+                    type="checkbox"
+                    checked={prodIsComposite}
+                    onChange={(e) => setProdIsComposite(e.target.checked)}
+                    className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
+                  />
+                  <span>ผูกสูตร BOM (ตัดวัตถุดิบสด)</span>
+                </label>
+                <label className="flex items-center gap-2 rounded-[4px] border border-hairline bg-surface-1 p-3 text-ink cursor-pointer transition-colors duration-200 hover:border-primary focus-within:ring-2 focus-within:ring-primary/25">
+                  <input
+                    type="checkbox"
+                    checked={prodUseProduction}
+                    onChange={(e) => {
+                      setProdUseProduction(e.target.checked);
+                      if (e.target.checked) setProdIsComposite(true);
+                    }}
+                    className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
+                  />
+                  <span>ต้มเตรียมล่วงหน้า (Pre-Built)</span>
+                </label>
+              </>
+            )}
+            {bootstrap.profile !== 'HOSPITALITY' && (
+              <label className="flex items-center gap-2 rounded-[4px] border border-hairline bg-surface-1 p-3 text-ink cursor-pointer transition-colors duration-200 hover:border-primary focus-within:ring-2 focus-within:ring-primary/25">
+                <input
+                  type="checkbox"
+                  checked={prodIsScale}
+                  onChange={(e) => setProdIsScale(e.target.checked)}
+                  className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
+                />
+                <span>สินค้าชั่งน้ำหนักสด (บาร์โค้ด กก.)</span>
+              </label>
+            )}
           </div>
         </div>
 
-        <div className="border-t border-hairline bg-surface-1 px-6 py-4 flex justify-end gap-3 shrink-0">
-          <button
-            type="button"
-            onClick={() => setProductModalOpen(false)}
-            className={`h-[46px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
-          >
-            ยกเลิก
-          </button>
-          <button
-            type="button"
-            disabled={busy || !prodName.trim() || !prodSku.trim()}
-            onClick={() => void handleSaveProduct()}
-            className={`h-[46px] rounded-[48px] bg-primary px-7 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
-          >
-            บันทึกรายการสินค้า
-          </button>
+        <div className="border-t border-hairline bg-surface-1 px-6 py-4 flex flex-wrap items-center justify-between gap-3 shrink-0">
+          <div>
+            {editingVariantId && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  const target = bootstrap.catalogDetailed.find((v) => v.id === editingVariantId);
+                  if (target) {
+                    setConfirmDeleteVariant(target);
+                  }
+                }}
+                className={`inline-flex h-[44px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>ลบสินค้านี้</span>
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setProductModalOpen(false)}
+              className={`h-[46px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+            >
+              ยกเลิก
+            </button>
+            <button
+              type="button"
+              disabled={busy || !prodName.trim() || !prodSku.trim()}
+              onClick={() => void handleSaveProduct()}
+              className={`h-[46px] rounded-[48px] bg-primary px-7 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+            >
+              บันทึกรายการสินค้า
+            </button>
+          </div>
         </div>
       </ModalDialog>
 
@@ -1989,6 +2869,89 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           </>
         )}
       </ModalDialog>
+
+      <BarcodeCameraScannerModal
+        open={Boolean(cameraModal)}
+        mode={cameraModal?.mode ?? 'BARCODE'}
+        onClose={() => setCameraModal(null)}
+        onBarcodeDetected={(code) => {
+          if (cameraModal?.target === 'MODAL_BARCODE') {
+            setProdBarcode(code);
+            onToast(`สแกนบาร์โค้ด "${code}" จากกล้องสำเร็จ`, 'success');
+          } else {
+            handleWarehouseBarcodeLookupOrCreate(code);
+          }
+        }}
+        onPhotoCaptured={(dataUrl) => {
+          setProdImagePreviewUrl(dataUrl);
+          setProdImagePendingDataUrl(dataUrl);
+          onToast('ถ่ายรูปภาพสินค้าสำเร็จ กดบันทึกเพื่อยืนยัน', 'success');
+        }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(confirmDeleteVariant)}
+        title={`ยืนยันลบสินค้า "${confirmDeleteVariant?.itemName ?? ''}" ออกจากระบบ?`}
+        description="ระบบจะลบสินค้านี้ออกจากหน้าขาย POS และทะเบียนคลังทันที ปลดล็อกรหัสบาร์โค้ด/SKU ให้ใช้งานใหม่ได้ และปรับสมดุลสมุดบัญชีสต็อกให้ตรงตามมาตรฐาน 100%"
+        confirmLabel="ยืนยันลบสินค้า"
+        tone="danger"
+        busy={deletingVariant}
+        onCancel={() => {
+          if (!deletingVariant) setConfirmDeleteVariant(null);
+        }}
+        onConfirm={() => {
+          if (!confirmDeleteVariant) return;
+          setDeletingVariant(true);
+          void posTransport
+            .deleteCatalogVariant({
+              variantId: confirmDeleteVariant.id,
+              performedByUserId: currentUser.id,
+            })
+            .then(async (res) => {
+              setProductModalOpen(false);
+              setEditingVariantId(undefined);
+              await onRefreshState();
+              onToast(
+                res.mode === 'HARD_DELETED'
+                  ? `ลบสินค้า "${confirmDeleteVariant.itemName}" ออกจากฐานข้อมูลเรียบร้อยแล้ว`
+                  : `ลบสินค้า "${confirmDeleteVariant.itemName}" ออกจากคลังและปลดล็อกบาร์โค้ดแล้ว (คงประวัติบัญชีเดิมไว้ 100%)`,
+                'warn'
+              );
+            })
+            .catch((err) => onToast(err instanceof Error ? err.message : String(err), 'error'))
+            .finally(() => {
+              setDeletingVariant(false);
+              setConfirmDeleteVariant(null);
+            });
+        }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(confirmDeleteCategory)}
+        title={`ยืนยันลบหมวดหมู่ "${confirmDeleteCategory?.name ?? ''}"?`}
+        description="หมวดหมู่ที่ไม่มีสินค้าใช้งานอยู่จะถูกลบออกทันที หากยังมีสินค้าอยู่ในหมวดหมู่นี้กรุณาย้ายหรือลบสินค้าก่อน"
+        confirmLabel="ยืนยันลบหมวดหมู่"
+        tone="danger"
+        busy={deletingCategory}
+        onCancel={() => {
+          if (!deletingCategory) setConfirmDeleteCategory(null);
+        }}
+        onConfirm={() => {
+          if (!confirmDeleteCategory) return;
+          setDeletingCategory(true);
+          void posTransport
+            .deleteCategory(confirmDeleteCategory.id)
+            .then(async () => {
+              await onRefreshState();
+              onToast(`ลบหมวดหมู่ "${confirmDeleteCategory.name}" เรียบร้อยแล้ว`, 'warn');
+            })
+            .catch((err) => onToast(err instanceof Error ? err.message : String(err), 'error'))
+            .finally(() => {
+              setDeletingCategory(false);
+              setConfirmDeleteCategory(null);
+            });
+        }}
+      />
 
       <ConfirmDialog
         open={Boolean(confirmDeleteMod)}

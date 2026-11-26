@@ -9,11 +9,15 @@ import {
   SCALE_BASIS_POINTS,
 } from '../../../../shared-contracts/src/fixed-point.ts';
 import { posTransport } from '../api/pos-transport.ts';
-import type { BootstrapPayload, ComponentRole } from '../types.ts';
+import type { BootstrapPayload, ComponentRole, StaffUserDto } from '../types.ts';
+import { canEditBomRecipes } from '../utils/rbac.ts';
 import { ConfirmDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface BomStudioWorkspaceProps {
+  outletId?: string;
   bootstrap: BootstrapPayload;
+  currentUser: StaffUserDto;
+  simulationModeEnabled?: boolean;
   onRefreshState: () => Promise<void>;
   onToast: (msg: string, tone?: 'success' | 'warn' | 'error') => void;
 }
@@ -29,10 +33,14 @@ const COMPONENT_ROLES: ComponentRole[] = [
 ];
 
 export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
+  outletId = 'OUTLET-HQ',
   bootstrap,
+  currentUser,
+  simulationModeEnabled = false,
   onRefreshState,
   onToast,
 }) => {
+  const canEdit = canEditBomRecipes(currentUser.role);
   const compositeVariants = useMemo(
     () => bootstrap.catalogDetailed.filter((v) => v.isComposite),
     [bootstrap.catalogDetailed]
@@ -107,13 +115,14 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
     }
     void posTransport
       .previewBomRecipe({
+        outletId,
         compositeVariantId: selectedParentId,
         qtyMilli: 1_000,
         selectedModifierIds: simModIds,
       })
       .then((res) => setSimPreview(res))
       .catch(() => setSimPreview(null));
-  }, [compositeVariants, selectedParentId, simModIds, bootstrap.bomEdges]);
+  }, [compositeVariants, outletId, selectedParentId, simModIds, bootstrap.bomEdges]);
 
   const handleUpsertEdge = async (override?: {
     compositeVariantId: string;
@@ -291,19 +300,23 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
                           )}
                         </td>
                         <td className="py-3 px-4 text-right">
-                          <button
-                            type="button"
-                            aria-label={`ลบ ${childName}`}
-                            onClick={() =>
-                              setConfirmDeleteComp({
-                                compId: edge.componentVariantId,
-                                compName: childName,
-                              })
-                            }
-                            className={`inline-flex h-8 w-8 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+                          {canEdit ? (
+                            <button
+                              type="button"
+                              aria-label={`ลบ ${childName}`}
+                              onClick={() =>
+                                setConfirmDeleteComp({
+                                  compId: edge.componentVariantId,
+                                  compName: childName,
+                                })
+                              }
+                              className={`inline-flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          ) : (
+                            <span className="text-ink-muted">—</span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -313,104 +326,112 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
             </table>
           </div>
 
-          {/* Add / Update Edge Form */}
-          <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-google-display text-sm font-medium text-ink flex items-center gap-1.5">
-                <Plus className="h-4 w-4 text-primary" />
-                เพิ่มหรือปรับสัดส่วนวัตถุดิบในสูตร
-              </span>
-              <button
-                type="button"
-                onClick={() =>
-                  void handleUpsertEdge({
-                    compositeVariantId: 'VAR-RAW-DRY-BOBA',
-                    componentVariantId: 'VAR-RAW-BOBA',
-                    componentRole: 'STANDARD',
-                    quantityMilli: 1_000,
-                    wastageBasisPoints: 0,
-                  })
-                }
-                className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
-              >
-                ทดสอบจำลองสูตรวนลูป (Test DFS Guard)
-              </button>
-            </div>
+          {/* Add / Update Edge Form (OWNER / MANAGER) */}
+          {canEdit ? (
+            <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-google-display text-sm font-medium text-ink flex items-center gap-1.5">
+                  <Plus className="h-4 w-4 text-primary" />
+                  เพิ่มหรือปรับสัดส่วนวัตถุดิบในสูตร
+                </span>
+                {simulationModeEnabled && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleUpsertEdge({
+                        compositeVariantId: 'VAR-RAW-DRY-BOBA',
+                        componentVariantId: 'VAR-RAW-BOBA',
+                        componentRole: 'STANDARD',
+                        quantityMilli: 1_000,
+                        wastageBasisPoints: 0,
+                      })
+                    }
+                    className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
+                  >
+                    ทดสอบจำลองสูตรวนลูป (Test DFS Guard)
+                  </button>
+                )}
+              </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 text-xs">
-              <div className="sm:col-span-5">
-                <label htmlFor={`${uid}-comp`} className="block text-ink-muted mb-1">
-                  เลือกวัตถุดิบ
-                </label>
-                <select
-                  id={`${uid}-comp`}
-                  value={childVariantId}
-                  onChange={(e) => setChildVariantId(e.target.value)}
-                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
-                >
-                  {bootstrap.catalogDetailed
-                    .filter((v) => v.id !== selectedParentId)
-                    .map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.itemName} ({v.unitName})
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 text-xs">
+                <div className="sm:col-span-5">
+                  <label htmlFor={`${uid}-comp`} className="block text-ink-muted mb-1">
+                    เลือกวัตถุดิบ
+                  </label>
+                  <select
+                    id={`${uid}-comp`}
+                    value={childVariantId}
+                    onChange={(e) => setChildVariantId(e.target.value)}
+                    className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
+                  >
+                    {bootstrap.catalogDetailed
+                      .filter((v) => v.id !== selectedParentId)
+                      .map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.itemName} ({v.unitName})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div className="sm:col-span-3">
+                  <label htmlFor={`${uid}-role`} className="block text-ink-muted mb-1">
+                    บทบาท (Role)
+                  </label>
+                  <select
+                    id={`${uid}-role`}
+                    value={edgeRole}
+                    onChange={(e) => setEdgeRole(e.target.value as ComponentRole)}
+                    className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
+                  >
+                    {COMPONENT_ROLES.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
                       </option>
                     ))}
-                </select>
+                  </select>
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor={`${uid}-qty`} className="block text-ink-muted mb-1">
+                    ปริมาณ
+                  </label>
+                  <input
+                    id={`${uid}-qty`}
+                    type="text"
+                    value={edgeQtyInput}
+                    onChange={(e) => setEdgeQtyInput(e.target.value)}
+                    className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-right text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor={`${uid}-waste`} className="block text-ink-muted mb-1">
+                    สูญเสีย (%)
+                  </label>
+                  <input
+                    id={`${uid}-waste`}
+                    type="text"
+                    value={edgeWastagePctInput}
+                    onChange={(e) => setEdgeWastagePctInput(e.target.value)}
+                    className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-right text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                  />
+                </div>
               </div>
-              <div className="sm:col-span-3">
-                <label htmlFor={`${uid}-role`} className="block text-ink-muted mb-1">
-                  บทบาท (Role)
-                </label>
-                <select
-                  id={`${uid}-role`}
-                  value={edgeRole}
-                  onChange={(e) => setEdgeRole(e.target.value as ComponentRole)}
-                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
-                >
-                  {COMPONENT_ROLES.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="sm:col-span-2">
-                <label htmlFor={`${uid}-qty`} className="block text-ink-muted mb-1">
-                  ปริมาณ
-                </label>
-                <input
-                  id={`${uid}-qty`}
-                  type="text"
-                  value={edgeQtyInput}
-                  onChange={(e) => setEdgeQtyInput(e.target.value)}
-                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-right text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
-                />
-              </div>
-              <div className="sm:col-span-2">
-                <label htmlFor={`${uid}-waste`} className="block text-ink-muted mb-1">
-                  สูญเสีย (%)
-                </label>
-                <input
-                  id={`${uid}-waste`}
-                  type="text"
-                  value={edgeWastagePctInput}
-                  onChange={(e) => setEdgeWastagePctInput(e.target.value)}
-                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-right text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
-                />
-              </div>
-            </div>
 
-            <button
-              type="button"
-              disabled={!selectedParent || nonParentCatalog.length === 0}
-              onClick={() => void handleUpsertEdge()}
-              className={`h-[48px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
-            >
-              {selectedParent
-                ? `บันทึกส่วนประกอบเข้าสูตร ${selectedParent.itemName}`
-                : 'กรุณาเพิ่มเมนูผูกสูตร BOM ในคลังสินค้าก่อน'}
-            </button>
-          </div>
+              <button
+                type="button"
+                disabled={!selectedParent || nonParentCatalog.length === 0}
+                onClick={() => void handleUpsertEdge()}
+                className={`h-[48px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+              >
+                {selectedParent
+                  ? `บันทึกส่วนประกอบเข้าสูตร ${selectedParent.itemName}`
+                  : 'กรุณาเพิ่มเมนูผูกสูตร BOM ในคลังสินค้าก่อน'}
+              </button>
+            </div>
+          ) : (
+            <div className="rounded-[4px] border border-hairline bg-surface-1 px-4 py-3 text-xs text-ink-muted">
+              โหมดดูสูตรการผลิตสำหรับฝ่ายคลังสินค้า (Read-Only) — สามารถแก้ไขหรือลบส่วนประกอบได้โดยผู้จัดการร้าน (MANAGER) หรือเจ้าของร้าน (OWNER)
+            </div>
+          )}
         </div>
       </div>
 

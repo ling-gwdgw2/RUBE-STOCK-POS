@@ -54,7 +54,7 @@ pub fn allocate_landed_cost_exact(
         base_values.push((idx, q_rec, c_base, v_i));
     }
 
-    if total_landed_micro == 0 || sum_base_value == 0 {
+    if total_landed_micro == 0 {
         return Ok(lines
             .iter()
             .map(|l| PoLineCostAllocation {
@@ -64,6 +64,15 @@ pub fn allocate_landed_cost_exact(
             })
             .collect());
     }
+
+    // Fallback to quantity-weighted Largest Remainder allocation when all items have zero base value
+    let use_qty_weights = sum_base_value == 0;
+    let sum_q_rec: i128 = base_values.iter().map(|(_, q_rec, _, _)| *q_rec).sum();
+    let weight_sum = if use_qty_weights {
+        sum_q_rec
+    } else {
+        sum_base_value
+    };
 
     struct ProvisionalShare {
         idx: usize,
@@ -76,13 +85,14 @@ pub fn allocate_landed_cost_exact(
     let mut shares: Vec<ProvisionalShare> = base_values
         .into_iter()
         .map(|(idx, q_rec, c_base, v_i)| {
-            let prod = total_landed_micro * v_i;
+            let weight = if use_qty_weights { q_rec } else { v_i };
+            let prod = total_landed_micro * weight;
             ProvisionalShare {
                 idx,
                 q_rec,
                 c_base,
-                floor_share: prod / sum_base_value,
-                remainder: prod % sum_base_value,
+                floor_share: prod / weight_sum,
+                remainder: prod % weight_sum,
             }
         })
         .collect();
@@ -177,6 +187,37 @@ mod tests {
         // Negative stock guard resets MAC to incoming unit cost
         let mac_reset = compute_new_mac(-2_000, 40_000_000, 10_000, 50_000_000).unwrap();
         assert_eq!(mac_reset, 50_000_000);
+    }
+
+    #[test]
+    fn test_landed_cost_zero_base_unit_cost_falls_back_to_qty_weights() {
+        let lines = vec![
+            PoLineInput {
+                item_id: "FREE-1".to_string(),
+                received_qty_milli: 1_000,
+                base_unit_cost_micro_baht: 0,
+            },
+            PoLineInput {
+                item_id: "FREE-2".to_string(),
+                received_qty_milli: 2_000,
+                base_unit_cost_micro_baht: 0,
+            },
+        ];
+        let allocated = allocate_landed_cost_exact(&lines, 10_000).unwrap();
+        let total_micro: i64 = allocated
+            .iter()
+            .map(|a| a.allocated_landed_cost_micro_baht)
+            .sum();
+        assert_eq!(total_micro, 100_000_000);
+        assert_eq!(allocated[0].allocated_landed_cost_micro_baht, 33_333_333);
+        assert_eq!(allocated[1].allocated_landed_cost_micro_baht, 66_666_667);
+        assert_eq!(allocated[0].effective_unit_cost_micro_baht, 33_333_333);
+        assert_eq!(allocated[1].effective_unit_cost_micro_baht, 33_333_334);
+
+        let zero_landed = allocate_landed_cost_exact(&lines, 0).unwrap();
+        assert!(zero_landed
+            .iter()
+            .all(|a| a.allocated_landed_cost_micro_baht == 0));
     }
 }
 

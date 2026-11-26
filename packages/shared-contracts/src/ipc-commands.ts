@@ -11,6 +11,7 @@ import {
   SCALE_BASIS_POINTS,
   SCALE_MILLI,
   roundDivBigInt,
+  toSafeFixedPointNumber,
 } from './fixed-point.ts';
 
 export type BusinessProfile = 'RETAIL' | 'HOSPITALITY' | 'HYBRID';
@@ -103,6 +104,7 @@ export interface CheckoutOrderRequest {
     variantId: string;
     quantityMilli: MilliUnit;
     unitPriceSatang: Satang;
+    overrideLineTotalSatang?: Satang | undefined;
     selectedModifierIds: readonly string[];
   }>;
 }
@@ -179,6 +181,10 @@ export function calculateOrderLineDeductions(
   variantCatalog: ReadonlyMap<string, ItemVariantDto>,
   bomEdges: readonly BomEdgeDto[]
 ): StockDeductionEntry[] {
+  if (soldQtyMilli <= 0) {
+    throw new RangeError('soldQtyMilli must be > 0');
+  }
+
   const deductions: StockDeductionEntry[] = [];
   const qSold = BigInt(soldQtyMilli);
 
@@ -190,16 +196,19 @@ export function calculateOrderLineDeductions(
     }
   }
 
-  if (!soldVariant.isComposite) {
+  if (!soldVariant.isComposite || soldVariant.useProduction) {
     const cogs = roundDivBigInt(qSold * BigInt(soldVariant.averageCostMicroBaht), SCALE_MILLI);
     deductions.push({
       variantId: soldVariant.id,
       transactionType: 'SALE_DIRECT',
       quantityChangeMilli: -soldQtyMilli,
       unitCostMicroBaht: soldVariant.averageCostMicroBaht,
-      lineCogsMicroBaht: Number(cogs),
+      lineCogsMicroBaht: toSafeFixedPointNumber(cogs, 'calculateOrderLineDeductions direct cogs'),
     });
   } else {
+    // Accumulate total leaf quantities first to avoid diamond DAG multi-path rounding drift
+    const leafQtyByVariantId = new Map<string, bigint>();
+
     function expandBom(
       parentVariantId: string,
       parentMultiplierMilli: bigint,
@@ -239,30 +248,31 @@ export function calculateOrderLineDeductions(
           }
           expandBom(childVariant.id, cumulativeQtyMilli, nextScaledRoles);
         } else if (cumulativeQtyMilli > 0n) {
-          const cogs = roundDivBigInt(
-            cumulativeQtyMilli * BigInt(childVariant.averageCostMicroBaht),
-            SCALE_MILLI
-          );
-          const existingBomEntry = deductions.find(
-            (d) => d.variantId === childVariant.id && d.transactionType === 'SALE_BOM'
-          );
-          if (existingBomEntry) {
-            existingBomEntry.quantityChangeMilli -= Number(cumulativeQtyMilli);
-            existingBomEntry.lineCogsMicroBaht += Number(cogs);
-          } else {
-            deductions.push({
-              variantId: childVariant.id,
-              transactionType: 'SALE_BOM',
-              quantityChangeMilli: -Number(cumulativeQtyMilli),
-              unitCostMicroBaht: childVariant.averageCostMicroBaht,
-              lineCogsMicroBaht: Number(cogs),
-            });
-          }
+          const prev = leafQtyByVariantId.get(childVariant.id) ?? 0n;
+          leafQtyByVariantId.set(childVariant.id, prev + cumulativeQtyMilli);
         }
       }
     }
 
     expandBom(soldVariant.id, qSold, new Set());
+
+    for (const [variantId, totalQtyMilli] of leafQtyByVariantId.entries()) {
+      const leafVariant = variantCatalog.get(variantId)!;
+      const cogs = roundDivBigInt(
+        totalQtyMilli * BigInt(leafVariant.averageCostMicroBaht),
+        SCALE_MILLI
+      );
+      deductions.push({
+        variantId,
+        transactionType: 'SALE_BOM',
+        quantityChangeMilli: -toSafeFixedPointNumber(
+          totalQtyMilli,
+          'calculateOrderLineDeductions bom qty'
+        ),
+        unitCostMicroBaht: leafVariant.averageCostMicroBaht,
+        lineCogsMicroBaht: toSafeFixedPointNumber(cogs, 'calculateOrderLineDeductions bom cogs'),
+      });
+    }
   }
 
   for (const mod of selectedModifiers) {

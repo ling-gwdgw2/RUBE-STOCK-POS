@@ -2,9 +2,13 @@ import React, { useEffect, useId, useState } from 'react';
 import {
   Building2,
   CheckCircle2,
+  Cpu,
+  HardDrive,
   KeyRound,
+  Lock,
   Network,
   Printer,
+  RefreshCw,
   RotateCcw,
   Shield,
   Sliders,
@@ -14,26 +18,37 @@ import { posTransport } from '../api/pos-transport.ts';
 import type {
   BootstrapPayload,
   BusinessProfile,
+  DiscoveredStorageDriveDto,
   PrinterTransportMode,
   StaffUserDto,
+  UsbBackupConfigStatusDto,
   UserRole,
 } from '../types.ts';
+import { sanitizePinInput } from '../utils/keyboard-digits.ts';
+import { canManageCriticalStoreSettings } from '../utils/rbac.ts';
 import { UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface SystemSettingsWorkspaceProps {
+  outletId?: string;
   bootstrap: BootstrapPayload;
   currentUser: StaffUserDto;
+  simulationModeEnabled: boolean;
+  onToggleSimulationMode: (enabled: boolean) => void;
   onRefreshState: () => Promise<void>;
   onToast: (msg: string, tone?: 'success' | 'warn' | 'error') => void;
 }
 
 export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = ({
+  outletId = 'OUTLET-HQ',
   bootstrap,
   currentUser,
+  simulationModeEnabled,
+  onToggleSimulationMode,
   onRefreshState,
   onToast,
 }) => {
   const uid = useId();
+  const isOwner = canManageCriticalStoreSettings(currentUser.role);
   const [storeName, setStoreName] = useState(bootstrap.storeSettings.storeName);
   const [taxId, setTaxId] = useState(bootstrap.storeSettings.taxId);
   const [branchCode, setBranchCode] = useState(bootstrap.storeSettings.branchCode);
@@ -70,6 +85,19 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
     Array<{ name: string; portName: string; isDefault: boolean }>
   >([]);
 
+  // Off-Disk External USB Drive Backup Config
+  const [usbDrives, setUsbDrives] = useState<DiscoveredStorageDriveDto[]>([]);
+  const [usbBackupCfg, setUsbBackupCfg] = useState<UsbBackupConfigStatusDto | null>(
+    bootstrap.usbBackupConfig ?? null
+  );
+  const [usbDirInput, setUsbDirInput] = useState(
+    bootstrap.usbBackupConfig?.customBackupDir ?? ''
+  );
+  const [mirrorLocalFallback, setMirrorLocalFallback] = useState<boolean>(
+    bootstrap.usbBackupConfig?.mirrorToLocalFallback ?? true
+  );
+  const [scanningDrives, setScanningDrives] = useState(false);
+
   useEffect(() => {
     setStoreName(bootstrap.storeSettings.storeName);
     setTaxId(bootstrap.storeSettings.taxId);
@@ -82,13 +110,38 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
     setPrnWinName(bootstrap.printerConfig.windowsPrinterName);
     setPrnWidthMm(bootstrap.printerConfig.paperWidthMm);
     setPrnAutoDrawer(bootstrap.printerConfig.autoKickDrawerOnCash);
-  }, [bootstrap.printerConfig, bootstrap.storeSettings]);
+    if (bootstrap.usbBackupConfig) {
+      setUsbBackupCfg(bootstrap.usbBackupConfig);
+      setUsbDirInput(bootstrap.usbBackupConfig.customBackupDir);
+      setMirrorLocalFallback(bootstrap.usbBackupConfig.mirrorToLocalFallback);
+    }
+  }, [bootstrap.printerConfig, bootstrap.storeSettings, bootstrap.usbBackupConfig]);
+
+  const handleScanUsbDrives = async () => {
+    setScanningDrives(true);
+    try {
+      const res = await posTransport.listUsbBackupDrives();
+      setUsbDrives(res.drives);
+      setUsbBackupCfg(res.usbBackupConfig);
+    } catch {
+      // ignore on non-Windows or restricted environments
+    } finally {
+      setScanningDrives(false);
+    }
+  };
 
   useEffect(() => {
-    void posTransport.listSecurityAuditLogs(40).then((r) => setAuditLogs(r.auditLogs));
+    void posTransport.listSecurityAuditLogs(40).then((r) => setAuditLogs(r.auditLogs)).catch(() => {});
     void posTransport
       .listWindowsPrinters()
       .then((r) => setWinPrinters(r.printers))
+      .catch(() => {});
+    void posTransport
+      .listUsbBackupDrives()
+      .then((r) => {
+        setUsbDrives(r.drives);
+        setUsbBackupCfg(r.usbBackupConfig);
+      })
       .catch(() => {});
   }, [bootstrap.profile]);
 
@@ -158,6 +211,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
     setBusy(true);
     try {
       await posTransport.updateStoreSettings({
+        outletId,
         storeName,
         taxId,
         branchCode,
@@ -211,6 +265,51 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           : 'เพิ่มบัญชีผู้ใช้งานพนักงานและเข้ารหัส PIN สำเร็จ',
         'success'
       );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveUsbBackupConfig = async (overrideCustomDir?: string) => {
+    const targetDir = overrideCustomDir !== undefined ? overrideCustomDir : usbDirInput;
+    setBusy(true);
+    try {
+      const res = await posTransport.saveUsbBackupConfig({
+        customBackupDir: targetDir,
+        mirrorToLocalFallback: mirrorLocalFallback,
+      });
+      setUsbBackupCfg(res.usbBackupConfig);
+      setUsbDirInput(res.usbBackupConfig.customBackupDir);
+      await onRefreshState();
+      onToast(
+        res.usbBackupConfig.isExternalCustomDir
+          ? `บันทึกปลายทางสำรองข้อมูลลง "${res.usbBackupConfig.activeEffectiveDir}" สำเร็จ`
+          : 'เปลี่ยนกลับใช้โฟลเดอร์สำรองข้อมูลในเครื่องเป็นค่าเริ่มต้นแล้ว',
+        'success'
+      );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRunUsbBackupNow = async () => {
+    setBusy(true);
+    try {
+      const res = await posTransport.runUsbBackupNow();
+      setUsbBackupCfg(res.usbBackupConfig);
+      await onRefreshState();
+      if (res.backupWarningThai) {
+        onToast(res.backupWarningThai, 'warn');
+      } else {
+        onToast(
+          `สำรองฐานข้อมูลเข้ารหัสสำเร็จ (${res.usbBackup.retainedBackupsCount}/14 กะล่าสุด)`,
+          'success'
+        );
+      }
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -276,9 +375,9 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <button
                 key={prof.id}
                 type="button"
-                disabled={busy}
+                disabled={busy || !isOwner}
                 onClick={() => void handleSwitchProfile(prof.id)}
-                className={`rounded-[4px] border p-5 text-left ${UI_INTERACTION.focusButton} ${
+                className={`rounded-[4px] border p-5 text-left disabled:opacity-60 ${UI_INTERACTION.focusButton} ${
                   active
                     ? 'border-primary bg-primary-soft/50'
                     : 'border-hairline bg-canvas hover:border-primary'
@@ -314,15 +413,17 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             </div>
           </div>
 
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void handleLaunchSetupWizard()}
-            className={`flex h-[42px] items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            <span>เปิดหน้า First-Run Setup Wizard / ส่งออก .recovery-kit</span>
-          </button>
+          {isOwner && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void handleLaunchSetupWizard()}
+              className={`flex h-[42px] items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              <span>เปิดหน้า First-Run Setup Wizard / ส่งออก .recovery-kit</span>
+            </button>
+          )}
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
@@ -452,13 +553,176 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         </div>
       </section>
 
+      {/* 1.8 Off-Disk USB Flash Drive / External Backup Folder Settings */}
+      <section className="rounded-[4px] border border-hairline bg-canvas p-6 space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary-dark">
+              <HardDrive className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="font-google-display text-[20px] font-normal leading-[28px] text-ink">
+                โฟลเดอร์ / แฟลชไดรฟ์ USB สำหรับสำรองฐานข้อมูลอัตโนมัติ (14-Shift Off-Disk Backup)
+              </h2>
+              <p className="text-xs text-ink-muted mt-1">
+                สำรองข้อมูลเข้ารหัส AES-256 อัตโนมัติทุกครั้งที่ปิดกะ — แนะนำให้เลือกแฟลชไดรฟ์ USB ภายนอกหรือไดรฟ์สำรองแยกจากดิสก์หลัก
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {usbBackupCfg?.isExternalCustomDir && usbBackupCfg.targetWritable ? (
+              <span className="inline-flex items-center gap-1.5 rounded-[48px] border border-primary bg-primary-soft px-3 py-1 text-xs font-medium text-primary-dark">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                <span>แยกออกนอกโฟลเดอร์หลักแล้ว</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-[48px] border border-hairline bg-surface-1 px-3 py-1 text-xs font-medium text-ink-soft">
+                <span>
+                  {usbBackupCfg?.isExternalCustomDir && !usbBackupCfg.targetWritable
+                    ? 'ไดรฟ์ภายนอกไม่พร้อมใช้งาน (ใช้สำรองในเครื่องชั่วคราว)'
+                    : 'ยังเก็บอยู่ในดิสก์เดียวกับฐานข้อมูล — แนะนำเลือก USB ภายนอก'}
+                </span>
+              </span>
+            )}
+
+            <button
+              type="button"
+              disabled={scanningDrives}
+              onClick={() => void handleScanUsbDrives()}
+              className={`inline-flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${scanningDrives ? 'animate-spin' : ''}`} />
+              <span>ค้นหาไดรฟ์ใหม่</span>
+            </button>
+          </div>
+        </div>
+
+        {usbDrives.length > 0 && (
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-ink-muted">
+              เลือกด่วนจากไดรฟ์ที่ตรวจพบในเครื่อง (คลิกเพื่อใส่พาธโฟลเดอร์สำรอง):
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {usbDrives.map((d) => {
+                const freeGb = Math.round((d.freeBytes / (1024 * 1024 * 1024)) * 10) / 10;
+                const isSelected =
+                  usbDirInput.trim().toLowerCase() === d.suggestedBackupPath.toLowerCase();
+                return (
+                  <button
+                    key={d.driveLetter}
+                    type="button"
+                    disabled={!isOwner}
+                    onClick={() => setUsbDirInput(d.suggestedBackupPath)}
+                    className={`inline-flex min-h-[40px] items-center gap-2 rounded-[48px] border px-3.5 py-1.5 text-xs disabled:opacity-60 ${UI_INTERACTION.focusButton} ${
+                      isSelected
+                        ? 'border-primary bg-primary-soft text-primary-dark font-medium'
+                        : 'border-hairline bg-surface-1 text-ink hover:border-primary'
+                    }`}
+                  >
+                    <span className="font-medium tabular-nums-google">{d.driveLetter}</span>
+                    <span className="text-ink-muted">
+                      {d.volumeName ? `${d.volumeName} · ` : ''}
+                      {d.driveKind === 'REMOVABLE_USB'
+                        ? 'USB ภายนอก'
+                        : d.driveKind === 'NETWORK_DRIVE'
+                          ? 'ไดรฟ์เครือข่าย'
+                          : 'ดิสก์ในเครื่อง'}
+                    </span>
+                    <span className="text-[11px] text-ink-muted tabular-nums-google">
+                      ว่าง {freeGb} GB
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-end text-xs">
+          <div className="lg:col-span-7">
+            <label htmlFor={`${uid}-usb-backup-dir`} className="block text-ink-muted mb-1">
+              พาธโฟลเดอร์ปลายทางสำหรับไฟล์สำรอง .db.enc (เว้นว่างเพื่อใช้โฟลเดอร์ในเครื่อง)
+            </label>
+            <input
+              id={`${uid}-usb-backup-dir`}
+              type="text"
+              disabled={!isOwner}
+              value={usbDirInput}
+              onChange={(e) => setUsbDirInput(e.target.value)}
+              placeholder={
+                usbBackupCfg?.defaultLocalBackupDir || 'เช่น E:\\RubePOS_Backups หรือ D:\\Backups'
+              }
+              className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink placeholder:text-ink-muted disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
+            />
+          </div>
+
+          <div className="lg:col-span-5 flex flex-wrap items-center justify-end gap-2">
+            {isOwner && (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void handleSaveUsbBackupConfig('')}
+                  className={`h-[44px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
+                >
+                  รีเซ็ตเป็นค่าเริ่มต้น
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void handleSaveUsbBackupConfig()}
+                  className={`h-[44px] rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                >
+                  บันทึกปลายทางสำรองข้อมูล
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void handleRunUsbBackupNow()}
+              className={`h-[44px] rounded-[48px] border border-primary bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
+            >
+              สำรองข้อมูลเดี๋ยวนี้
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-hairline pt-3 text-xs">
+          <label className="flex items-center gap-2 text-ink-soft cursor-pointer rounded-[4px] p-1 focus-within:ring-2 focus-within:ring-primary/25">
+            <input
+              type="checkbox"
+              disabled={!isOwner}
+              checked={mirrorLocalFallback}
+              onChange={(e) => setMirrorLocalFallback(e.target.checked)}
+              className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
+            />
+            สำรองคู่ขนานไว้ในเครื่องด้วยเสมอหากถอดแฟลชไดรฟ์ (Local Fallback Mirror)
+          </label>
+
+          {usbBackupCfg && (
+            <span className="text-[11px] text-ink-muted truncate max-w-md">
+              ใช้งานจริง: {usbBackupCfg.activeEffectiveDir}
+            </span>
+          )}
+        </div>
+      </section>
+
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         {/* 2. Store Identity & PromptPay Settings */}
         <section className="xl:col-span-6 rounded-[4px] border border-hairline bg-canvas p-6 space-y-5">
-          <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
-            <Building2 className="h-5 w-5 text-primary" />
-            <span>ข้อมูลกิจการ ใบกำกับภาษี ABB &amp; บัญชี PromptPay</span>
-          </h3>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
+              <Building2 className="h-5 w-5 text-primary" />
+              <span>ข้อมูลกิจการ ใบกำกับภาษี ABB &amp; บัญชี PromptPay</span>
+            </h3>
+            {!isOwner && (
+              <span className="inline-flex items-center gap-1 rounded-[48px] border border-hairline bg-surface-1 px-2.5 py-0.5 text-[11px] font-medium text-ink-muted">
+                <Lock className="h-3 w-3" /> แก้ไขได้เฉพาะ OWNER
+              </span>
+            )}
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
             <div className="sm:col-span-2">
@@ -468,9 +732,10 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <input
                 id={`${uid}-store-name`}
                 type="text"
+                disabled={!isOwner}
                 value={storeName}
                 onChange={(e) => setStoreName(e.target.value)}
-                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink ${UI_INTERACTION.focusControl}`}
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
             </div>
             <div>
@@ -480,9 +745,10 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <input
                 id={`${uid}-tax-id`}
                 type="text"
+                disabled={!isOwner}
                 value={taxId}
                 onChange={(e) => setTaxId(e.target.value)}
-                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
             </div>
             <div>
@@ -492,9 +758,10 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <input
                 id={`${uid}-branch-code`}
                 type="text"
+                disabled={!isOwner}
                 value={branchCode}
                 onChange={(e) => setBranchCode(e.target.value)}
-                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
             </div>
             <div>
@@ -504,9 +771,10 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <input
                 id={`${uid}-rd-reg`}
                 type="text"
+                disabled={!isOwner}
                 value={rdPosRegNo}
                 onChange={(e) => setRdPosRegNo(e.target.value)}
-                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
             </div>
             <div>
@@ -516,16 +784,17 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <input
                 id={`${uid}-promptpay`}
                 type="text"
+                disabled={!isOwner}
                 value={promptPayId}
                 onChange={(e) => setPromptPayId(e.target.value)}
-                className={`h-11 w-full rounded-[4px] border border-primary bg-canvas px-3.5 font-medium text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                className={`h-11 w-full rounded-[4px] border border-primary bg-canvas px-3.5 font-medium text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
             </div>
           </div>
 
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || !isOwner}
             onClick={() => void handleSaveStoreSettings()}
             className={`h-[46px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
           >
@@ -567,14 +836,16 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <option value="MANAGER">MANAGER</option>
               <option value="WAREHOUSE">WAREHOUSE</option>
               <option value="KITCHEN">KITCHEN</option>
-              <option value="OWNER">OWNER</option>
+              {isOwner && <option value="OWNER">OWNER</option>}
             </select>
             <input
               type="password"
+              inputMode="numeric"
+              maxLength={8}
               aria-label="รหัส PIN พนักงาน 4 ถึง 8 หลัก"
               placeholder="PIN (4–8 หลัก)"
               value={newPin}
-              onChange={(e) => setNewPin(e.target.value)}
+              onChange={(e) => setNewPin(sanitizePinInput(e.target.value))}
               className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
             />
           </div>
@@ -626,19 +897,21 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                     <span className="rounded-[48px] border border-hairline bg-surface-1 px-2.5 py-0.5 text-[11px] font-medium text-primary-dark">
                       {u.role}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingStaffId(u.id);
-                        setNewUsername(u.username);
-                        setNewDisplayName(u.displayName);
-                        setNewRole(u.role);
-                        setNewPin('');
-                      }}
-                      className={`rounded-[48px] border border-hairline bg-canvas px-3 py-1 text-[11px] font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
-                    >
-                      แก้ไข / PIN
-                    </button>
+                    {(isOwner || u.role !== 'OWNER') && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingStaffId(u.id);
+                          setNewUsername(u.username);
+                          setNewDisplayName(u.displayName);
+                          setNewRole(u.role);
+                          setNewPin('');
+                        }}
+                        className={`rounded-[48px] border border-hairline bg-canvas px-3 py-1 text-[11px] font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
+                      >
+                        แก้ไข / PIN
+                      </button>
+                    )}
                   </div>
                 </div>
               ))
@@ -747,6 +1020,50 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           </div>
         </section>
       </div>
+
+      {/* 5. Simulation & Hardware-in-the-Loop Developer Toggle (OWNER ONLY) */}
+      {isOwner && (
+        <section className="rounded-[4px] border border-hairline bg-canvas p-6 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-1 border border-hairline text-primary">
+              <Cpu className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-google-display text-[18px] font-normal text-ink">
+                โหมดจำลองฮาร์ดแวร์และปุ่มทดสอบนักพัฒนา (HIL &amp; Demo Controls)
+              </h3>
+              <p className="text-xs text-ink-muted mt-1 max-w-2xl">
+                ปิดเป็นค่าเริ่มต้นในการขายหน้าร้านจริงเพื่อซ่อนปุ่ม HIL Bench, ปุ่มสลิปธนาคารตัวอย่าง, ปุ่มจำลองบาร์โค้ดตราชั่ง และรหัส PIN ทดสอบออกจากหน้าจอแคชเชียร์
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            role="switch"
+            aria-checked={simulationModeEnabled}
+            onClick={() => {
+              const next = !simulationModeEnabled;
+              onToggleSimulationMode(next);
+              onToast(
+                next
+                  ? 'เปิดโหมดจำลองฮาร์ดแวร์ (HIL & Demo Controls) สำหรับทดสอบแล้ว'
+                  : 'ปิดโหมดจำลองฮาร์ดแวร์แล้ว — หน้าจออยู่ในโหมดขายหน้าร้านจริง',
+                next ? 'warn' : 'success'
+              );
+            }}
+            className={`min-h-[44px] rounded-[48px] border px-5 font-google-display text-xs font-medium tracking-[0.25px] ${UI_INTERACTION.focusButton} ${
+              simulationModeEnabled
+                ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                : 'border-hairline bg-canvas text-ink hover:border-primary hover:text-primary'
+            }`}
+          >
+            {simulationModeEnabled
+              ? 'กำลังเปิดโหมดจำลอง (คลิกเพื่อปิดเข้าโหมดขายจริง)'
+              : 'ปิดโหมดจำลองอยู่ (คลิกเพื่อเปิดเครื่องมือทดสอบ HIL)'}
+          </button>
+        </section>
+      )}
     </div>
   );
 };

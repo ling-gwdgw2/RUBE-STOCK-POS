@@ -14,6 +14,7 @@ import {
 export interface KeystrokeSample {
   code: string;
   timestampMs: number;
+  shiftKey?: boolean | undefined;
 }
 
 const IGNORED_MODIFIER_CODES = new Set([
@@ -33,7 +34,7 @@ const IGNORED_MODIFIER_CODES = new Set([
 ]);
 
 export class PhysicalScannerStreamBuffer {
-  private bufferCodes: string[] = [];
+  private bufferCodes: Array<{ code: string; shiftKey?: boolean | undefined }> = [];
   private lastKeyTimestampMs = 0;
   private rolledBackFirstLeakedChar = false;
   private readonly interKeyThresholdMs: number;
@@ -46,7 +47,8 @@ export class PhysicalScannerStreamBuffer {
 
   public pushKeystroke(
     sample: KeystrokeSample,
-    onRollbackFirstChar?: () => void
+    onRollbackFirstChar?: () => void,
+    onFirstKeyCapture?: () => void
   ): { completedBarcode: string | null; shouldPreventDefault: boolean } {
     // Ignore Shift/Ctrl/Alt/Meta/CapsLock modifier keys so Shift+Key human typing never triggers false rollback
     if (IGNORED_MODIFIER_CODES.has(sample.code)) {
@@ -79,7 +81,11 @@ export class PhysicalScannerStreamBuffer {
     }
 
     this.lastKeyTimestampMs = sample.timestampMs;
-    this.bufferCodes.push(sample.code);
+    this.bufferCodes.push({ code: sample.code, shiftKey: sample.shiftKey });
+
+    if (this.bufferCodes.length === 1) {
+      onFirstKeyCapture?.();
+    }
 
     // When the 2nd character arrives within `< 50ms`, roll back the 1st character that leaked into `<input>`
     if (this.bufferCodes.length === 2 && !this.rolledBackFirstLeakedChar) {

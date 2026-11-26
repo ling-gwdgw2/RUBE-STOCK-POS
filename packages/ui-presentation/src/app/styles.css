@@ -33,9 +33,9 @@
     --glue-grey-0: #ffffff;   /* canvas */
     --glue-hero-bg: #000000;  /* hero-bg */
 
-    /* Canonical Two-Typeface Split (Google Sans -> Manrope, Google Sans Text -> Inter) */
-    --font-google-sans: "Google Sans", "Product Sans", "Manrope", "Noto Sans Thai", Arial, Helvetica, sans-serif;
-    --font-google-text: "Google Sans Text", "Inter", "Noto Sans Thai", Arial, Helvetica, sans-serif;
+    /* Canonical Two-Typeface Split with Offline Windows Thai/Latin Fallbacks */
+    --font-google-sans: "Leelawadee UI", "Segoe UI", "Google Sans", "Product Sans", "Manrope", "Noto Sans Thai", "Tahoma", Arial, Helvetica, sans-serif;
+    --font-google-text: "Leelawadee UI", "Segoe UI", "Google Sans Text", "Inter", "Noto Sans Thai", "Tahoma", Arial, Helvetica, sans-serif;
 
     font-family: var(--font-google-text);
     color-scheme: light;
@@ -105,18 +105,31 @@
 
 /* Physical 80mm / 58mm Windows Thermal Printer Support (@media print) */
 @media print {
+  html,
+  body {
+    height: auto !important;
+    overflow: visible !important;
+  }
   body * {
     visibility: hidden !important;
+  }
+  [data-rube-modal-backdrop='true'] {
+    position: static !important;
+    overflow: visible !important;
+    height: auto !important;
   }
   #rube-printable-receipt,
   #rube-printable-receipt * {
     visibility: visible !important;
   }
   #rube-printable-receipt {
-    position: fixed !important;
+    position: absolute !important;
     left: 0 !important;
     top: 0 !important;
     width: 78mm !important;
+    max-width: none !important;
+    max-height: none !important;
+    overflow: visible !important;
     padding: 2mm !important;
     border: none !important;
     background: #ffffff !important;

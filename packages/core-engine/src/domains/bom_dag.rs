@@ -132,7 +132,7 @@ pub fn compute_multilevel_bom_deductions(
     let mut results = Vec::new();
     let q_sold = sold_qty_milli as i128;
 
-    if !root_variant.is_composite {
+    if !root_variant.is_composite || root_variant.use_production {
         let cogs = round_div_to_i64(
             q_sold * (root_variant.average_cost_micro_baht as i128),
             SCALE_MILLI,
@@ -145,6 +145,10 @@ pub fn compute_multilevel_bom_deductions(
             line_cogs_micro_baht: cogs,
         });
     } else {
+        // Accumulate total leaf quantities first to avoid diamond DAG multi-path rounding drift
+        let mut leaf_qty_by_id: HashMap<String, i128> = HashMap::new();
+        let mut leaf_order: Vec<String> = Vec::new();
+
         fn expand_recursive(
             parent_id: &str,
             parent_multiplier_milli: i128,
@@ -152,7 +156,8 @@ pub fn compute_multilevel_bom_deductions(
             scaled_roles_in_ancestors: &HashSet<ComponentRole>,
             catalog: &HashMap<String, VariantStockSnapshot>,
             edges: &[BomComponentEdge],
-            out: &mut Vec<ComputedBomDeduction>,
+            leaf_qty_by_id: &mut HashMap<String, i128>,
+            leaf_order: &mut Vec<String>,
         ) -> Result<(), FixedPointError> {
             for edge in edges.iter().filter(|e| e.composite_variant_id == parent_id) {
                 let Some(child) = catalog.get(&edge.component_variant_id) else {
@@ -193,29 +198,16 @@ pub fn compute_multilevel_bom_deductions(
                         &next_scaled_roles,
                         catalog,
                         edges,
-                        out,
+                        leaf_qty_by_id,
+                        leaf_order,
                     )?;
                 } else if cumulative_qty > 0 {
-                    let qty_i64 = i64::try_from(cumulative_qty)
-                        .map_err(|_| FixedPointError::OverflowI64(cumulative_qty))?;
-                    let cogs = round_div_to_i64(
-                        cumulative_qty * (child.average_cost_micro_baht as i128),
-                        SCALE_MILLI,
-                    )?;
-                    if let Some(existing) = out
-                        .iter_mut()
-                        .find(|d| d.variant_id == child.variant_id && d.transaction_type == "SALE_BOM")
-                    {
-                        existing.quantity_change_milli -= qty_i64;
-                        existing.line_cogs_micro_baht += cogs;
-                    } else {
-                        out.push(ComputedBomDeduction {
-                            variant_id: child.variant_id.clone(),
-                            transaction_type: "SALE_BOM",
-                            quantity_change_milli: -qty_i64,
-                            unit_cost_micro_baht: child.average_cost_micro_baht,
-                            line_cogs_micro_baht: cogs,
-                        });
+                    match leaf_qty_by_id.get_mut(&child.variant_id) {
+                        Some(total) => *total += cumulative_qty,
+                        None => {
+                            leaf_order.push(child.variant_id.clone());
+                            leaf_qty_by_id.insert(child.variant_id.clone(), cumulative_qty);
+                        }
                     }
                 }
             }
@@ -229,8 +221,29 @@ pub fn compute_multilevel_bom_deductions(
             &HashSet::new(),
             catalog,
             edges,
-            &mut results,
+            &mut leaf_qty_by_id,
+            &mut leaf_order,
         )?;
+
+        for variant_id in leaf_order {
+            let total_qty = leaf_qty_by_id[&variant_id];
+            let Some(leaf_variant) = catalog.get(&variant_id) else {
+                return Err(FixedPointError::MissingComponentVariant(variant_id));
+            };
+            let qty_i64 = i64::try_from(total_qty)
+                .map_err(|_| FixedPointError::OverflowI64(total_qty))?;
+            let cogs = round_div_to_i64(
+                total_qty * (leaf_variant.average_cost_micro_baht as i128),
+                SCALE_MILLI,
+            )?;
+            results.push(ComputedBomDeduction {
+                variant_id,
+                transaction_type: "SALE_BOM",
+                quantity_change_milli: -qty_i64,
+                unit_cost_micro_baht: leaf_variant.average_cost_micro_baht,
+                line_cogs_micro_baht: cogs,
+            });
+        }
     }
 
     for m in modifiers {
@@ -347,5 +360,134 @@ mod tests {
         assert_eq!(deds[0].quantity_change_milli, -10_000);
         assert_eq!(deds[1].quantity_change_milli, 4_000);
         assert!(deds[1].line_cogs_micro_baht < 0);
+    }
+
+    #[test]
+    fn test_prebuilt_direct_sale_and_diamond_dag_no_rounding_drift() {
+        let mut catalog = HashMap::new();
+        catalog.insert(
+            "PREBUILT_BOBA".to_string(),
+            VariantStockSnapshot {
+                variant_id: "PREBUILT_BOBA".to_string(),
+                is_composite: true,
+                use_production: true,
+                average_cost_micro_baht: 80_000_000,
+            },
+        );
+        catalog.insert(
+            "DRY_BOBA".to_string(),
+            VariantStockSnapshot {
+                variant_id: "DRY_BOBA".to_string(),
+                is_composite: false,
+                use_production: false,
+                average_cost_micro_baht: 50_000_000,
+            },
+        );
+
+        let prebuilt_edges = vec![BomComponentEdge {
+            composite_variant_id: "PREBUILT_BOBA".to_string(),
+            component_variant_id: "DRY_BOBA".to_string(),
+            component_role: ComponentRole::Standard,
+            quantity_milli: 500,
+            wastage_basis_points: 0,
+        }];
+
+        let prebuilt_deds = compute_multilevel_bom_deductions(
+            catalog.get("PREBUILT_BOBA").unwrap(),
+            2_000,
+            &[],
+            &catalog,
+            &prebuilt_edges,
+        )
+        .unwrap();
+        assert_eq!(prebuilt_deds.len(), 1);
+        assert_eq!(prebuilt_deds[0].variant_id, "PREBUILT_BOBA");
+        assert_eq!(prebuilt_deds[0].transaction_type, "SALE_DIRECT");
+        assert_eq!(prebuilt_deds[0].quantity_change_milli, -2_000);
+        assert_eq!(prebuilt_deds[0].line_cogs_micro_baht, 160_000_000);
+
+        // Diamond DAG: ROOT -> SUB_A (500 milli) & ROOT -> SUB_B (500 milli), both -> LEAF (1 milli)
+        // With leaf avg cost = 500 micro-baht: each path qty = 1 milli -> 1*500/1000 = 0.5 -> rounds to 1 separately (sum=2),
+        // whereas combined qty = 2 milli -> 2*500/1000 = 1 (exact, zero drift!)
+        catalog.insert(
+            "ROOT".to_string(),
+            VariantStockSnapshot {
+                variant_id: "ROOT".to_string(),
+                is_composite: true,
+                use_production: false,
+                average_cost_micro_baht: 0,
+            },
+        );
+        catalog.insert(
+            "SUB_A".to_string(),
+            VariantStockSnapshot {
+                variant_id: "SUB_A".to_string(),
+                is_composite: true,
+                use_production: false,
+                average_cost_micro_baht: 0,
+            },
+        );
+        catalog.insert(
+            "SUB_B".to_string(),
+            VariantStockSnapshot {
+                variant_id: "SUB_B".to_string(),
+                is_composite: true,
+                use_production: false,
+                average_cost_micro_baht: 0,
+            },
+        );
+        catalog.insert(
+            "LEAF".to_string(),
+            VariantStockSnapshot {
+                variant_id: "LEAF".to_string(),
+                is_composite: false,
+                use_production: false,
+                average_cost_micro_baht: 500,
+            },
+        );
+
+        let diamond_edges = vec![
+            BomComponentEdge {
+                composite_variant_id: "ROOT".to_string(),
+                component_variant_id: "SUB_A".to_string(),
+                component_role: ComponentRole::Standard,
+                quantity_milli: 1_000,
+                wastage_basis_points: 0,
+            },
+            BomComponentEdge {
+                composite_variant_id: "ROOT".to_string(),
+                component_variant_id: "SUB_B".to_string(),
+                component_role: ComponentRole::Standard,
+                quantity_milli: 1_000,
+                wastage_basis_points: 0,
+            },
+            BomComponentEdge {
+                composite_variant_id: "SUB_A".to_string(),
+                component_variant_id: "LEAF".to_string(),
+                component_role: ComponentRole::Standard,
+                quantity_milli: 1,
+                wastage_basis_points: 0,
+            },
+            BomComponentEdge {
+                composite_variant_id: "SUB_B".to_string(),
+                component_variant_id: "LEAF".to_string(),
+                component_role: ComponentRole::Standard,
+                quantity_milli: 1,
+                wastage_basis_points: 0,
+            },
+        ];
+
+        let diamond_deds = compute_multilevel_bom_deductions(
+            catalog.get("ROOT").unwrap(),
+            1_000,
+            &[],
+            &catalog,
+            &diamond_edges,
+        )
+        .unwrap();
+        assert_eq!(diamond_deds.len(), 1);
+        assert_eq!(diamond_deds[0].variant_id, "LEAF");
+        assert_eq!(diamond_deds[0].quantity_change_milli, -2);
+        assert_eq!(diamond_deds[0].line_cogs_micro_baht, 1);
     }
 }

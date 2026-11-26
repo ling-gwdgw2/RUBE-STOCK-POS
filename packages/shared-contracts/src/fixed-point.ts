@@ -103,7 +103,7 @@ export function allocateLandedCostExact(
 
   const sumBaseValue = valuations.reduce((acc, v) => acc + v.baseValueMicro, 0n);
 
-  if (totalLandedMicro === 0n || sumBaseValue === 0n) {
+  if (totalLandedMicro === 0n) {
     return valuations.map((v) => ({
       id: v.item.id,
       baseValueMicroBaht: v.baseValueMicro,
@@ -112,10 +112,17 @@ export function allocateLandedCostExact(
     }));
   }
 
+  // Fallback to quantity-weighted Largest Remainder allocation when all items are zero-cost samples/bonuses
+  const useQtyWeights = sumBaseValue === 0n;
+  const weightSum = useQtyWeights
+    ? valuations.reduce((acc, v) => acc + v.qRec, 0n)
+    : sumBaseValue;
+
   const provisional = valuations.map((v) => {
-    const prod = totalLandedMicro * v.baseValueMicro;
-    const floorShare = prod / sumBaseValue;
-    const remainder = prod % sumBaseValue;
+    const weight = useQtyWeights ? v.qRec : v.baseValueMicro;
+    const prod = totalLandedMicro * weight;
+    const floorShare = prod / weightSum;
+    const remainder = prod % weightSum;
     return { ...v, floorShare, remainder };
   });
 

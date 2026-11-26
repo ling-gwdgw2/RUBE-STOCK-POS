@@ -33,6 +33,7 @@ import type {
   PurchaseOrderHistoryDto,
   ReceiveTransferOrderInput,
   RecordCashDrawerMovementInput,
+  ReportDateRangeFilter,
   SalesOrderHistoryDto,
   SecurityAuditLogEntryDto,
   SqliteReadWritePoolEngine,
@@ -317,9 +318,12 @@ export class LocalIpcBridge {
     return this.engine.generateShiftZReport(shiftId);
   }
 
-  public generateAbbSalesTaxReport(outletId = 'OUTLET-HQ'): AbbSalesTaxReportDto {
+  public generateAbbSalesTaxReport(
+    outletId = 'OUTLET-HQ',
+    dateRange?: ReportDateRangeFilter
+  ): AbbSalesTaxReportDto {
     this.totalReadsRouted++;
-    return this.engine.generateAbbSalesTaxReport(outletId);
+    return this.engine.generateAbbSalesTaxReport(outletId, dateRange);
   }
 
   public generateInventoryValuationReport(outletId = 'OUTLET-HQ'): InventoryValuationReportDto {
@@ -327,9 +331,12 @@ export class LocalIpcBridge {
     return this.engine.generateInventoryValuationReport(outletId);
   }
 
-  public generateMenuGrossMarginAndCogsReport(outletId = 'OUTLET-HQ'): MenuGrossMarginReportDto {
+  public generateMenuGrossMarginAndCogsReport(
+    outletId = 'OUTLET-HQ',
+    dateRange?: ReportDateRangeFilter
+  ): MenuGrossMarginReportDto {
     this.totalReadsRouted++;
-    return this.engine.generateMenuGrossMarginAndCogsReport(outletId);
+    return this.engine.generateMenuGrossMarginAndCogsReport(outletId, dateRange);
   }
 
   public listStaffUsers(): StaffUserDto[] {
@@ -401,6 +408,12 @@ export class LocalIpcBridge {
     return this.engine.upsertCategory(input);
   }
 
+  public async deleteCategory(categoryId: string): Promise<{ deletedCategoryId: string }> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.deleteCategory(categoryId);
+  }
+
   public listSuppliers(): SupplierDto[] {
     this.totalReadsRouted++;
     return this.engine.listSuppliers();
@@ -429,6 +442,15 @@ export class LocalIpcBridge {
     this.assertNotQuarantined();
     this.totalWritesRouted++;
     return this.engine.upsertCatalogVariant(input);
+  }
+
+  public async deleteCatalogVariant(
+    variantId: string,
+    performedByUserId = 'USR-OWNER-01'
+  ): Promise<{ variantId: string; mode: 'HARD_DELETED' | 'ARCHIVED_SAFE' }> {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.deleteCatalogVariant(variantId, performedByUserId);
   }
 
   public async deleteBomComponentEdge(

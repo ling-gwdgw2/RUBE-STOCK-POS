@@ -1,12 +1,14 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Building2,
   CheckCircle2,
   Cpu,
   Lock,
   Printer,
   RefreshCw,
   ShieldCheck,
+  UserCheck,
   Wallet,
   XCircle,
 } from 'lucide-react';
@@ -15,7 +17,7 @@ import {
   formatMilliUnitsToQtyString,
   formatSatangToThbString,
 } from '../../../shared-contracts/src/fixed-point.ts';
-import { posTransport } from './api/pos-transport.ts';
+import { posTransport, setPosSessionToken } from './api/pos-transport.ts';
 import { BomStudioWorkspace } from './components/BomStudioWorkspace.tsx';
 import { FirstRunWizardModal } from './components/FirstRunWizardModal.tsx';
 import { HilSimulatorDrawer } from './components/HilSimulatorDrawer.tsx';
@@ -26,7 +28,10 @@ import { ShiftAndReportsWorkspace } from './components/ShiftAndReportsWorkspace.
 import { SystemSettingsWorkspace } from './components/SystemSettingsWorkspace.tsx';
 import { UI_INTERACTION } from './components/ui/UiPrimitives.tsx';
 import { WarehouseWorkspace } from './components/WarehouseWorkspace.tsx';
-import { useGlobalBarcodeScanner } from './hooks/useGlobalBarcodeScanner.ts';
+import {
+  type GlobalScannerRoutingMode,
+  useGlobalBarcodeScanner,
+} from './hooks/useGlobalBarcodeScanner.ts';
 import type {
   BootstrapPayload,
   CartItem,
@@ -34,11 +39,84 @@ import type {
   StaffUserDto,
   WorkspaceTabId,
 } from './types.ts';
+import {
+  ACTIVE_SESSION_USER_STORAGE_KEY,
+  canViewExpectedDrawerCash,
+  getAllowedTabsForRole,
+  getDefaultTabForRole,
+  SIMULATION_MODE_STORAGE_KEY,
+} from './utils/rbac.ts';
+import { getProfileMeta } from './utils/profile-domain.ts';
 
 interface ToastNotification {
   id: number;
   message: string;
   tone: 'success' | 'warn' | 'error';
+}
+
+const ACTIVE_OUTLET_STORAGE_KEY = 'rube_pos_v3_active_outlet_id';
+
+const LOCKED_TERMINAL_FALLBACK_USER: StaffUserDto = {
+  id: 'LOCKED-TERMINAL',
+  username: 'locked',
+  displayName: 'เครื่องถูกล็อก',
+  role: 'CASHIER',
+  active: false,
+  createdAt: '',
+};
+
+interface PreBurstInputSnapshot {
+  el: HTMLInputElement | null;
+  value: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+}
+
+function captureInputSnapshot(
+  el: Element | null,
+  attrName: 'scannerAllow' | 'scannerSlipAllow',
+  fallbackValue: string
+): PreBurstInputSnapshot {
+  if (el instanceof HTMLInputElement && el.dataset[attrName] === 'true') {
+    return {
+      el,
+      value: el.value,
+      selectionStart: el.selectionStart,
+      selectionEnd: el.selectionEnd,
+    };
+  }
+  return {
+    el: null,
+    value: fallbackValue,
+    selectionStart: null,
+    selectionEnd: null,
+  };
+}
+
+function restoreInputSnapshotDom(snap: PreBurstInputSnapshot): void {
+  const { el, value, selectionStart, selectionEnd } = snap;
+  if (!el || !document.contains(el)) return;
+  el.value = value;
+  if (selectionStart !== null && selectionEnd !== null) {
+    try {
+      el.setSelectionRange(selectionStart, selectionEnd);
+    } catch {
+      // ignore selection errors on unsupported input types
+    }
+    window.setTimeout(() => {
+      if (
+        document.contains(el) &&
+        document.activeElement === el &&
+        el.value === value
+      ) {
+        try {
+          el.setSelectionRange(selectionStart, selectionEnd);
+        } catch {
+          // ignore
+        }
+      }
+    }, 0);
+  }
 }
 
 /**
@@ -62,10 +140,26 @@ const ReservedFourColorBrandMark: React.FC = () => (
 
 export const App: React.FC = () => {
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
+  const [activeOutletId, setActiveOutletId] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem(ACTIVE_OUTLET_STORAGE_KEY) || 'OUTLET-HQ';
+    } catch {
+      return 'OUTLET-HQ';
+    }
+  });
   const [activeTab, setActiveTab] = useState<WorkspaceTabId>('POS');
   const [currentUser, setCurrentUser] = useState<StaffUserDto | null>(null);
-  const [pinModalOpen, setPinModalOpen] = useState(false);
-  const [hilDrawerOpen, setHilDrawerOpen] = useState(false);
+  const [isTerminalLocked, setIsTerminalLocked] = useState<boolean>(true);
+  const [pinModalOpen, setPinModalOpen] = useState<boolean>(false);
+  const [hilDrawerOpen, setHilDrawerOpen] = useState<boolean>(false);
+
+  const [simulationModeEnabled, setSimulationModeEnabled] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(SIMULATION_MODE_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
 
   const [cart, setCart] = useState<CartItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -73,6 +167,34 @@ export const App: React.FC = () => {
   const [lastPrintedReceipt, setLastPrintedReceipt] = useState<PrintedReceiptPreview | null>(null);
   const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const [bootError, setBootError] = useState<string | null>(null);
+
+  // Context-aware 2D scanner routing bridge for POS Checkout Slip Mini-QR
+  const [posScannerRoutingMode, setPosScannerRoutingMode] =
+    useState<GlobalScannerRoutingMode>('POS_CART');
+  const slipQrScannedHandlerRef = useRef<((qrRaw: string) => void) | null>(null);
+  const slipFirstCharRollbackRef = useRef<(() => void) | null>(null);
+  const slipBeforeSnapshotRef = useRef<(() => void) | null>(null);
+
+  const scaleScanSeqRef = useRef(0);
+  const bootstrapSeqRef = useRef(0);
+  const skipNextBootstrapEffectRef = useRef(false);
+  const currentUserRef = useRef<StaffUserDto | null>(null);
+  currentUserRef.current = currentUser;
+  const searchQueryRef = useRef(searchQuery);
+  searchQueryRef.current = searchQuery;
+  const searchPreBurstSnapshotRef = useRef<PreBurstInputSnapshot | null>(null);
+
+  const handleToggleSimulationMode = useCallback((enabled: boolean) => {
+    setSimulationModeEnabled(enabled);
+    if (!enabled) {
+      setHilDrawerOpen(false);
+    }
+    try {
+      window.localStorage.setItem(SIMULATION_MODE_STORAGE_KEY, enabled ? 'true' : 'false');
+    } catch {
+      // ignore storage restrictions
+    }
+  }, []);
 
   const pushToast = useCallback(
     (message: string, tone: 'success' | 'warn' | 'error' = 'success') => {
@@ -85,44 +207,190 @@ export const App: React.FC = () => {
     []
   );
 
-  const refreshBootstrap = useCallback(async () => {
-    const maxAttempts = 5;
-    let lastError: unknown = null;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const data = await posTransport.getBootstrap('OUTLET-HQ', true);
-        setBootstrap(data);
-        setBootError(null);
-        setCurrentUser((prev) => {
-          if (prev) {
-            return data.staffUsers.find((u) => u.id === prev.id) ?? prev;
-          }
-          return (
-            data.staffUsers.find((u) => u.id === 'USR-CASHIER-01') ??
-            data.staffUsers[0] ?? {
-              id: 'USR-CASHIER-01',
-              username: 'cashier1',
-              displayName: 'แคชเชียร์กะเช้า',
-              role: 'CASHIER',
-              active: true,
-              createdAt: new Date().toISOString(),
+  const refreshBootstrap = useCallback(
+    async (overrideOutletId?: string) => {
+      const mySeq = ++bootstrapSeqRef.current;
+      const requestedOutlet = overrideOutletId ?? activeOutletId;
+      const maxAttempts = 5;
+      let lastError: unknown = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (mySeq !== bootstrapSeqRef.current) return;
+        try {
+          let data = await posTransport.getBootstrap(requestedOutlet, true);
+          if (mySeq !== bootstrapSeqRef.current) return;
+          if (
+            data.onboarded &&
+            data.outlets.length > 0 &&
+            !data.outlets.some((o) => o.id === requestedOutlet)
+          ) {
+            const fallbackId =
+              data.outlets.find((o) => o.id === 'OUTLET-HQ')?.id ?? data.outlets[0]!.id;
+            if (fallbackId !== activeOutletId) {
+              skipNextBootstrapEffectRef.current = true;
             }
-          );
-        });
-        return;
-      } catch (err) {
-        lastError = err;
-        if (attempt < maxAttempts) {
-          await new Promise((resolve) => window.setTimeout(resolve, 600));
+            setActiveOutletId(fallbackId);
+            try {
+              window.localStorage.setItem(ACTIVE_OUTLET_STORAGE_KEY, fallbackId);
+            } catch {
+              // ignore
+            }
+            data = await posTransport.getBootstrap(fallbackId, true);
+            if (mySeq !== bootstrapSeqRef.current) return;
+          }
+          setBootstrap(data);
+          setBootError(null);
+          if (data.isSessionAuthenticated === false) {
+            setPosSessionToken(null);
+            try {
+              window.sessionStorage.removeItem(ACTIVE_SESSION_USER_STORAGE_KEY);
+            } catch {
+              // ignore
+            }
+            currentUserRef.current = null;
+            setIsTerminalLocked(true);
+            setCurrentUser(null);
+            return;
+          }
+          const prevUser = currentUserRef.current;
+          if (prevUser) {
+            const refreshed = data.staffUsers.find((u) => u.id === prevUser.id && u.active);
+            if (refreshed) {
+              currentUserRef.current = refreshed;
+              setCurrentUser(refreshed);
+            } else {
+              currentUserRef.current = null;
+              setCurrentUser(null);
+              setIsTerminalLocked(true);
+              try {
+                window.sessionStorage.removeItem(ACTIVE_SESSION_USER_STORAGE_KEY);
+              } catch {
+                // ignore
+              }
+            }
+          } else {
+            let matchedSessionUser: StaffUserDto | null = null;
+            try {
+              const storedId = window.sessionStorage.getItem(ACTIVE_SESSION_USER_STORAGE_KEY);
+              if (storedId) {
+                matchedSessionUser =
+                  data.staffUsers.find((u) => u.id === storedId && u.active) ?? null;
+              }
+            } catch {
+              // ignore sessionStorage restrictions
+            }
+            if (matchedSessionUser) {
+              currentUserRef.current = matchedSessionUser;
+              setCurrentUser(matchedSessionUser);
+              setIsTerminalLocked(false);
+            } else {
+              currentUserRef.current = null;
+              setCurrentUser(null);
+            }
+          }
+          return;
+        } catch (err) {
+          if (mySeq !== bootstrapSeqRef.current) return;
+          lastError = err;
+          if (attempt < maxAttempts) {
+            await new Promise((resolve) => window.setTimeout(resolve, 600));
+            if (mySeq !== bootstrapSeqRef.current) return;
+          }
         }
       }
-    }
-    setBootError(lastError instanceof Error ? lastError.message : String(lastError));
-  }, []);
+      if (mySeq !== bootstrapSeqRef.current) return;
+      setBootError(lastError instanceof Error ? lastError.message : String(lastError));
+    },
+    [activeOutletId]
+  );
 
   useEffect(() => {
+    if (skipNextBootstrapEffectRef.current) {
+      skipNextBootstrapEffectRef.current = false;
+      return;
+    }
     void refreshBootstrap();
   }, [refreshBootstrap]);
+
+  useEffect(() => {
+    const onSessionExpired = () => {
+      bootstrapSeqRef.current += 1;
+      currentUserRef.current = null;
+      try {
+        window.sessionStorage.removeItem(ACTIVE_SESSION_USER_STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+      setCurrentUser(null);
+      setPinModalOpen(false);
+      setHilDrawerOpen(false);
+      setIsTerminalLocked(true);
+      pushToast('เซสชันหมดอายุหรือถูกยกเลิก กรุณากดรหัส PIN เข้าใช้งานใหม่', 'warn');
+    };
+    window.addEventListener('rube-pos-session-expired', onSessionExpired);
+    return () => window.removeEventListener('rube-pos-session-expired', onSessionExpired);
+  }, [pushToast]);
+
+  const handleSwitchOutlet = useCallback(
+    async (nextOutletId: string) => {
+      if (!nextOutletId || nextOutletId === activeOutletId) return;
+      const switchEpoch = ++bootstrapSeqRef.current;
+      skipNextBootstrapEffectRef.current = true;
+      setActiveOutletId(nextOutletId);
+      setCart([]);
+      try {
+        window.localStorage.setItem(ACTIVE_OUTLET_STORAGE_KEY, nextOutletId);
+      } catch {
+        // ignore
+      }
+      await refreshBootstrap(nextOutletId);
+      if (bootstrapSeqRef.current !== switchEpoch + 1) return;
+      const outletName =
+        bootstrap?.outlets.find((o) => o.id === nextOutletId)?.name ?? nextOutletId;
+      pushToast(`สลับสาขาประจำเครื่องเป็น "${outletName}" เรียบร้อยแล้ว`, 'success');
+    },
+    [activeOutletId, bootstrap?.outlets, pushToast, refreshBootstrap]
+  );
+
+  const handleLockTerminal = useCallback(() => {
+    bootstrapSeqRef.current += 1;
+    currentUserRef.current = null;
+    try {
+      window.sessionStorage.removeItem(ACTIVE_SESSION_USER_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    void posTransport.logoutSession();
+    setCurrentUser(null);
+    setPinModalOpen(false);
+    setHilDrawerOpen(false);
+    setIsTerminalLocked(true);
+  }, []);
+
+  const handleUserAuthenticated = useCallback(
+    (user: StaffUserDto) => {
+      bootstrapSeqRef.current += 1;
+      currentUserRef.current = user;
+      setCurrentUser(user);
+      setIsTerminalLocked(false);
+      setPinModalOpen(false);
+      try {
+        window.sessionStorage.setItem(ACTIVE_SESSION_USER_STORAGE_KEY, user.id);
+      } catch {
+        // ignore
+      }
+      if (bootstrap) {
+        const allowed = getAllowedTabsForRole(user.role, bootstrap.featureFlags);
+        setActiveTab((curTab) =>
+          allowed.includes(curTab)
+            ? curTab
+            : getDefaultTabForRole(user.role, bootstrap.featureFlags)
+        );
+      }
+      void refreshBootstrap();
+      pushToast(`เข้าใช้งานในชื่อ ${user.displayName} (${user.role})`, 'success');
+    },
+    [bootstrap, pushToast, refreshBootstrap]
+  );
 
   const handleScanBarcodeIntoCart = useCallback(
     (barcode: string, multiplierCount = 1) => {
@@ -141,6 +409,13 @@ export const App: React.FC = () => {
               (v.sku.endsWith(prefixCheck.sku!) || (v.barcode ?? '').includes(prefixCheck.sku!))
           );
           if (matchedScaleItem) {
+            if (!matchedScaleItem.active) {
+              pushToast(
+                `รายการ "${matchedScaleItem.itemName}" ถูกพักการขายชั่วคราว — ไม่สามารถเพิ่มลงบิลได้`,
+                'warn'
+              );
+              return;
+            }
             const fullParsed = parseScaleBarcodeEan13(trimmed, matchedScaleItem.priceSatang);
             const qtyMilli =
               fullParsed.mode === 'WEIGHT_EMBEDDED'
@@ -150,8 +425,12 @@ export const App: React.FC = () => {
               fullParsed.mode === 'WEIGHT_EMBEDDED'
                 ? `ตราชั่ง Prefix ${fullParsed.prefix} · น้ำหนัก ${formatMilliUnitsToQtyString(qtyMilli, matchedScaleItem.unitName)}`
                 : `ป้ายฝังราคา Prefix ${fullParsed.prefix} · ฿${formatSatangToThbString(fullParsed.totalPriceSatang ?? 0)}`;
+            const overrideLineTotalSatang =
+              fullParsed.mode === 'PRICE_EMBEDDED' && fullParsed.totalPriceSatang !== undefined
+                ? fullParsed.totalPriceSatang
+                : undefined;
 
-            const cartKey = `${matchedScaleItem.id}::SCALE-${Date.now()}`;
+            const cartKey = `${matchedScaleItem.id}::SCALE-${Date.now()}-${++scaleScanSeqRef.current}`;
             setCart((prev) => [
               ...prev,
               {
@@ -166,11 +445,14 @@ export const App: React.FC = () => {
                 selectedModifierIds: [],
                 isWeightedScale: true,
                 scaleBadgeText: badge,
+                ...(overrideLineTotalSatang !== undefined ? { overrideLineTotalSatang } : {}),
               },
             ]);
             pushToast(
               `สแกนตราชั่ง: ${matchedScaleItem.itemName} (${formatMilliUnitsToQtyString(qtyMilli, matchedScaleItem.unitName)})`,
-              'success'
+              !matchedScaleItem.isComposite && matchedScaleItem.inStockMilli <= 0
+                ? 'warn'
+                : 'success'
             );
             return;
           }
@@ -183,6 +465,13 @@ export const App: React.FC = () => {
       );
       if (!matched) {
         pushToast(`ไม่พบรหัสบาร์โค้ด "${trimmed}" ในทะเบียนสินค้า`, 'warn');
+        return;
+      }
+      if (!matched.active) {
+        pushToast(
+          `รายการ "${matched.itemName}" ถูกพักการขายชั่วคราว — ไม่สามารถเพิ่มลงบิลได้`,
+          'warn'
+        );
         return;
       }
 
@@ -212,22 +501,105 @@ export const App: React.FC = () => {
           },
         ];
       });
-      pushToast(
-        `เพิ่ม "${matched.itemName}" ×${mult} ลงบิลขายแล้ว`,
-        'success'
-      );
+
+      if (!matched.isComposite && matched.inStockMilli <= 0) {
+        pushToast(
+          `"${matched.itemName}" สต็อกในระบบเหลือ 0 — เพิ่มลงบิลแล้ว (โปรดตรวจสอบสินค้าหน้าร้าน)`,
+          'warn'
+        );
+      } else {
+        pushToast(`เพิ่ม "${matched.itemName}" ×${mult} ลงบิลขายแล้ว`, 'success');
+      }
     },
     [bootstrap, pushToast]
   );
 
+  const activeUser: StaffUserDto = useMemo(() => {
+    if (isTerminalLocked) {
+      return LOCKED_TERMINAL_FALLBACK_USER;
+    }
+    if (currentUser) {
+      return currentUser;
+    }
+    return (
+      bootstrap?.staffUsers.find((u) => u.id === 'USR-CASHIER-01' && u.active) ??
+      bootstrap?.staffUsers.find((u) => u.role === 'CASHIER' && u.active) ??
+      LOCKED_TERMINAL_FALLBACK_USER
+    );
+  }, [bootstrap?.staffUsers, currentUser, isTerminalLocked]);
+
+  const allowedTabs = useMemo(
+    () =>
+      bootstrap
+        ? getAllowedTabsForRole(activeUser.role, bootstrap.featureFlags)
+        : (['POS'] as WorkspaceTabId[]),
+    [activeUser.role, bootstrap]
+  );
+
+  useEffect(() => {
+    if (!bootstrap) return;
+    if (!allowedTabs.includes(activeTab)) {
+      setActiveTab(getDefaultTabForRole(activeUser.role, bootstrap.featureFlags));
+    }
+  }, [activeTab, activeUser.role, allowedTabs, bootstrap]);
+
+  const effectiveScannerMode: GlobalScannerRoutingMode = useMemo(() => {
+    if (
+      !bootstrap?.onboarded ||
+      isTerminalLocked ||
+      pinModalOpen ||
+      hilDrawerOpen ||
+      !allowedTabs.includes('POS') ||
+      activeTab !== 'POS'
+    ) {
+      return 'BLOCKED';
+    }
+    return posScannerRoutingMode;
+  }, [
+    activeTab,
+    allowedTabs,
+    bootstrap?.onboarded,
+    hilDrawerOpen,
+    isTerminalLocked,
+    pinModalOpen,
+    posScannerRoutingMode,
+  ]);
+
   useGlobalBarcodeScanner({
     enabled: Boolean(bootstrap?.featureFlags.enableGlobalBarcodeScanner),
+    scannerMode: effectiveScannerMode,
     onBarcodeScanned: (code) => {
+      if (!allowedTabs.includes('POS')) return;
       setActiveTab('POS');
       handleScanBarcodeIntoCart(code, 1);
     },
+    onSlipQrScanned: (qrRaw) => {
+      slipQrScannedHandlerRef.current?.(qrRaw);
+    },
+    onBeforeFirstCharSnapshot: () => {
+      const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
+      searchPreBurstSnapshotRef.current = captureInputSnapshot(
+        activeEl,
+        'scannerAllow',
+        searchQueryRef.current
+      );
+    },
     onFirstCharRollback: () => {
-      setSearchQuery((prev) => prev.slice(0, -1));
+      const snap = searchPreBurstSnapshotRef.current;
+      searchPreBurstSnapshotRef.current = null;
+      if (snap) {
+        restoreInputSnapshotDom(snap);
+        setSearchQuery(snap.value);
+      } else {
+        setSearchQuery((prev) => prev.slice(0, -1));
+      }
+      setRollbackCount((c) => c + 1);
+    },
+    onBeforeSlipFirstCharSnapshot: () => {
+      slipBeforeSnapshotRef.current?.();
+    },
+    onSlipFirstCharRollback: () => {
+      slipFirstCharRollbackRef.current?.();
       setRollbackCount((c) => c + 1);
     },
   });
@@ -272,8 +644,16 @@ export const App: React.FC = () => {
         initialStoreSettings={bootstrap.storeSettings}
         initialPrinterConfig={bootstrap.printerConfig}
         onCompleted={async (ownerUser) => {
+          bootstrapSeqRef.current += 1;
+          currentUserRef.current = ownerUser;
+          try {
+            window.sessionStorage.setItem(ACTIVE_SESSION_USER_STORAGE_KEY, ownerUser.id);
+          } catch {
+            // ignore
+          }
           await refreshBootstrap();
           setCurrentUser(ownerUser);
+          setIsTerminalLocked(false);
           pushToast('ตั้งค่าเครื่องจุดขายเสร็จสมบูรณ์ พร้อมใช้งานจริง!', 'success');
         }}
         onCancelPreview={
@@ -288,14 +668,14 @@ export const App: React.FC = () => {
     );
   }
 
-  const activeUser: StaffUserDto = currentUser ?? {
-    id: 'USR-OWNER-01',
-    username: 'owner',
-    displayName: 'เจ้าของร้าน',
-    role: 'OWNER',
-    active: true,
-    createdAt: new Date().toISOString(),
-  };
+  const showExpectedDrawerInHeader =
+    !isTerminalLocked && canViewExpectedDrawerCash(activeUser.role);
+  const showHilBenchButton =
+    !isTerminalLocked && simulationModeEnabled && activeUser.role === 'OWNER';
+  const canSwitchOutlet =
+    !isTerminalLocked &&
+    (activeUser.role === 'OWNER' || activeUser.role === 'MANAGER' || activeUser.role === 'WAREHOUSE');
+  const isBackgroundInert = isTerminalLocked || pinModalOpen || hilDrawerOpen;
 
   const navItems: Array<{
     id: WorkspaceTabId;
@@ -306,37 +686,44 @@ export const App: React.FC = () => {
     {
       id: 'POS',
       label: 'หน้าขาย POS',
-      badge: cart.length > 0 ? cart.length : undefined,
+      badge: !isTerminalLocked && cart.length > 0 ? cart.length : undefined,
+      hidden: !allowedTabs.includes('POS'),
     },
     {
       id: 'KDS',
       label: 'จอครัว KDS',
-      badge: bootstrap.kdsTickets.length > 0 ? bootstrap.kdsTickets.length : undefined,
-      hidden: !bootstrap.featureFlags.enableKitchenDisplaySystem,
+      badge:
+        !isTerminalLocked && bootstrap.kdsTickets.length > 0
+          ? bootstrap.kdsTickets.length
+          : undefined,
+      hidden: !allowedTabs.includes('KDS'),
     },
     {
       id: 'WAREHOUSE',
       label: 'คลังสินค้า & PO',
+      hidden: !allowedTabs.includes('WAREHOUSE'),
     },
     {
       id: 'BOM',
       label: 'สูตร BOM',
-      hidden: !bootstrap.featureFlags.enableMultiLevelBom,
+      hidden: !allowedTabs.includes('BOM'),
     },
     {
       id: 'SHIFTS_REPORTS',
       label: 'ปิดกะ & รายงาน',
+      hidden: !allowedTabs.includes('SHIFTS_REPORTS'),
     },
     {
       id: 'SETTINGS',
       label: 'ตั้งค่าระบบ',
+      hidden: !allowedTabs.includes('SETTINGS'),
     },
   ];
 
   return (
     <div className="min-h-screen flex flex-col bg-canvas text-ink">
       {/* Sticky Top Chrome Wrapper (keeps UPS Power-Loss Banner + Top Nav visible without hiding content) */}
-      <div className="sticky top-0 z-30">
+      <div className="sticky top-0 z-30" inert={isBackgroundInert ? true : undefined}>
         {bootstrap.upsBanner.visible && (
           <div
             role="alert"
@@ -353,7 +740,9 @@ export const App: React.FC = () => {
             {/* Brand Wordmark + Single Reserved Four-Color Mark */}
             <button
               type="button"
-              onClick={() => setActiveTab('POS')}
+              onClick={() =>
+                setActiveTab(getDefaultTabForRole(activeUser.role, bootstrap.featureFlags))
+              }
               className={`flex items-center gap-2.5 shrink-0 rounded-[4px] hover:opacity-85 ${UI_INTERACTION.focusButton}`}
             >
               <ReservedFourColorBrandMark />
@@ -362,13 +751,16 @@ export const App: React.FC = () => {
                   RUBE POS
                 </div>
                 <div className="text-[11px] text-ink-muted leading-none">
-                  {bootstrap.profile} · v3.1
+                  {getProfileMeta(bootstrap.profile).shortBadge}
                 </div>
               </div>
             </button>
 
             {/* Canonical `nav-link` Rail: 16px / 500 / 0.25px, 4px #1a73e8 active underline */}
-            <nav className="hidden md:flex items-center gap-1 h-full overflow-x-auto" aria-label="เมนูหลัก">
+            <nav
+              className="hidden md:flex items-center gap-1 h-full overflow-x-auto"
+              aria-label="เมนูหลัก"
+            >
               {navItems
                 .filter((n) => !n.hidden)
                 .map((item) => {
@@ -399,50 +791,118 @@ export const App: React.FC = () => {
 
           {/* Right-Aligned Hairline Pill Controls */}
           <div className="flex items-center gap-2 shrink-0">
-            {bootstrap.activeShift && (
+            {/* Multi-Outlet Branch Selector Pill (rendered automatically when >= 2 outlets exist) */}
+            {bootstrap.outlets.length > 1 && (
+              <div className="hidden lg:flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas pl-3 pr-2 text-xs text-ink">
+                <Building2 className="h-3.5 w-3.5 text-primary shrink-0" />
+                <select
+                  aria-label="เลือกสาขาประจำเครื่อง"
+                  disabled={!canSwitchOutlet}
+                  value={activeOutletId}
+                  onChange={(e) => void handleSwitchOutlet(e.target.value)}
+                  className="bg-transparent font-google-display text-xs font-medium text-ink focus:outline-none cursor-pointer disabled:cursor-default max-w-[140px] truncate"
+                >
+                  {bootstrap.outlets.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.code} · {o.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {!isTerminalLocked && !bootstrap.printer.ready && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (allowedTabs.includes('SETTINGS')) {
+                    setActiveTab('SETTINGS');
+                  } else {
+                    pushToast(
+                      `เครื่องพิมพ์ค้างคิว ${bootstrap.printer.pendingQueueLength} ใบ — กรุณาตรวจสอบกระดาษความร้อนหรือฝาเครื่องพิมพ์`,
+                      'warn'
+                    );
+                  }
+                }}
+                className={`flex h-10 items-center gap-1.5 rounded-[48px] border border-ink bg-primary-soft px-3 text-xs font-medium text-ink ${UI_INTERACTION.focusButton}`}
+              >
+                <Printer className="h-3.5 w-3.5 text-primary-dark shrink-0" />
+                <span className="tabular-nums-google">
+                  คิวพิมพ์ {bootstrap.printer.pendingQueueLength}
+                </span>
+              </button>
+            )}
+
+            {!isTerminalLocked && bootstrap.activeShift && allowedTabs.includes('SHIFTS_REPORTS') && (
               <button
                 type="button"
                 onClick={() => setActiveTab('SHIFTS_REPORTS')}
                 className={`hidden xl:flex h-10 items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-4 text-xs text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
               >
                 <Wallet className="h-3.5 w-3.5 text-primary" />
-                <span>{bootstrap.activeShift.shiftNumber}:</span>
-                <strong className="font-medium text-ink tabular-nums-google">
-                  ฿{formatSatangToThbString(bootstrap.activeShift.expectedCashSatang)}
-                </strong>
+                <span>{bootstrap.activeShift.shiftNumber}</span>
+                {showExpectedDrawerInHeader ? (
+                  <strong className="font-medium text-ink tabular-nums-google">
+                    · ฿{formatSatangToThbString(bootstrap.activeShift.expectedCashSatang)}
+                  </strong>
+                ) : (
+                  <span className="rounded-[48px] bg-surface-1 px-2 py-0.5 text-[11px] text-ink-muted">
+                    กะเปิดอยู่
+                  </span>
+                )}
+              </button>
+            )}
+
+            {showHilBenchButton && (
+              <button
+                type="button"
+                onClick={() => setHilDrawerOpen(true)}
+                aria-label="เปิดแผงจำลองฮาร์ดแวร์ HIL Bench"
+                className={`flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 sm:px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+              >
+                <Cpu className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">HIL Bench</span>
               </button>
             )}
 
             <button
               type="button"
-              onClick={() => setHilDrawerOpen(true)}
-              aria-label="เปิดแผงจำลองฮาร์ดแวร์ HIL Bench"
-              className={`flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 sm:px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+              onClick={() => setPinModalOpen(true)}
+              aria-label={
+                isTerminalLocked
+                  ? 'หน้าจอถูกล็อก กรุณาปลดล็อกด้วยรหัส PIN'
+                  : `สลับผู้ใช้งาน (ปัจจุบัน: ${activeUser.displayName} บทบาท ${activeUser.role})`
+              }
+              className={`flex h-10 items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-3 sm:px-4 font-google-display text-xs font-medium text-ink hover:border-primary ${UI_INTERACTION.focusButton}`}
             >
-              <Cpu className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">HIL Bench</span>
-              {!bootstrap.printer.ready && (
-                <span className="rounded-[48px] bg-ink px-1.5 py-0.5 text-[10px] text-white">
-                  คิว {bootstrap.printer.pendingQueueLength}
-                </span>
-              )}
+              <UserCheck className="h-3.5 w-3.5 text-primary shrink-0" />
+              <span className="max-w-[84px] sm:max-w-[120px] truncate">
+                {isTerminalLocked ? 'เครื่องถูกล็อก' : activeUser.displayName}
+              </span>
+              <span className="hidden sm:inline rounded-[48px] bg-surface-1 px-2 py-0.5 text-[10px] font-medium text-primary-dark">
+                {isTerminalLocked ? 'LOCKED' : activeUser.role}
+              </span>
             </button>
 
             <button
               type="button"
-              onClick={() => setPinModalOpen(true)}
-              aria-label={`สลับผู้ใช้งาน (ปัจจุบัน: ${activeUser.displayName})`}
-              className={`flex h-10 items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-3 sm:px-4 font-google-display text-xs font-medium text-ink hover:border-primary ${UI_INTERACTION.focusButton}`}
+              onClick={handleLockTerminal}
+              title="ล็อกหน้าจอเครื่องจุดขายทันที"
+              aria-label="ล็อกหน้าจอเครื่องจุดขายทันที"
+              className={`flex h-10 w-10 items-center justify-center rounded-full border border-hairline bg-canvas text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
             >
-              <Lock className="h-3.5 w-3.5 text-primary shrink-0" />
-              <span className="max-w-[96px] sm:max-w-[120px] truncate">{activeUser.displayName}</span>
+              <Lock className="h-4 w-4" />
             </button>
           </div>
         </header>
       </div>
 
       {/* Mobile Nav Fallback (< md) */}
-      <nav className="md:hidden flex items-center gap-1 overflow-x-auto border-b border-hairline bg-canvas px-4" aria-label="เมนูหลักมือถือ">
+      <nav
+        inert={isBackgroundInert ? true : undefined}
+        className="md:hidden flex items-center gap-1 overflow-x-auto border-b border-hairline bg-canvas px-4"
+        aria-label="เมนูหลักมือถือ"
+      >
         {navItems
           .filter((n) => !n.hidden)
           .map((item) => {
@@ -471,117 +931,168 @@ export const App: React.FC = () => {
       </nav>
 
       {/* Main Content Canvas: Pure #ffffff across the entire application */}
-      <main className="flex-1 w-full bg-canvas text-ink">
+      <main
+        inert={isBackgroundInert ? true : undefined}
+        className="flex-1 w-full bg-canvas text-ink"
+      >
         <div className="max-w-[1440px] w-full mx-auto px-4 lg:px-6 py-6">
-          {activeTab === 'POS' && (
-            <PosRegisterWorkspace
-              bootstrap={bootstrap}
-              currentUser={activeUser}
-              cart={cart}
-              setCart={setCart}
-              searchQuery={searchQuery}
-              setSearchQuery={setSearchQuery}
-              rollbackCount={rollbackCount}
-              onScanBarcodeString={handleScanBarcodeIntoCart}
-              lastPrintedReceipt={lastPrintedReceipt}
-              setLastPrintedReceipt={setLastPrintedReceipt}
-              onRefreshState={refreshBootstrap}
-              onToast={pushToast}
-            />
-          )}
+          {isTerminalLocked ? (
+            <div className="rounded-[8px] border border-hairline bg-surface-1 py-20 px-6 text-center space-y-4">
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary-soft text-primary-dark">
+                <Lock className="h-7 w-7" aria-hidden="true" />
+              </div>
+              <div className="space-y-1.5">
+                <h1 className="font-google-display text-[22px] font-normal text-ink">
+                  หน้าจอเครื่องจุดขายถูกล็อกเพื่อความปลอดภัย
+                </h1>
+                <p className="text-sm text-ink-muted">
+                  กรุณายืนยันรหัส PIN พนักงานเพื่อปลดล็อกและเข้าถึงข้อมูลหน้าร้าน
+                </p>
+              </div>
+            </div>
+          ) : (
+            <>
+              {activeTab === 'POS' && allowedTabs.includes('POS') && (
+                <PosRegisterWorkspace
+                  outletId={activeOutletId}
+                  bootstrap={bootstrap}
+                  currentUser={activeUser}
+                  cart={cart}
+                  setCart={setCart}
+                  searchQuery={searchQuery}
+                  setSearchQuery={setSearchQuery}
+                  rollbackCount={rollbackCount}
+                  onScanBarcodeString={handleScanBarcodeIntoCart}
+                  lastPrintedReceipt={lastPrintedReceipt}
+                  setLastPrintedReceipt={setLastPrintedReceipt}
+                  simulationModeEnabled={simulationModeEnabled}
+                  onScannerRoutingModeChange={setPosScannerRoutingMode}
+                  onRegisterSlipScannerHandlers={(onSlipQr, onSlipRollback, onSlipBeforeSnapshot) => {
+                    slipQrScannedHandlerRef.current = onSlipQr;
+                    slipFirstCharRollbackRef.current = onSlipRollback;
+                    slipBeforeSnapshotRef.current = onSlipBeforeSnapshot ?? null;
+                  }}
+                  onRefreshState={() => refreshBootstrap()}
+                  onToast={pushToast}
+                />
+              )}
 
-          {activeTab === 'KDS' && (
-            <KdsWorkspace
-              initialTickets={bootstrap.kdsTickets}
-              onRefreshBootstrap={refreshBootstrap}
-              onToast={pushToast}
-            />
-          )}
+              {activeTab === 'KDS' && allowedTabs.includes('KDS') && (
+                <KdsWorkspace
+                  outletId={activeOutletId}
+                  initialTickets={bootstrap.kdsTickets}
+                  onRefreshBootstrap={() => refreshBootstrap()}
+                  onToast={pushToast}
+                />
+              )}
 
-          {activeTab === 'WAREHOUSE' && (
-            <WarehouseWorkspace
-              bootstrap={bootstrap}
-              currentUser={activeUser}
-              onRefreshState={refreshBootstrap}
-              onToast={pushToast}
-            />
-          )}
+              {activeTab === 'WAREHOUSE' && allowedTabs.includes('WAREHOUSE') && (
+                <WarehouseWorkspace
+                  outletId={activeOutletId}
+                  bootstrap={bootstrap}
+                  currentUser={activeUser}
+                  onRefreshState={() => refreshBootstrap()}
+                  onToast={pushToast}
+                />
+              )}
 
-          {activeTab === 'BOM' && (
-            <BomStudioWorkspace
-              bootstrap={bootstrap}
-              onRefreshState={refreshBootstrap}
-              onToast={pushToast}
-            />
-          )}
+              {activeTab === 'BOM' && allowedTabs.includes('BOM') && (
+                <BomStudioWorkspace
+                  outletId={activeOutletId}
+                  bootstrap={bootstrap}
+                  currentUser={activeUser}
+                  simulationModeEnabled={simulationModeEnabled}
+                  onRefreshState={() => refreshBootstrap()}
+                  onToast={pushToast}
+                />
+              )}
 
-          {activeTab === 'SHIFTS_REPORTS' && (
-            <ShiftAndReportsWorkspace
-              bootstrap={bootstrap}
-              currentUser={activeUser}
-              onRefreshState={refreshBootstrap}
-              onToast={pushToast}
-            />
-          )}
+              {activeTab === 'SHIFTS_REPORTS' && allowedTabs.includes('SHIFTS_REPORTS') && (
+                <ShiftAndReportsWorkspace
+                  outletId={activeOutletId}
+                  bootstrap={bootstrap}
+                  currentUser={activeUser}
+                  onRefreshState={() => refreshBootstrap()}
+                  onToast={pushToast}
+                />
+              )}
 
-          {activeTab === 'SETTINGS' && (
-            <SystemSettingsWorkspace
-              bootstrap={bootstrap}
-              currentUser={activeUser}
-              onRefreshState={refreshBootstrap}
-              onToast={pushToast}
-            />
+              {activeTab === 'SETTINGS' && allowedTabs.includes('SETTINGS') && (
+                <SystemSettingsWorkspace
+                  outletId={activeOutletId}
+                  bootstrap={bootstrap}
+                  currentUser={activeUser}
+                  simulationModeEnabled={simulationModeEnabled}
+                  onToggleSimulationMode={handleToggleSimulationMode}
+                  onRefreshState={() => refreshBootstrap()}
+                  onToast={pushToast}
+                />
+              )}
+            </>
           )}
         </div>
       </main>
 
       {/* Canonical Google Soft-Gray Footer (`#f8f9fa` surface-1, `#5f6368` ink-muted) */}
-      <footer className="border-t border-hairline bg-surface-1 px-4 lg:px-6 py-4 text-xs text-ink-muted">
+      <footer
+        inert={isBackgroundInert ? true : undefined}
+        className="border-t border-hairline bg-surface-1 px-4 lg:px-6 py-4 text-xs text-ink-muted"
+      >
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-4">
             <span className="font-medium text-ink">{bootstrap.storeSettings.storeName}</span>
+            <span>สาขา {bootstrap.storeSettings.outletCode} ({bootstrap.storeSettings.branchCode})</span>
             <span>เลขผู้เสียภาษี {bootstrap.storeSettings.taxId}</span>
             <span className="inline-flex items-center gap-1 text-ink-soft">
               <ShieldCheck className="h-3.5 w-3.5 text-primary" />
-              Ledger Invariant: {bootstrap.ledgerInvariant.valid ? '100% ตรงตามสมการบัญชี' : 'ตรวจสอบพบความต่าง'}
+              Ledger Invariant:{' '}
+              {bootstrap.ledgerInvariant.valid ? '100% ตรงตามสมการบัญชี' : 'ตรวจสอบพบความต่าง'}
             </span>
             <span className="inline-flex items-center gap-1 text-ink-soft">
               <Printer className="h-3.5 w-3.5 text-primary" />
-              เครื่องพิมพ์ ({bootstrap.printerConfig.paperWidthMm}mm): {bootstrap.printer.ready ? 'พร้อมใช้งาน' : `ค้างคิว ${bootstrap.printer.pendingQueueLength} ใบ`}
+              เครื่องพิมพ์ ({bootstrap.printerConfig.paperWidthMm}mm):{' '}
+              {bootstrap.printer.ready
+                ? 'พร้อมใช้งาน'
+                : `ค้างคิว ${bootstrap.printer.pendingQueueLength} ใบ`}
             </span>
           </div>
-          <div className="hidden lg:block text-ink-muted">
-            คีย์ลัด: F2 ค้นหา · F4 ตัวคูณ · F8 พักบิล · F9 ส่วนลด · F10 แยกจ่าย/เลือกชำระ · F12 รับเงินสดด่วน
-          </div>
+          {allowedTabs.includes('POS') && (
+            <div className="hidden lg:block text-ink-muted">
+              คีย์ลัด: F2 ค้นหา · F4 ตัวคูณ · F8 พักบิล · F9 ส่วนลด · F10 แยกจ่าย/เลือกชำระ · F12 รับเงินสดด่วน
+            </div>
+          )}
         </div>
       </footer>
 
       {/* Modals & Drawers */}
       <PinLockModal
-        open={pinModalOpen}
-        canDismiss={true}
+        open={isTerminalLocked || pinModalOpen}
+        canDismiss={!isTerminalLocked}
         staffUsers={bootstrap.staffUsers}
-        currentUser={activeUser}
-        onAuthenticated={(user) => {
-          setCurrentUser(user);
-          setPinModalOpen(false);
-          pushToast(`สลับผู้ใช้งานเป็น ${user.displayName} (${user.role})`, 'success');
+        currentUser={isTerminalLocked ? null : activeUser}
+        simulationModeEnabled={simulationModeEnabled}
+        onAuthenticated={handleUserAuthenticated}
+        onClose={() => {
+          if (!isTerminalLocked) {
+            setPinModalOpen(false);
+          }
         }}
-        onClose={() => setPinModalOpen(false)}
       />
 
-      <HilSimulatorDrawer
-        open={hilDrawerOpen}
-        onClose={() => setHilDrawerOpen(false)}
-        bootstrap={bootstrap}
-        lastPrintedReceipt={lastPrintedReceipt}
-        onInjectScannedBarcodeToPos={(barcode) => {
-          setRollbackCount((c) => c + 1);
-          handleScanBarcodeIntoCart(barcode, 1);
-        }}
-        onRefreshState={refreshBootstrap}
-        onToast={pushToast}
-      />
+      {showHilBenchButton && (
+        <HilSimulatorDrawer
+          open={hilDrawerOpen}
+          onClose={() => setHilDrawerOpen(false)}
+          bootstrap={bootstrap}
+          lastPrintedReceipt={lastPrintedReceipt}
+          onInjectScannedBarcodeToPos={(barcode) => {
+            setRollbackCount((c) => c + 1);
+            handleScanBarcodeIntoCart(barcode, 1);
+          }}
+          onRefreshState={() => refreshBootstrap()}
+          onToast={pushToast}
+        />
+      )}
 
       {/* Accessible Hairline Toast Notifications with distinct Icons + aria-live */}
       <div
@@ -606,7 +1117,10 @@ export const App: React.FC = () => {
               {t.tone === 'error' ? (
                 <XCircle className="h-4 w-4 text-white shrink-0 mt-0.5" aria-hidden="true" />
               ) : t.tone === 'warn' ? (
-                <AlertTriangle className="h-4 w-4 text-primary-dark shrink-0 mt-0.5" aria-hidden="true" />
+                <AlertTriangle
+                  className="h-4 w-4 text-primary-dark shrink-0 mt-0.5"
+                  aria-hidden="true"
+                />
               ) : (
                 <CheckCircle2 className="h-4 w-4 text-primary shrink-0 mt-0.5" aria-hidden="true" />
               )}

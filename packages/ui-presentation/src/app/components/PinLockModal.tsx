@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useId, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Delete, KeyRound, Lock, ShieldCheck, UserCheck, X } from 'lucide-react';
 import { posTransport } from '../api/pos-transport.ts';
 import type { StaffUserDto } from '../types.ts';
+import { resolveDigitFromKeyboardEvent } from '../utils/keyboard-digits.ts';
 import { ModalDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface PinLockModalProps {
@@ -9,6 +10,7 @@ interface PinLockModalProps {
   canDismiss: boolean;
   staffUsers: StaffUserDto[];
   currentUser: StaffUserDto | null;
+  simulationModeEnabled?: boolean;
   onAuthenticated: (user: StaffUserDto) => void;
   onClose: () => void;
 }
@@ -25,14 +27,27 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
   canDismiss,
   staffUsers,
   currentUser,
+  simulationModeEnabled = false,
   onAuthenticated,
   onClose,
 }) => {
   const uid = useId();
-  const [selectedUserId, setSelectedUserId] = useState<string>(currentUser?.id ?? '');
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [selectedUserId, setSelectedUserId] = useState<string>(
+    canDismiss ? (currentUser?.id ?? '') : ''
+  );
   const [pin, setPin] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setSelectedUserId(canDismiss ? (currentUser?.id ?? '') : '');
+      setPin('');
+      setErrorMsg(null);
+      setSubmitting(false);
+    }
+  }, [canDismiss, currentUser?.id, open]);
 
   const appendDigit = useCallback((d: string) => {
     setErrorMsg(null);
@@ -42,7 +57,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
   const handleSubmit = useCallback(
     async (overridePin?: string, overrideUserId?: string) => {
       const code = overridePin ?? pin;
-      const uid = overrideUserId !== undefined ? overrideUserId : selectedUserId;
+      const targetUserId = overrideUserId !== undefined ? overrideUserId : selectedUserId;
       if (code.length < 4) {
         setErrorMsg('กรุณากรอกรหัส PIN อย่างน้อย 4 หลัก');
         return;
@@ -50,7 +65,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
       setSubmitting(true);
       setErrorMsg(null);
       try {
-        const { user } = await posTransport.pinLogin(code, uid || undefined);
+        const { user } = await posTransport.pinLogin(code, targetUserId || undefined);
         setPin('');
         onAuthenticated(user);
       } catch (err) {
@@ -66,14 +81,26 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
+      const dialogEl = contentRef.current?.closest('[role="dialog"]');
+      if (dialogEl && dialogEl.getAttribute('data-rube-modal-topmost') === 'false') {
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      if (target && target.tagName === 'SELECT') {
+        return;
+      }
       if (submitting) return;
-      if (/^\d$/.test(e.key)) {
+      const digit = resolveDigitFromKeyboardEvent(e);
+      if (digit !== null) {
         e.preventDefault();
-        appendDigit(e.key);
-      } else if (e.key === 'Backspace') {
+        appendDigit(digit);
+      } else if (e.key === 'Backspace' || e.code === 'Backspace') {
         e.preventDefault();
         setPin((p) => p.slice(0, -1));
-      } else if (e.key === 'Enter' && pin.length >= 4) {
+      } else if (
+        (e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter') &&
+        pin.length >= 4
+      ) {
         e.preventDefault();
         void handleSubmit();
       }
@@ -82,28 +109,36 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [appendDigit, handleSubmit, open, pin.length, submitting]);
 
-  const availableDemoHints = DEMO_PIN_HINTS.filter((hint) =>
-    staffUsers.some((u) => u.id === hint.userId && u.active)
-  );
+  const availableDemoHints = simulationModeEnabled
+    ? DEMO_PIN_HINTS.filter((hint) => staffUsers.some((u) => u.id === hint.userId && u.active))
+    : [];
 
   return (
     <ModalDialog
       open={open}
       onClose={onClose}
       canDismiss={canDismiss}
+      minZIndex={!canDismiss ? 90 : undefined}
       labelledBy={`${uid}-pin-title`}
       maxWidthClass="max-w-md"
     >
-      <div className="flex items-center justify-between border-b border-hairline px-6 py-4 shrink-0">
+      <div ref={contentRef} className="flex items-center justify-between border-b border-hairline px-6 py-4 shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary-soft text-primary-dark">
             <Lock className="h-5 w-5" />
           </div>
           <div>
-            <h2 id={`${uid}-pin-title`} className="font-google-display text-[20px] font-normal text-ink">
-              ยืนยันตัวตนพนักงาน
+            <h2
+              id={`${uid}-pin-title`}
+              className="font-google-display text-[20px] font-normal text-ink"
+            >
+              {canDismiss ? 'สลับผู้ใช้งานประจำเครื่อง' : 'หน้าจอล็อกเครื่องจุดขาย (PIN Lock)'}
             </h2>
-            <p className="text-xs text-ink-muted">กรอกรหัส PIN เพื่อสลับผู้ใช้งานประจำเครื่อง</p>
+            <p className="text-xs text-ink-muted">
+              {canDismiss
+                ? 'กรอกรหัส PIN เพื่อเปลี่ยนบทบาทหรือผู้ปฏิบัติงาน'
+                : 'กรอกรหัส PIN ประจำตัวพนักงานเพื่อปลดล็อกเข้าใช้งาน'}
+            </p>
           </div>
         </div>
         {canDismiss && (
@@ -120,7 +155,10 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
 
       <div className="p-6 space-y-4 overflow-y-auto flex-1">
         <div>
-          <label htmlFor={`${uid}-staff-select`} className="block text-xs font-medium text-ink-muted mb-1.5">
+          <label
+            htmlFor={`${uid}-staff-select`}
+            className="block text-xs font-medium text-ink-muted mb-1.5"
+          >
             เลือกบัญชีผู้ใช้งาน (หรือกดรหัส PIN โดยตรง)
           </label>
           <select
@@ -145,7 +183,10 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
 
         {/* PIN Dots */}
         <div className="rounded-[4px] border border-hairline bg-surface-1 px-4 py-3.5 text-center">
-          <div className="flex items-center justify-center gap-2.5 min-h-[24px]" aria-label={`กรอกแล้ว ${pin.length} หลัก`}>
+          <div
+            className="flex items-center justify-center gap-2.5 min-h-[24px]"
+            aria-label={`กรอกแล้ว ${pin.length} หลัก`}
+          >
             {Array.from({ length: Math.max(6, pin.length) }).map((_, i) => (
               <span
                 key={i}
@@ -216,7 +257,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
           <div className="border-t border-hairline pt-3.5">
             <div className="flex items-center gap-1.5 text-xs text-ink-muted mb-2">
               <KeyRound className="h-3.5 w-3.5 text-primary" />
-              สลับบทบาทด่วนสำหรับชุดข้อมูลทดลอง
+              สลับบทบาทด่วน (โหมดจำลองการทดสอบ)
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {availableDemoHints.map((hint) => (

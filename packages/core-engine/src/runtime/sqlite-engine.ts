@@ -16,7 +16,16 @@
  *    - Multi-Level BOM Recipe COGS Rollup & Deduction with Role-Based Modifiers (`ROLE_SCALE_BPS`)
  */
 
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  scryptSync,
+  timingSafeEqual,
+} from 'node:crypto';
 import {
   closeSync,
   fsyncSync,
@@ -418,6 +427,11 @@ export interface MenuGrossMarginReportDto {
   }>;
 }
 
+export interface ReportDateRangeFilter {
+  startDate?: string | undefined;
+  endDate?: string | undefined;
+}
+
 export class SqliteReadWritePoolEngine {
   private readonly dbPath: string;
   private readonly rawHexKey64: string;
@@ -527,11 +541,22 @@ export class SqliteReadWritePoolEngine {
   }
 
   /**
+   * Chains non-transactional writer tasks (e.g. VACUUM INTO, WAL checkpoint, schema upgrade)
+   * onto the Single-Writer FIFO Serialization Queue so they never contend with active transactions.
+   */
+  private enqueueWriterTask<T>(fn: () => T): Promise<T> {
+    const nextTask = this.writerQueue.then(fn);
+    // Keep queue alive even if a task throws
+    this.writerQueue = nextTask.catch(() => undefined);
+    return nextTask;
+  }
+
+  /**
    * Executes a write transaction through the Single-Writer FIFO Serialization Queue
    * wrapped in `BEGIN IMMEDIATE TRANSACTION; ... COMMIT;`.
    */
   public executeWriteImmediate<T>(fn: (writer: DatabaseSync) => T): Promise<T> {
-    const nextTask = this.writerQueue.then(() => {
+    return this.enqueueWriterTask(() => {
       this.writerConn.exec('BEGIN IMMEDIATE TRANSACTION;');
       try {
         const result = fn(this.writerConn);
@@ -546,10 +571,6 @@ export class SqliteReadWritePoolEngine {
         throw err;
       }
     });
-
-    // Keep queue alive even if a task throws
-    this.writerQueue = nextTask.catch(() => undefined);
-    return nextTask;
   }
 
   /**
@@ -580,6 +601,14 @@ export class SqliteReadWritePoolEngine {
    */
   public async seedDefaultWarehouseAndCatalog(outletId: string = 'OUTLET-HQ'): Promise<void> {
     await this.executeWriteImmediate((db) => {
+      this.seedDefaultWarehouseAndCatalogOnDb(db, outletId);
+    });
+  }
+
+  private seedDefaultWarehouseAndCatalogOnDb(
+    db: DatabaseSync,
+    outletId: string = 'OUTLET-HQ'
+  ): void {
       db.prepare(
         `INSERT OR IGNORE INTO outlets (id, code, name, tax_id, branch_code, rd_pos_reg_no, is_warehouse)
          VALUES (?, 'HQ-01', 'RUBE Flagship Store & Warehouse', '0105566001234', '00000', 'RD-POS-2026-001', 1)`
@@ -723,14 +752,31 @@ export class SqliteReadWritePoolEngine {
           mod.scaleBasisPoints
         );
       }
-    });
   }
 
   /**
    * Reads all variants & their current inventory levels for an outlet using the Reader Pool.
    */
+  private readDeletedVariantIdSet(db: DatabaseSync): Set<string> {
+    try {
+      const row = db
+        .prepare(`SELECT value FROM store_config WHERE key = 'deleted_catalog_variant_ids'`)
+        .get() as { value?: string } | undefined;
+      if (row?.value) {
+        const parsed = JSON.parse(row.value) as unknown;
+        if (Array.isArray(parsed)) {
+          return new Set(parsed.map((id) => String(id)));
+        }
+      }
+    } catch {
+      // ignore malformed config
+    }
+    return new Set();
+  }
+
   public listInventoryCatalog(outletId: string = 'OUTLET-HQ'): ItemVariantDto[] {
     return this.executeRead((db) => {
+      const deletedIds = this.readDeletedVariantIdSet(db);
       const rows = db
         .prepare(
           `SELECT
@@ -754,21 +800,23 @@ export class SqliteReadWritePoolEngine {
         )
         .all(outletId) as Array<Record<string, unknown>>;
 
-      return rows.map((r) => ({
-        id: String(r.id),
-        itemId: String(r.itemId),
-        itemName: String(r.itemName),
-        variantName: String(r.variantName),
-        sku: String(r.sku),
-        barcode: r.barcode === null ? null : String(r.barcode),
-        unitName: String(r.unitName),
-        priceSatang: Number(r.priceSatang),
-        averageCostMicroBaht: Number(r.averageCostMicroBaht),
-        inStockMilli: Number(r.inStockMilli),
-        isComposite: Number(r.isComposite) === 1,
-        useProduction: Number(r.useProduction) === 1,
-        isWeightedScale: Number(r.isWeightedScale) === 1,
-      }));
+      return rows
+        .filter((r) => !deletedIds.has(String(r.id)))
+        .map((r) => ({
+          id: String(r.id),
+          itemId: String(r.itemId),
+          itemName: String(r.itemName),
+          variantName: String(r.variantName),
+          sku: String(r.sku),
+          barcode: r.barcode === null ? null : String(r.barcode),
+          unitName: String(r.unitName),
+          priceSatang: Number(r.priceSatang),
+          averageCostMicroBaht: Number(r.averageCostMicroBaht),
+          inStockMilli: Number(r.inStockMilli),
+          isComposite: Number(r.isComposite) === 1,
+          useProduction: Number(r.useProduction) === 1,
+          isWeightedScale: Number(r.isWeightedScale) === 1,
+        }));
     });
   }
 
@@ -790,17 +838,28 @@ export class SqliteReadWritePoolEngine {
       totalLandedSatang
     );
 
+    const rollingLevels = new Map<string, { stockMilli: number; macMicro: number }>();
+
     return input.items.map((line, idx) => {
       const alloc = allocated[idx]!;
       const existing = catalogMap.get(line.variantId);
-      const stockBeforeMilli = existing?.inStockMilli ?? 0;
-      const macBeforeMicroBaht = existing?.averageCostMicroBaht ?? 0;
+      const current = rollingLevels.get(line.variantId) ?? {
+        stockMilli: existing?.inStockMilli ?? 0,
+        macMicro: existing?.averageCostMicroBaht ?? 0,
+      };
+      const stockBeforeMilli = current.stockMilli;
+      const macBeforeMicroBaht = current.macMicro;
+      const stockAfterMilli = stockBeforeMilli + line.receivedQtyMilli;
       const macAfterMicroBaht = computeNewMovingAverageCost(
         stockBeforeMilli,
         macBeforeMicroBaht,
         line.receivedQtyMilli,
         alloc.effectiveUnitCostMicroBaht
       );
+      rollingLevels.set(line.variantId, {
+        stockMilli: stockAfterMilli,
+        macMicro: macAfterMicroBaht,
+      });
 
       return {
         variantId: line.variantId,
@@ -810,7 +869,7 @@ export class SqliteReadWritePoolEngine {
         allocatedLandedCostMicroBaht: alloc.allocatedLandedCostMicroBaht,
         effectiveUnitCostMicroBaht: alloc.effectiveUnitCostMicroBaht,
         stockBeforeMilli,
-        stockAfterMilli: stockBeforeMilli + line.receivedQtyMilli,
+        stockAfterMilli,
         macBeforeMicroBaht,
         macAfterMicroBaht,
         triggeredNegativeStockGuard: stockBeforeMilli <= 0,
@@ -1449,6 +1508,50 @@ export class SqliteReadWritePoolEngine {
   /**
    * Phase 2 (`SHIFT_SVC`): Opens a new Cashier Shift and records the initial `OPENING_FLOAT` cash movement.
    */
+  private insertOpenPosShiftOnDb(db: DatabaseSync, input: OpenPosShiftInput): PosShiftDto {
+    const shiftId = `SHIFT-${randomUUID()}`;
+    const openedAt = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO pos_shifts (
+         id, shift_number, outlet_id, terminal_id, opened_by, status,
+         opening_cash_satang, expected_cash_satang, notes, opened_at
+       ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)`
+    ).run(
+      shiftId,
+      input.shiftNumber,
+      input.outletId,
+      input.terminalId,
+      input.openedByUserId,
+      input.openingCashSatang,
+      input.openingCashSatang,
+      input.notes ?? null,
+      openedAt
+    );
+
+    if (input.openingCashSatang > 0) {
+      db.prepare(
+        `INSERT INTO cash_drawer_movements (
+           id, shift_id, movement_type, amount_satang, reason, performed_by
+         ) VALUES (?, ?, 'OPENING_FLOAT', ?, 'เงินทอนตั้งต้นเปิดกะ', ?)`
+      ).run(`CDM-${randomUUID()}`, shiftId, input.openingCashSatang, input.openedByUserId);
+    }
+
+    return {
+      id: shiftId,
+      shiftNumber: input.shiftNumber,
+      outletId: input.outletId,
+      terminalId: input.terminalId,
+      openedBy: input.openedByUserId,
+      status: 'OPEN',
+      openingCashSatang: input.openingCashSatang,
+      expectedCashSatang: input.openingCashSatang,
+      countedCashSatang: null,
+      cashVarianceSatang: null,
+      openedAt,
+    };
+  }
+
   public async openPosShift(input: OpenPosShiftInput): Promise<PosShiftDto> {
     if (input.openingCashSatang < 0) {
       throw new RangeError('openingCashSatang must be >= 0');
@@ -1465,47 +1568,7 @@ export class SqliteReadWritePoolEngine {
         throw new Error(`Shift ${existingOpen.id} is already OPEN on terminal ${input.terminalId}`);
       }
 
-      const shiftId = `SHIFT-${randomUUID()}`;
-      const openedAt = new Date().toISOString();
-
-      db.prepare(
-        `INSERT INTO pos_shifts (
-           id, shift_number, outlet_id, terminal_id, opened_by, status,
-           opening_cash_satang, expected_cash_satang, notes, opened_at
-         ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)`
-      ).run(
-        shiftId,
-        input.shiftNumber,
-        input.outletId,
-        input.terminalId,
-        input.openedByUserId,
-        input.openingCashSatang,
-        input.openingCashSatang,
-        input.notes ?? null,
-        openedAt
-      );
-
-      if (input.openingCashSatang > 0) {
-        db.prepare(
-          `INSERT INTO cash_drawer_movements (
-             id, shift_id, movement_type, amount_satang, reason, performed_by
-           ) VALUES (?, ?, 'OPENING_FLOAT', ?, 'เงินทอนตั้งต้นเปิดกะ', ?)`
-        ).run(`CDM-${randomUUID()}`, shiftId, input.openingCashSatang, input.openedByUserId);
-      }
-
-      return {
-        id: shiftId,
-        shiftNumber: input.shiftNumber,
-        outletId: input.outletId,
-        terminalId: input.terminalId,
-        openedBy: input.openedByUserId,
-        status: 'OPEN',
-        openingCashSatang: input.openingCashSatang,
-        expectedCashSatang: input.openingCashSatang,
-        countedCashSatang: null,
-        cashVarianceSatang: null,
-        openedAt,
-      };
+      return this.insertOpenPosShiftOnDb(db, input);
     });
   }
 
@@ -1729,9 +1792,8 @@ export class SqliteReadWritePoolEngine {
              so.outlet_id, so.terminal_id, so.shift_id, so.cashier_id,
              so.order_type, so.table_or_queue_no, so.tax_mode, so.subtotal_satang, so.discount_satang,
              so.tax_satang, so.total_satang, so.total_cogs_micro_baht, so.created_at,
-             ko.sequence_id AS kitchen_seq_id
+             (SELECT MIN(ko.sequence_id) FROM kitchen_orders ko WHERE ko.sales_order_id = so.id) AS kitchen_seq_id
            FROM sales_orders so
-           LEFT JOIN kitchen_orders ko ON ko.sales_order_id = so.id
            WHERE so.idempotency_key = ?`
         )
         .get(request.idempotencyKey) as Record<string, unknown> | undefined;
@@ -1835,6 +1897,7 @@ export class SqliteReadWritePoolEngine {
       }
 
       // 3. Load current Catalog, BOM edges, and Modifiers inside the transaction
+      const deletedIds = this.readDeletedVariantIdSet(db);
       const catalogRows = db
         .prepare(
           `SELECT
@@ -1844,7 +1907,8 @@ export class SqliteReadWritePoolEngine {
              COALESCE(il.in_stock_milli, 0) AS inStockMilli,
              i.is_composite AS isComposite, i.use_production AS useProduction,
              i.is_weighted_scale AS isWeightedScale,
-             COALESCE(c.kitchen_station, 'NONE') AS kitchenStation
+             COALESCE(c.kitchen_station, 'NONE') AS kitchenStation,
+             v.active AS active
            FROM item_variants v
            JOIN items i ON i.id = v.item_id
            LEFT JOIN categories c ON c.id = i.category_id
@@ -1852,7 +1916,10 @@ export class SqliteReadWritePoolEngine {
         )
         .all(request.outletId) as Array<Record<string, unknown>>;
 
-      const catalogMap = new Map<string, ItemVariantDto & { kitchenStation: string }>();
+      const catalogMap = new Map<
+        string,
+        ItemVariantDto & { kitchenStation: string; active: boolean }
+      >();
       for (const r of catalogRows) {
         catalogMap.set(String(r.id), {
           id: String(r.id),
@@ -1869,6 +1936,7 @@ export class SqliteReadWritePoolEngine {
           useProduction: Number(r.useProduction) === 1,
           isWeightedScale: Number(r.isWeightedScale) === 1,
           kitchenStation: String(r.kitchenStation),
+          active: Number(r.active) === 1,
         });
       }
 
@@ -1934,18 +2002,28 @@ export class SqliteReadWritePoolEngine {
         if (!variant) {
           throw new Error(`Variant not found in catalog: ${reqLine.variantId}`);
         }
+        if (deletedIds.has(reqLine.variantId) || !variant.active) {
+          throw new Error(`HTTP 409 Variant ${reqLine.variantId} is inactive or deleted`);
+        }
         const selectedMods = reqLine.selectedModifierIds.map((mId) => {
           const mod = modifierMap.get(mId);
           if (!mod) throw new Error(`Modifier not found: ${mId}`);
           return mod;
         });
 
-        const baseLinePriceSatang = Number(
-          roundDivBigInt(
-            BigInt(reqLine.quantityMilli) * BigInt(reqLine.unitPriceSatang),
-            SCALE_MILLI
-          )
-        );
+        const rawOverrideLineTotal = (reqLine as { overrideLineTotalSatang?: unknown })
+          .overrideLineTotalSatang;
+        const baseLinePriceSatang =
+          typeof rawOverrideLineTotal === 'number' &&
+          Number.isSafeInteger(rawOverrideLineTotal) &&
+          rawOverrideLineTotal >= 0
+            ? rawOverrideLineTotal
+            : Number(
+                roundDivBigInt(
+                  BigInt(reqLine.quantityMilli) * BigInt(reqLine.unitPriceSatang),
+                  SCALE_MILLI
+                )
+              );
         const singleUnitModPriceSatang = selectedMods.reduce(
           (acc, m) => acc + m.priceDeltaSatang,
           0
@@ -1956,11 +2034,16 @@ export class SqliteReadWritePoolEngine {
             SCALE_MILLI
           )
         );
-        const lineTotalSatang = baseLinePriceSatang + modifiersTotalSatang;
+        const lineTotalSatang = Math.max(0, baseLinePriceSatang + modifiersTotalSatang);
         subtotalSatang += lineTotalSatang;
 
+        const hasBomEdges = bomEdges.some((e) => e.compositeVariantId === variant.id);
+        const effectiveVariantForDeduction =
+          variant.isComposite && !variant.useProduction && !hasBomEdges
+            ? { ...variant, isComposite: false }
+            : variant;
         const lineDeductions = calculateOrderLineDeductions(
-          variant,
+          effectiveVariantForDeduction,
           reqLine.quantityMilli,
           selectedMods,
           catalogMap,
@@ -2166,15 +2249,41 @@ export class SqliteReadWritePoolEngine {
         });
       }
 
-      // 6. Generate sequential Receipt Number & Thai ABB Tax Invoice Number
+      // 6. Generate sequential Receipt Number & Thai ABB Tax Invoice Number (branch-prefixed for non-HQ outlets + collision guard)
       const orderCountRow = db
         .prepare(`SELECT COUNT(*) AS cnt FROM sales_orders WHERE outlet_id = ?`)
         .get(request.outletId) as { cnt: number };
-      const nextSeq = Number(orderCountRow.cnt) + 1;
+      let branchPrefix = '';
+      if (request.outletId !== 'OUTLET-HQ') {
+        const outletRow = db
+          .prepare(`SELECT code FROM outlets WHERE id = ?`)
+          .get(request.outletId) as { code?: string } | undefined;
+        const rawCode =
+          outletRow?.code ??
+          request.outletId.replace(/^OUTLET-/i, '');
+        branchPrefix = rawCode.replace(/[^A-Za-z0-9-]/g, '').toUpperCase() || 'BR';
+      }
+
       const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const seqPadded = String(nextSeq).padStart(6, '0');
-      const receiptNumber = `RCP-${dateStr}-${seqPadded}`;
-      const abbTaxInvoiceNo = `ABB-${dateStr}-${seqPadded}`;
+      const checkDupReceipt = db.prepare(
+        `SELECT 1 FROM sales_orders WHERE receipt_number = ? OR abb_tax_invoice_no = ? LIMIT 1`
+      );
+      let nextSeq = Number(orderCountRow.cnt) + 1;
+      let receiptNumber = '';
+      let abbTaxInvoiceNo = '';
+      while (true) {
+        const seqPadded = String(nextSeq).padStart(6, '0');
+        receiptNumber = branchPrefix
+          ? `RCP-${branchPrefix}-${dateStr}-${seqPadded}`
+          : `RCP-${dateStr}-${seqPadded}`;
+        abbTaxInvoiceNo = branchPrefix
+          ? `ABB-${branchPrefix}-${dateStr}-${seqPadded}`
+          : `ABB-${dateStr}-${seqPadded}`;
+        if (!checkDupReceipt.get(receiptNumber, abbTaxInvoiceNo)) {
+          break;
+        }
+        nextSeq += 1;
+      }
       const salesOrderId = `SO-${randomUUID()}`;
       const createdAt = new Date().toISOString();
 
@@ -2324,7 +2433,7 @@ export class SqliteReadWritePoolEngine {
         );
       }
 
-      // 9. Enqueue Kitchen Order (KDS) if any item belongs to a kitchen station (e.g. BAR / PREP)
+      // 9. Enqueue Kitchen Orders (KDS) split automatically per station (BAR / MAIN / etc.)
       let kitchenOrderSequenceId: number | null = null;
       const kitchenLines = lineSummaries.filter((l) => {
         const v = catalogMap.get(l.variantId);
@@ -2332,39 +2441,54 @@ export class SqliteReadWritePoolEngine {
       });
 
       if (kitchenLines.length > 0) {
-        const koId = `KO-${randomUUID()}`;
         const queueNumber = cleanTableOrQueue || `Q-${String(nextSeq).padStart(3, '0')}`;
-        const firstStation = catalogMap.get(kitchenLines[0]!.variantId)?.kitchenStation;
-        const primaryStation =
-          firstStation && firstStation !== 'NONE' ? firstStation : 'BAR';
-        const koResult = db
-          .prepare(
-            `INSERT INTO kitchen_orders (id, sales_order_id, outlet_id, station, queue_number, status)
-             VALUES (?, ?, ?, ?, ?, 'QUEUED')`
-          )
-          .run(koId, salesOrderId, request.outletId, primaryStation, queueNumber);
+        const linesByStation = new Map<string, typeof kitchenLines>();
+        for (const kl of kitchenLines) {
+          const st = catalogMap.get(kl.variantId)?.kitchenStation;
+          const station = st && st !== 'NONE' ? st : 'BAR';
+          const bucket = linesByStation.get(station) ?? [];
+          bucket.push(kl);
+          linesByStation.set(station, bucket);
+        }
 
-        kitchenOrderSequenceId = Number(koResult.lastInsertRowid);
-
+        const insertKo = db.prepare(
+          `INSERT INTO kitchen_orders (id, sales_order_id, outlet_id, station, queue_number, status)
+           VALUES (?, ?, ?, ?, ?, 'QUEUED')`
+        );
         const insertKoItem = db.prepare(
           `INSERT INTO kitchen_order_items (
              id, kitchen_order_id, sales_order_item_id, item_summary_text,
              modifiers_summary_text, quantity_milli, status
            ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`
         );
-        for (const kl of kitchenLines) {
-          const modText =
-            kl.selectedModifiers.length > 0
-              ? kl.selectedModifiers.map((m) => m.name).join(', ')
-              : null;
-          insertKoItem.run(
-            `KOI-${randomUUID()}`,
+
+        for (const [station, stationLines] of linesByStation.entries()) {
+          const koId = `KO-${randomUUID()}`;
+          const koResult = insertKo.run(
             koId,
-            kl.salesOrderItemId,
-            kl.itemName,
-            modText,
-            kl.quantityMilli
+            salesOrderId,
+            request.outletId,
+            station,
+            queueNumber
           );
+          if (kitchenOrderSequenceId === null) {
+            kitchenOrderSequenceId = Number(koResult.lastInsertRowid);
+          }
+
+          for (const kl of stationLines) {
+            const modText =
+              kl.selectedModifiers.length > 0
+                ? kl.selectedModifiers.map((m) => m.name).join(', ')
+                : null;
+            insertKoItem.run(
+              `KOI-${randomUUID()}`,
+              koId,
+              kl.salesOrderItemId,
+              kl.itemName,
+              modText,
+              kl.quantityMilli
+            );
+          }
         }
       }
 
@@ -2423,9 +2547,8 @@ export class SqliteReadWritePoolEngine {
         .prepare(
           `SELECT
              so.id, so.outlet_id, so.shift_id, so.receipt_number, so.abb_tax_invoice_no,
-             so.status, so.total_satang, pt.payment_method
+             so.status, so.total_satang
            FROM sales_orders so
-           LEFT JOIN payment_transactions pt ON pt.sales_order_id = so.id
            WHERE so.id = ?`
         )
         .get(input.salesOrderId) as Record<string, unknown> | undefined;
@@ -2440,7 +2563,16 @@ export class SqliteReadWritePoolEngine {
       const outletId = String(order.outlet_id);
       const shiftId = String(order.shift_id);
       const totalSatang = Number(order.total_satang);
-      const paymentMethod = String(order.payment_method ?? 'CASH');
+      const paymentRows = db
+        .prepare(
+          `SELECT payment_method
+           FROM payment_transactions
+           WHERE sales_order_id = ?
+           ORDER BY rowid ASC`
+        )
+        .all(input.salesOrderId) as Array<{ payment_method: string }>;
+      const paymentMethod =
+        paymentRows.map((r) => String(r.payment_method)).join(' + ') || 'CASH';
 
       // Query exact historical inventory_transactions for this sales order
       const origTxRows = db
@@ -2483,35 +2615,69 @@ export class SqliteReadWritePoolEngine {
         stockAfterMilli: MilliUnit;
       }> = [];
 
+      // Aggregate net restored qty & weighted historical cost per variant so MAC updates once per variant without sub-step drift
+      const aggByVariant = new Map<
+        string,
+        { netRestoredQtyMilli: number; weightedCostNum: bigint; fallbackUnitCostMicroBaht: number }
+      >();
+      for (const orig of origTxRows) {
+        const restoredQtyMilli = -Number(orig.quantity_change_milli);
+        if (restoredQtyMilli === 0) continue;
+        const unitCost = Number(orig.unit_cost_micro_baht);
+        const cur = aggByVariant.get(orig.variant_id) ?? {
+          netRestoredQtyMilli: 0,
+          weightedCostNum: 0n,
+          fallbackUnitCostMicroBaht: unitCost,
+        };
+        cur.netRestoredQtyMilli += restoredQtyMilli;
+        cur.weightedCostNum += BigInt(restoredQtyMilli) * BigInt(unitCost);
+        aggByVariant.set(orig.variant_id, cur);
+      }
+
+      const runningStockByVariant = new Map<string, number>();
+      for (const [variantId, agg] of aggByVariant.entries()) {
+        const weightedUnitCostMicroBaht =
+          agg.netRestoredQtyMilli > 0
+            ? Math.max(
+                0,
+                Number(roundDivBigInt(agg.weightedCostNum, BigInt(agg.netRestoredQtyMilli)))
+              )
+            : agg.fallbackUnitCostMicroBaht;
+        const lvl = getLevel.get(outletId, variantId) as
+          | { in_stock_milli: number; average_cost_micro_baht: number }
+          | undefined;
+        const stockBefore = Number(lvl?.in_stock_milli ?? 0);
+        const macBefore = Number(lvl?.average_cost_micro_baht ?? weightedUnitCostMicroBaht);
+        const stockAfter = stockBefore + agg.netRestoredQtyMilli;
+        const macAfter =
+          agg.netRestoredQtyMilli > 0
+            ? computeNewMovingAverageCost(
+                stockBefore,
+                macBefore,
+                agg.netRestoredQtyMilli,
+                weightedUnitCostMicroBaht
+              )
+            : macBefore;
+
+        upsertLevel.run(
+          `INV-${outletId}-${variantId}`,
+          outletId,
+          variantId,
+          stockAfter,
+          macAfter
+        );
+        runningStockByVariant.set(variantId, stockBefore);
+      }
+
+      // Emit exact individual VOID_RETURN ledger rows so the historical audit mirror invariant holds 100%
       for (const orig of origTxRows) {
         const restoredQtyMilli = -Number(orig.quantity_change_milli);
         if (restoredQtyMilli === 0) continue;
 
         const historicalUnitCostMicroBaht = Number(orig.unit_cost_micro_baht);
-        const lvl = getLevel.get(outletId, orig.variant_id) as
-          | { in_stock_milli: number; average_cost_micro_baht: number }
-          | undefined;
-
-        const stockBefore = Number(lvl?.in_stock_milli ?? 0);
-        const macBefore = Number(lvl?.average_cost_micro_baht ?? historicalUnitCostMicroBaht);
+        const stockBefore = runningStockByVariant.get(orig.variant_id) ?? 0;
         const stockAfter = stockBefore + restoredQtyMilli;
-        const macAfter =
-          restoredQtyMilli > 0
-            ? computeNewMovingAverageCost(
-                stockBefore,
-                macBefore,
-                restoredQtyMilli,
-                historicalUnitCostMicroBaht
-              )
-            : macBefore;
-
-        upsertLevel.run(
-          `INV-${outletId}-${orig.variant_id}`,
-          outletId,
-          orig.variant_id,
-          stockAfter,
-          macAfter
-        );
+        runningStockByVariant.set(orig.variant_id, stockAfter);
 
         insertVoidTx.run(
           `TX-${randomUUID()}`,
@@ -2560,9 +2726,41 @@ export class SqliteReadWritePoolEngine {
         .get(input.salesOrderId) as { cashPaid: number };
       const cashToReverseSatang = Number(cashLegSum.cashPaid ?? 0);
       if (cashToReverseSatang > 0) {
-        db.prepare(
-          `UPDATE pos_shifts SET expected_cash_satang = expected_cash_satang - ? WHERE id = ?`
-        ).run(cashToReverseSatang, shiftId);
+        const origShift = db
+          .prepare(`SELECT status FROM pos_shifts WHERE id = ?`)
+          .get(shiftId) as { status?: string } | undefined;
+
+        if (origShift?.status === 'OPEN') {
+          db.prepare(
+            `UPDATE pos_shifts SET expected_cash_satang = expected_cash_satang - ? WHERE id = ?`
+          ).run(cashToReverseSatang, shiftId);
+        } else {
+          // Cross-shift void: never mutate historical CLOSED shift totals; deduct from active OPEN drawer with PAID_OUT audit movement
+          const currentOpenShift = db
+            .prepare(
+              `SELECT id FROM pos_shifts
+               WHERE outlet_id = ? AND status = 'OPEN'
+               ORDER BY opened_at DESC LIMIT 1`
+            )
+            .get(outletId) as { id?: string } | undefined;
+
+          if (currentOpenShift?.id) {
+            db.prepare(
+              `INSERT INTO cash_drawer_movements (
+                 id, shift_id, movement_type, amount_satang, reason, performed_by
+               ) VALUES (?, ?, 'PAID_OUT', ?, ?, ?)`
+            ).run(
+              `CDM-VOID-${randomUUID()}`,
+              currentOpenShift.id,
+              cashToReverseSatang,
+              `คืนเงินสดยกเลิกบิลข้ามกะ ${String(order.receipt_number)} (${input.voidReason})`,
+              input.voidedByUserId
+            );
+            db.prepare(
+              `UPDATE pos_shifts SET expected_cash_satang = expected_cash_satang - ? WHERE id = ?`
+            ).run(cashToReverseSatang, currentOpenShift.id);
+          }
+        }
       }
 
       // Append immutable row to security_audit_logs
@@ -3043,18 +3241,42 @@ export class SqliteReadWritePoolEngine {
     ackedSequenceId: number;
   }): Promise<{ kitchenOrderId: string; newStatus: string; lastAckedKdsSeq: number }> {
     return this.executeWriteImmediate((db) => {
-      db.prepare(
-        `UPDATE kitchen_orders
-         SET status = ?,
-             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-             completed_at = CASE WHEN ? = 'SERVED' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE completed_at END
-         WHERE id = ?`
-      ).run(input.newStatus, input.newStatus, input.kitchenOrderId);
+      const existing = db
+        .prepare(`SELECT status FROM kitchen_orders WHERE id = ?`)
+        .get(input.kitchenOrderId) as { status?: string } | undefined;
 
-      if (input.newStatus === 'READY' || input.newStatus === 'SERVED') {
+      if (!existing) {
+        throw new Error('HTTP 404 Kitchen order not found');
+      }
+
+      const curStatus = String(existing.status);
+      if (curStatus === 'CANCELLED') {
+        throw new Error('HTTP 409 ออเดอร์ครัวนี้ถูกยกเลิกบิลแล้ว');
+      }
+
+      const statusRank: Record<string, number> = {
+        QUEUED: 0,
+        PREPARING: 1,
+        READY: 2,
+        SERVED: 3,
+      };
+      const curRank = statusRank[curStatus] ?? -1;
+      const nextRank = statusRank[input.newStatus] ?? -1;
+
+      if (nextRank > curRank) {
         db.prepare(
-          `UPDATE kitchen_order_items SET status = 'DONE' WHERE kitchen_order_id = ?`
-        ).run(input.kitchenOrderId);
+          `UPDATE kitchen_orders
+           SET status = ?,
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+               completed_at = CASE WHEN ? = 'SERVED' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE completed_at END
+           WHERE id = ?`
+        ).run(input.newStatus, input.newStatus, input.kitchenOrderId);
+
+        if (input.newStatus === 'READY' || input.newStatus === 'SERVED') {
+          db.prepare(
+            `UPDATE kitchen_order_items SET status = 'DONE' WHERE kitchen_order_id = ?`
+          ).run(input.kitchenOrderId);
+        }
       }
 
       db.prepare(
@@ -3070,7 +3292,7 @@ export class SqliteReadWritePoolEngine {
 
       return {
         kitchenOrderId: input.kitchenOrderId,
-        newStatus: input.newStatus,
+        newStatus: nextRank > curRank ? input.newStatus : curStatus,
         lastAckedKdsSeq: Number(termRow?.last_acked_kds_seq ?? input.ackedSequenceId),
       };
     });
@@ -3084,30 +3306,81 @@ export class SqliteReadWritePoolEngine {
   public async triggerEmergencyUpsWalCheckpoint(
     terminalId = 'POS-TERM-01'
   ): Promise<{ walCheckpointed: true; auditLogId: number }> {
-    const auditLogId = await this.executeWriteImmediate((db) => {
-      const res = db
-        .prepare(
-          `INSERT INTO security_audit_logs (
-             event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
-           ) VALUES ('UPS_EMERGENCY_WAL_CHECKPOINT', 'USR-OWNER-01', ?, 'WAL_JOURNAL', 'AC_ONLINE', 'ON_BATTERY_TRUNCATED')`
-        )
-        .run(terminalId);
-      return Number(res.lastInsertRowid);
+    return this.enqueueWriterTask(() => {
+      this.writerConn.exec('BEGIN IMMEDIATE TRANSACTION;');
+      let auditLogId: number;
+      try {
+        const res = this.writerConn
+          .prepare(
+            `INSERT INTO security_audit_logs (
+               event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+             ) VALUES ('UPS_EMERGENCY_WAL_CHECKPOINT', 'USR-OWNER-01', ?, 'WAL_JOURNAL', 'AC_ONLINE', 'ON_BATTERY_TRUNCATED')`
+          )
+          .run(terminalId);
+        auditLogId = Number(res.lastInsertRowid);
+        this.writerConn.exec('COMMIT;');
+      } catch (err) {
+        try {
+          this.writerConn.exec('ROLLBACK;');
+        } catch {
+          // ignore rollback error
+        }
+        throw err;
+      }
+
+      // Run checkpoint after COMMIT inside the same serialized writerQueue task
+      this.writerConn.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+
+      return {
+        walCheckpointed: true,
+        auditLogId,
+      };
     });
-
-    // Run checkpoint outside transaction on writerConn
-    this.writerConn.exec('PRAGMA wal_checkpoint(TRUNCATE);');
-
-    return {
-      walCheckpointed: true,
-      auditLogId,
-    };
   }
 
   /**
    * Phase 3 & 5 (`BACKUP_SVC` — Section 8.3 Tier 2): Atomic USB Flash Drive Backup with `.part` + `fsyncSync`,
    * Orphaned `.part` File Cleanup (recovering from yanked USB drives mid-write), and 14-Shift Rotating Ring Buffer.
    */
+  private static readonly USB_BACKUP_MAGIC = Buffer.from('RUBE-ENC-V1\n', 'utf8');
+  private static readonly USB_BACKUP_AAD = Buffer.from('RUBE-USB-BACKUP-AES256GCM-V3.1', 'utf8');
+
+  public static encryptUsbBackupPayload(plainDbBytes: Buffer, rawHexKey64: string): Buffer {
+    const key32 = Buffer.from(rawHexKey64, 'hex');
+    if (key32.byteLength !== 32) {
+      throw new Error('SQLCipher Raw Hex Key must decode to 32 bytes for AES-256-GCM backup');
+    }
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key32, iv);
+    cipher.setAAD(SqliteReadWritePoolEngine.USB_BACKUP_AAD);
+    const ciphertext = Buffer.concat([cipher.update(plainDbBytes), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return Buffer.concat([SqliteReadWritePoolEngine.USB_BACKUP_MAGIC, iv, authTag, ciphertext]);
+  }
+
+  public static decryptUsbBackupPayload(
+    encryptedBytes: Buffer,
+    rawHexKey64: string = DEV_SQLCIPHER_RAW_HEX_KEY_64
+  ): Buffer {
+    if (
+      encryptedBytes.byteLength < 40 ||
+      !encryptedBytes.subarray(0, 12).equals(SqliteReadWritePoolEngine.USB_BACKUP_MAGIC)
+    ) {
+      throw new Error('Invalid or corrupted RUBE-ENC-V1 USB backup envelope');
+    }
+    const key32 = Buffer.from(rawHexKey64, 'hex');
+    if (key32.byteLength !== 32) {
+      throw new Error('Decryption key must be 64 hexadecimal characters (256 bits)');
+    }
+    const iv = encryptedBytes.subarray(12, 24);
+    const authTag = encryptedBytes.subarray(24, 40);
+    const ciphertext = encryptedBytes.subarray(40);
+    const decipher = createDecipheriv('aes-256-gcm', key32, iv);
+    decipher.setAAD(SqliteReadWritePoolEngine.USB_BACKUP_AAD);
+    decipher.setAuthTag(authTag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  }
+
   public async exportEncryptedUsbBackupWithRingBuffer(
     usbBackupDir: string,
     shiftNumber: string
@@ -3117,63 +3390,78 @@ export class SqliteReadWritePoolEngine {
     retainedBackupsCount: number;
     cleanedOrphanedPartFilesCount: number;
   }> {
-    mkdirSync(usbBackupDir, { recursive: true });
+    return this.enqueueWriterTask(() => {
+      mkdirSync(usbBackupDir, { recursive: true });
 
-    // Clean up any orphaned `.part` files left behind if a USB drive was yanked during a prior backup
-    const orphanedParts = readdirSync(usbBackupDir).filter((name) => name.endsWith('.part'));
-    let cleanedOrphanedPartFilesCount = 0;
-    for (const partName of orphanedParts) {
-      unlinkSync(join(usbBackupDir, partName));
-      cleanedOrphanedPartFilesCount++;
-    }
-
-    // Flush WAL before taking snapshot
-    this.writerConn.exec('PRAGMA wal_checkpoint(PASSIVE);');
-
-    const finalFilename = `rube_backup_${shiftNumber}.db.enc`;
-    const finalPath = join(usbBackupDir, finalFilename);
-    const partPath = join(usbBackupDir, `${finalFilename}.part`);
-
-    const dbBytes =
-      this.dbPath === ':memory:'
-        ? Buffer.from(`SQLCIPHER_ENC_SNAPSHOT:${shiftNumber}:${Date.now()}`, 'utf8')
-        : readFileSync(this.dbPath);
-
-    const fd = openSync(partPath, 'w');
-    try {
-      writeSync(fd, dbBytes);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-
-    renameSync(partPath, finalPath);
-
-    const completedFiles = readdirSync(usbBackupDir)
-      .filter((name) => name.startsWith('rube_backup_') && name.endsWith('.db.enc'))
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-
-    let evictedOldestBackupPath: string | null = null;
-    const maxRingBufferShifts = 14;
-    if (completedFiles.length > maxRingBufferShifts) {
-      const toRemove = completedFiles.slice(0, completedFiles.length - maxRingBufferShifts);
-      for (const oldName of toRemove) {
-        const oldFullPath = join(usbBackupDir, oldName);
-        unlinkSync(oldFullPath);
-        evictedOldestBackupPath = oldFullPath;
+      // Clean up any orphaned `.part` files left behind if a USB drive was yanked during a prior backup
+      const orphanedParts = readdirSync(usbBackupDir).filter((name) => name.endsWith('.part'));
+      let cleanedOrphanedPartFilesCount = 0;
+      for (const partName of orphanedParts) {
+        unlinkSync(join(usbBackupDir, partName));
+        cleanedOrphanedPartFilesCount++;
       }
-    }
 
-    const retainedBackupsCount = readdirSync(usbBackupDir).filter(
-      (name) => name.startsWith('rube_backup_') && name.endsWith('.db.enc')
-    ).length;
+      const finalFilename = `rube_backup_${shiftNumber}.db.enc`;
+      const finalPath = join(usbBackupDir, finalFilename);
+      const partPath = join(usbBackupDir, `${finalFilename}.part`);
 
-    return {
-      writtenBackupPath: finalPath,
-      evictedOldestBackupPath,
-      retainedBackupsCount,
-      cleanedOrphanedPartFilesCount,
-    };
+      let dbBytes: Buffer;
+      if (this.dbPath === ':memory:') {
+        dbBytes = Buffer.from(`SQLCIPHER_ENC_SNAPSHOT:${shiftNumber}:${Date.now()}`, 'utf8');
+      } else {
+        const rawSnapPath = join(usbBackupDir, `.tmp_vacuum_${randomUUID()}.part`);
+        try {
+          this.writerConn.exec(`VACUUM INTO '${rawSnapPath.replace(/'/g, "''")}';`);
+          dbBytes = readFileSync(rawSnapPath);
+        } finally {
+          try {
+            unlinkSync(rawSnapPath);
+          } catch {
+            // ignore if temp snapshot was not created
+          }
+        }
+      }
+      const encryptedPayload = SqliteReadWritePoolEngine.encryptUsbBackupPayload(
+        dbBytes,
+        this.rawHexKey64
+      );
+
+      const fd = openSync(partPath, 'w');
+      try {
+        writeSync(fd, encryptedPayload);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+
+      renameSync(partPath, finalPath);
+
+      const completedFiles = readdirSync(usbBackupDir)
+        .filter((name) => name.startsWith('rube_backup_') && name.endsWith('.db.enc'))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+      let evictedOldestBackupPath: string | null = null;
+      const maxRingBufferShifts = 14;
+      if (completedFiles.length > maxRingBufferShifts) {
+        const toRemove = completedFiles.slice(0, completedFiles.length - maxRingBufferShifts);
+        for (const oldName of toRemove) {
+          const oldFullPath = join(usbBackupDir, oldName);
+          unlinkSync(oldFullPath);
+          evictedOldestBackupPath = oldFullPath;
+        }
+      }
+
+      const retainedBackupsCount = readdirSync(usbBackupDir).filter(
+        (name) => name.startsWith('rube_backup_') && name.endsWith('.db.enc')
+      ).length;
+
+      return {
+        writtenBackupPath: finalPath,
+        evictedOldestBackupPath,
+        retainedBackupsCount,
+        cleanedOrphanedPartFilesCount,
+      };
+    });
   }
 
   /**
@@ -3184,6 +3472,53 @@ export class SqliteReadWritePoolEngine {
     return createHmac('sha256', Buffer.from(this.rawHexKey64, 'utf8'))
       .update(`RUBE-PROTECTED-CONFIG-V1:${key}:${value}`, 'utf8')
       .digest('hex');
+  }
+
+  private upsertProtectedStoreConfigOnDb(
+    db: DatabaseSync,
+    input: {
+      key: string;
+      value: string;
+      hmacSignatureHex: string;
+      updatedByUserId: string;
+      terminalId?: string;
+    }
+  ): { key: string; value: string; hmacSignatureHex: string; auditLogId: number } {
+    const existing = db
+      .prepare(`SELECT value FROM store_config WHERE key = ?`)
+      .get(input.key) as { value?: string } | undefined;
+
+    db.prepare(
+      `INSERT INTO store_config (key, value, is_protected, hmac_signature_hex, updated_by, updated_at)
+       VALUES (?, ?, 1, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         is_protected = 1,
+         hmac_signature_hex = excluded.hmac_signature_hex,
+         updated_by = excluded.updated_by,
+         updated_at = excluded.updated_at`
+    ).run(input.key, input.value, input.hmacSignatureHex, input.updatedByUserId);
+
+    const auditRes = db
+      .prepare(
+        `INSERT INTO security_audit_logs (
+           event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+         ) VALUES ('PROTECTED_STORE_CONFIG_UPDATED', ?, ?, ?, ?, ?)`
+      )
+      .run(
+        input.updatedByUserId,
+        input.terminalId ?? 'POS-TERM-01',
+        input.key,
+        existing?.value ?? 'NULL',
+        input.value
+      );
+
+    return {
+      key: input.key,
+      value: input.value,
+      hmacSignatureHex: input.hmacSignatureHex,
+      auditLogId: Number(auditRes.lastInsertRowid),
+    };
   }
 
   /**
@@ -3198,43 +3533,12 @@ export class SqliteReadWritePoolEngine {
   }): Promise<{ key: string; value: string; hmacSignatureHex: string; auditLogId: number }> {
     const hmacSignatureHex = this.computeProtectedConfigHmacHex(input.key, input.value);
 
-    return this.executeWriteImmediate((db) => {
-      const existing = db
-        .prepare(`SELECT value FROM store_config WHERE key = ?`)
-        .get(input.key) as { value?: string } | undefined;
-
-      db.prepare(
-        `INSERT INTO store_config (key, value, is_protected, hmac_signature_hex, updated_by, updated_at)
-         VALUES (?, ?, 1, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-         ON CONFLICT(key) DO UPDATE SET
-           value = excluded.value,
-           is_protected = 1,
-           hmac_signature_hex = excluded.hmac_signature_hex,
-           updated_by = excluded.updated_by,
-           updated_at = excluded.updated_at`
-      ).run(input.key, input.value, hmacSignatureHex, input.updatedByUserId);
-
-      const auditRes = db
-        .prepare(
-          `INSERT INTO security_audit_logs (
-             event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
-           ) VALUES ('PROTECTED_STORE_CONFIG_UPDATED', ?, ?, ?, ?, ?)`
-        )
-        .run(
-          input.updatedByUserId,
-          input.terminalId ?? 'POS-TERM-01',
-          input.key,
-          existing?.value ?? 'NULL',
-          input.value
-        );
-
-      return {
-        key: input.key,
-        value: input.value,
+    return this.executeWriteImmediate((db) =>
+      this.upsertProtectedStoreConfigOnDb(db, {
+        ...input,
         hmacSignatureHex,
-        auditLogId: Number(auditRes.lastInsertRowid),
-      };
-    });
+      })
+    );
   }
 
   /**
@@ -3323,12 +3627,20 @@ export class SqliteReadWritePoolEngine {
   ): Promise<SchemaUpgradeResult> {
     const normalizedSql = input.sqlDdl.replace(/\r\n/g, '\n');
     const checksum = createHash('sha256').update(normalizedSql).digest('hex');
-    const transactionalDdl = normalizedSql.replace(/^\s*PRAGMA\s+[^;]+;\s*$/gim, '');
+    const transactionalDdl = normalizedSql
+      .replace(/^\s*PRAGMA\s+[^;]+;\s*$/gim, '')
+      .replace(
+        /^\s*BEGIN(?:\s+(?:DEFERRED|IMMEDIATE|EXCLUSIVE))?(?:\s+TRANSACTION)?\s*;\s*$/gim,
+        ''
+      )
+      .replace(/^\s*COMMIT(?:\s+TRANSACTION)?\s*;\s*$/gim, '');
     const startMs = Date.now();
 
-    const nextTask = this.writerQueue.then((): SchemaUpgradeResult => {
+    return this.enqueueWriterTask((): SchemaUpgradeResult => {
       // Step 1: Quiesce & Cold Snapshot (`PRAGMA wal_checkpoint(TRUNCATE);`)
-      this.writerConn.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+      const ckptRow = this.writerConn.prepare('PRAGMA wal_checkpoint(TRUNCATE);').get() as
+        | { busy?: number; log?: number; checkpointed?: number }
+        | undefined;
 
       let snapshotPath: string | null = null;
       if (input.snapshotDir) {
@@ -3338,16 +3650,45 @@ export class SqliteReadWritePoolEngine {
           `rube_pre_migration_v${input.version}.db.bak`
         );
         const partPath = `${snapshotPath}.part`;
-        const dbBytes =
-          this.dbPath === ':memory:'
-            ? Buffer.from(`PRE_MIGRATION_V${input.version}:${Date.now()}`, 'utf8')
-            : readFileSync(this.dbPath);
-        const fd = openSync(partPath, 'w');
         try {
-          writeSync(fd, dbBytes);
-          fsyncSync(fd);
-        } finally {
-          closeSync(fd);
+          unlinkSync(partPath);
+        } catch {
+          // ignore if no stale .part exists
+        }
+        if (this.dbPath === ':memory:') {
+          const dbBytes = Buffer.from(`PRE_MIGRATION_V${input.version}:${Date.now()}`, 'utf8');
+          const fd = openSync(partPath, 'w');
+          try {
+            writeSync(fd, dbBytes);
+            fsyncSync(fd);
+          } finally {
+            closeSync(fd);
+          }
+        } else if (
+          Number(ckptRow?.busy ?? 1) === 0 &&
+          Number(ckptRow?.log ?? -1) >= 0 &&
+          Number(ckptRow?.log ?? -1) === Number(ckptRow?.checkpointed ?? -2)
+        ) {
+          const dbBytes = readFileSync(this.dbPath);
+          const fd = openSync(partPath, 'w');
+          try {
+            writeSync(fd, dbBytes);
+            fsyncSync(fd);
+          } finally {
+            closeSync(fd);
+          }
+        } else {
+          // Active readers prevented full WAL truncation: VACUUM INTO includes 100% of WAL frames atomically
+          try {
+            this.writerConn.exec(`VACUUM INTO '${partPath.replace(/'/g, "''")}';`);
+          } catch (err) {
+            try {
+              unlinkSync(partPath);
+            } catch {
+              // ignore cleanup failure
+            }
+            throw err;
+          }
         }
         renameSync(partPath, snapshotPath);
       }
@@ -3418,9 +3759,6 @@ export class SqliteReadWritePoolEngine {
         ...(errorMessage ? { errorMessage } : {}),
       };
     });
-
-    this.writerQueue = nextTask.catch(() => undefined);
-    return nextTask;
   }
 
   /**
@@ -3519,10 +3857,21 @@ export class SqliteReadWritePoolEngine {
     });
   }
 
+  private normalizeDateBound(dateStr?: string): string | null {
+    const trimmed = dateStr?.trim();
+    if (!trimmed) return null;
+    return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+  }
+
   /**
    * Phase 5 (`REPORT_SVC`): Generates the Thai Simplified Tax Invoice (ABB) Sales Tax Report.
    */
-  public generateAbbSalesTaxReport(outletId = 'OUTLET-HQ'): AbbSalesTaxReportDto {
+  public generateAbbSalesTaxReport(
+    outletId = 'OUTLET-HQ',
+    dateRange?: ReportDateRangeFilter
+  ): AbbSalesTaxReportDto {
+    const startBound = this.normalizeDateBound(dateRange?.startDate);
+    const endBound = this.normalizeDateBound(dateRange?.endDate);
     return this.executeRead((db) => {
       const rows = db
         .prepare(
@@ -3540,9 +3889,11 @@ export class SqliteReadWritePoolEngine {
              created_at AS createdAt
            FROM sales_orders
            WHERE outlet_id = ?
+             AND (? IS NULL OR substr(created_at, 1, 10) >= ?)
+             AND (? IS NULL OR substr(created_at, 1, 10) <= ?)
            ORDER BY created_at ASC, id ASC`
         )
-        .all(outletId) as Array<Record<string, unknown>>;
+        .all(outletId, startBound, startBound, endBound, endBound) as Array<Record<string, unknown>>;
 
       let activeInvoiceCount = 0;
       let voidedInvoiceCount = 0;
@@ -3628,38 +3979,178 @@ export class SqliteReadWritePoolEngine {
     };
   }
 
+  private prorateOrderDiscountSatang(
+    orderDiscountSatang: number,
+    lineTotalsSatang: readonly number[]
+  ): number[] {
+    if (orderDiscountSatang <= 0 || lineTotalsSatang.length === 0) {
+      return lineTotalsSatang.map(() => 0);
+    }
+    const sumLines = lineTotalsSatang.reduce((acc, v) => acc + BigInt(Math.max(0, v)), 0n);
+    if (sumLines <= 0n) {
+      return lineTotalsSatang.map(() => 0);
+    }
+    const rawDiscount = BigInt(orderDiscountSatang);
+    const effectiveDiscount = rawDiscount > sumLines ? sumLines : rawDiscount;
+
+    const provisional = lineTotalsSatang.map((val, idx) => {
+      const lineAmt = BigInt(Math.max(0, val));
+      const prod = effectiveDiscount * lineAmt;
+      return {
+        idx,
+        share: prod / sumLines,
+        remainder: prod % sumLines,
+      };
+    });
+
+    let remaining = effectiveDiscount - provisional.reduce((acc, p) => acc + p.share, 0n);
+    if (remaining > 0n) {
+      const byRem = [...provisional].sort((a, b) => {
+        if (b.remainder !== a.remainder) {
+          return b.remainder > a.remainder ? 1 : -1;
+        }
+        return a.idx - b.idx;
+      });
+      for (const entry of byRem) {
+        if (remaining <= 0n) break;
+        entry.share += 1n;
+        remaining -= 1n;
+      }
+    }
+
+    return provisional.map((p) => Number(p.share));
+  }
+
   /**
    * Phase 5 (`REPORT_SVC`): Generates the Menu / Item COGS & Gross Margin Report across completed orders.
    */
-  public generateMenuGrossMarginAndCogsReport(outletId = 'OUTLET-HQ'): MenuGrossMarginReportDto {
+  public generateMenuGrossMarginAndCogsReport(
+    outletId = 'OUTLET-HQ',
+    dateRange?: ReportDateRangeFilter
+  ): MenuGrossMarginReportDto {
+    const startBound = this.normalizeDateBound(dateRange?.startDate);
+    const endBound = this.normalizeDateBound(dateRange?.endDate);
     return this.executeRead((db) => {
-      const rows = db
+      const rawItems = db
         .prepare(
           `SELECT
+             so.id AS salesOrderId,
+             so.subtotal_satang AS orderSubtotalSatang,
+             so.discount_satang AS orderDiscountSatang,
              v.id AS variantId,
              i.name AS itemName,
              v.variant_name AS variantName,
-             COALESCE(SUM(soi.quantity_milli), 0) AS soldQtyMilli,
-             COALESCE(SUM(soi.line_total_satang), 0) AS grossRevenueSatang,
-             COALESCE(SUM(soi.line_cogs_micro_baht), 0) AS totalCogsMicroBaht
+             soi.quantity_milli AS quantityMilli,
+             soi.line_total_satang AS lineTotalSatang,
+             soi.line_cogs_micro_baht AS lineCogsMicroBaht
            FROM sales_order_items soi
            JOIN sales_orders so ON so.id = soi.sales_order_id
            JOIN item_variants v ON v.id = soi.variant_id
            JOIN items i ON i.id = v.item_id
            WHERE so.outlet_id = ? AND so.status = 'COMPLETED'
-           GROUP BY v.id, i.name, v.variant_name
-           ORDER BY grossRevenueSatang DESC, v.id ASC`
+             AND (? IS NULL OR substr(so.created_at, 1, 10) >= ?)
+             AND (? IS NULL OR substr(so.created_at, 1, 10) <= ?)
+           ORDER BY so.id ASC, soi.rowid ASC`
         )
-        .all(outletId) as Array<Record<string, unknown>>;
+        .all(outletId, startBound, startBound, endBound, endBound) as Array<
+        Record<string, unknown>
+      >;
+
+      // Group line items per sales order so order-level discount_satang is prorated with BigInt Largest Remainder
+      const itemsByOrder = new Map<
+        string,
+        {
+          orderSubtotalSatang: number;
+          orderDiscountSatang: number;
+          items: Array<{
+            variantId: string;
+            itemName: string;
+            variantName: string;
+            quantityMilli: number;
+            lineTotalSatang: number;
+            lineCogsMicroBaht: number;
+          }>;
+        }
+      >();
+
+      for (const r of rawItems) {
+        const orderId = String(r.salesOrderId);
+        let group = itemsByOrder.get(orderId);
+        if (!group) {
+          group = {
+            orderSubtotalSatang: Number(r.orderSubtotalSatang),
+            orderDiscountSatang: Number(r.orderDiscountSatang),
+            items: [],
+          };
+          itemsByOrder.set(orderId, group);
+        }
+        group.items.push({
+          variantId: String(r.variantId),
+          itemName: String(r.itemName),
+          variantName: String(r.variantName),
+          quantityMilli: Number(r.quantityMilli),
+          lineTotalSatang: Number(r.lineTotalSatang),
+          lineCogsMicroBaht: Number(r.lineCogsMicroBaht),
+        });
+      }
+
+      const aggByVariant = new Map<
+        string,
+        {
+          variantId: string;
+          itemName: string;
+          variantName: string;
+          soldQtyMilli: number;
+          grossRevenueSatang: number;
+          totalCogsMicroBaht: number;
+        }
+      >();
+
+      for (const orderGroup of itemsByOrder.values()) {
+        const discounts =
+          orderGroup.orderDiscountSatang > 0 && orderGroup.orderSubtotalSatang > 0
+            ? this.prorateOrderDiscountSatang(
+                orderGroup.orderDiscountSatang,
+                orderGroup.items.map((it) => it.lineTotalSatang)
+              )
+            : orderGroup.items.map(() => 0);
+
+        for (let i = 0; i < orderGroup.items.length; i++) {
+          const it = orderGroup.items[i]!;
+          const netLineSatang = Math.max(0, it.lineTotalSatang - (discounts[i] ?? 0));
+          const existing = aggByVariant.get(it.variantId);
+          if (existing) {
+            existing.soldQtyMilli += it.quantityMilli;
+            existing.grossRevenueSatang += netLineSatang;
+            existing.totalCogsMicroBaht += it.lineCogsMicroBaht;
+          } else {
+            aggByVariant.set(it.variantId, {
+              variantId: it.variantId,
+              itemName: it.itemName,
+              variantName: it.variantName,
+              soldQtyMilli: it.quantityMilli,
+              grossRevenueSatang: netLineSatang,
+              totalCogsMicroBaht: it.lineCogsMicroBaht,
+            });
+          }
+        }
+      }
+
+      const rows = Array.from(aggByVariant.values()).sort((a, b) => {
+        if (b.grossRevenueSatang !== a.grossRevenueSatang) {
+          return b.grossRevenueSatang - a.grossRevenueSatang;
+        }
+        return a.variantId < b.variantId ? -1 : a.variantId > b.variantId ? 1 : 0;
+      });
 
       let totalRevenueSatang = 0;
       let totalCogsSatang = 0;
       let totalGrossProfitSatang = 0;
 
       const lines = rows.map((r) => {
-        const soldQtyMilli = Number(r.soldQtyMilli);
-        const grossRevenueSatang = Number(r.grossRevenueSatang);
-        const totalCogsMicroBaht = Number(r.totalCogsMicroBaht);
+        const soldQtyMilli = r.soldQtyMilli;
+        const grossRevenueSatang = r.grossRevenueSatang;
+        const totalCogsMicroBaht = r.totalCogsMicroBaht;
         const lineCogsSatang = Number(roundDivBigInt(BigInt(totalCogsMicroBaht), 10_000n));
         const grossProfitSatang = grossRevenueSatang - lineCogsSatang;
         const grossMarginBasisPoints =
@@ -3677,9 +4168,9 @@ export class SqliteReadWritePoolEngine {
         totalGrossProfitSatang += grossProfitSatang;
 
         return {
-          variantId: String(r.variantId),
-          itemName: String(r.itemName),
-          variantName: String(r.variantName),
+          variantId: r.variantId,
+          itemName: r.itemName,
+          variantName: r.variantName,
           soldQtyMilli,
           grossRevenueSatang,
           totalCogsMicroBaht,
@@ -3708,8 +4199,14 @@ export class SqliteReadWritePoolEngine {
     if (!/^\d{4,8}$/.test(clean)) {
       throw new Error('Staff PIN must be 4 to 8 numeric digits');
     }
-    const digest = createHash('sha256').update(`RUBE-STAFF-PIN-V3.1:${clean}`, 'utf8').digest('hex');
-    return `sha256:pin:${digest}`;
+    const saltHex = randomBytes(16).toString('hex');
+    const derivedHex = scryptSync(
+      `RUBE-STAFF-PIN-V3.1:${clean}`,
+      Buffer.from(saltHex, 'hex'),
+      32,
+      { N: 16384, r: 8, p: 1 }
+    ).toString('hex');
+    return `scrypt:pin:${saltHex}:${derivedHex}`;
   }
 
   private matchesPinHash(rawPin: string, storedHash: string): boolean {
@@ -3720,8 +4217,26 @@ export class SqliteReadWritePoolEngine {
     if (storedHash === 'sha256:cashier_pin' && clean === '111111') return true;
     if (storedHash === 'sha256:wh_pin' && clean === '222222') return true;
 
-    const computed = this.hashStaffPin(clean);
-    const a = Buffer.from(computed, 'utf8');
+    if (storedHash.startsWith('scrypt:pin:')) {
+      const parts = storedHash.split(':');
+      if (parts.length !== 4 || !parts[2] || !parts[3]) return false;
+      const saltHex = parts[2];
+      const expectedHex = parts[3];
+      const derived = scryptSync(
+        `RUBE-STAFF-PIN-V3.1:${clean}`,
+        Buffer.from(saltHex, 'hex'),
+        32,
+        { N: 16384, r: 8, p: 1 }
+      );
+      const expected = Buffer.from(expectedHex, 'hex');
+      return derived.length === expected.length && timingSafeEqual(derived, expected);
+    }
+
+    const legacyDigest = createHash('sha256')
+      .update(`RUBE-STAFF-PIN-V3.1:${clean}`, 'utf8')
+      .digest('hex');
+    const computedLegacy = `sha256:pin:${legacyDigest}`;
+    const a = Buffer.from(computedLegacy, 'utf8');
     const b = Buffer.from(storedHash, 'utf8');
     return a.length === b.length && timingSafeEqual(a, b);
   }
@@ -3759,8 +4274,8 @@ export class SqliteReadWritePoolEngine {
     terminalId?: string | undefined;
   }): Promise<StaffUserDto> {
     const terminalId = input.terminalId ?? 'POS-TERM-01';
-    return this.executeWriteImmediate((db) => {
-      const rows = input.userId
+    const rows = this.executeRead((db) => {
+      return input.userId
         ? (db
             .prepare(
               `SELECT id, username, display_name AS displayName, role, pin_hash AS pinHash, active, created_at AS createdAt
@@ -3773,34 +4288,39 @@ export class SqliteReadWritePoolEngine {
                FROM users WHERE active = 1`
             )
             .all() as Array<Record<string, unknown>>);
+    });
 
-      const matched = rows.find((r) => this.matchesPinHash(input.pin, String(r.pinHash)));
-      if (!matched) {
+    // Run CPU-intensive scryptSync outside writerQueue so concurrent PIN checks never block checkouts/warehouse writes
+    const matched = rows.find((r) => this.matchesPinHash(input.pin, String(r.pinHash)));
+    if (!matched) {
+      await this.executeWriteImmediate((db) => {
         db.prepare(
           `INSERT INTO security_audit_logs (
              event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
            ) VALUES ('AUTH_PIN_FAILED', ?, ?, 'STAFF_SESSION', NULL, 'INVALID_PIN')`
         ).run(input.userId ?? null, terminalId);
-        throw new Error('HTTP 401 Invalid Staff PIN or inactive user');
-      }
+      });
+      throw new Error('HTTP 401 Invalid Staff PIN or inactive user');
+    }
 
-      const user: StaffUserDto = {
-        id: String(matched.id),
-        username: String(matched.username),
-        displayName: String(matched.displayName),
-        role: String(matched.role) as UserRole,
-        active: Number(matched.active) === 1,
-        createdAt: String(matched.createdAt),
-      };
+    const user: StaffUserDto = {
+      id: String(matched.id),
+      username: String(matched.username),
+      displayName: String(matched.displayName),
+      role: String(matched.role) as UserRole,
+      active: Number(matched.active) === 1,
+      createdAt: String(matched.createdAt),
+    };
 
+    await this.executeWriteImmediate((db) => {
       db.prepare(
         `INSERT INTO security_audit_logs (
            event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
          ) VALUES ('AUTH_PIN_SUCCESS', ?, ?, 'STAFF_SESSION', NULL, ?)`
       ).run(user.id, terminalId, `ROLE:${user.role}`);
-
-      return user;
     });
+
+    return user;
   }
 
   public async upsertStaffUser(input: {
@@ -3995,6 +4515,33 @@ export class SqliteReadWritePoolEngine {
     return { id, name, displayColor, kitchenStation, sortOrder };
   }
 
+  public async deleteCategory(categoryId: string): Promise<{ deletedCategoryId: string }> {
+    const targetId = categoryId.trim();
+    if (!targetId) throw new Error('Category id is required');
+
+    await this.executeWriteImmediate((db) => {
+      const deletedIds = this.readDeletedVariantIdSet(db);
+      const variantsInCat = db
+        .prepare(
+          `SELECT v.id FROM item_variants v JOIN items i ON i.id = v.item_id WHERE i.category_id = ?`
+        )
+        .all(targetId) as Array<{ id: string }>;
+
+      const activeUsingCount = variantsInCat.filter((r) => !deletedIds.has(String(r.id))).length;
+      if (activeUsingCount > 0) {
+        throw new Error(
+          `ไม่สามารถลบหมวดหมู่นี้ได้ เนื่องจากยังมีสินค้าใช้งานอยู่ ${activeUsingCount} รายการ กรุณาย้ายหรือลบสินค้าก่อน`
+        );
+      }
+
+      // Detach any soft-deleted items referencing this category before deleting
+      db.prepare(`UPDATE items SET category_id = NULL WHERE category_id = ?`).run(targetId);
+      db.prepare(`DELETE FROM categories WHERE id = ?`).run(targetId);
+    });
+
+    return { deletedCategoryId: targetId };
+  }
+
   public listSuppliers(): SupplierDto[] {
     return this.executeRead((db) => {
       const rows = db
@@ -4051,6 +4598,7 @@ export class SqliteReadWritePoolEngine {
 
   public listCatalogVariantsDetailed(outletId = 'OUTLET-HQ'): CatalogVariantDetailDto[] {
     return this.executeRead((db) => {
+      const deletedIds = this.readDeletedVariantIdSet(db);
       const rows = db
         .prepare(
           `SELECT
@@ -4083,29 +4631,31 @@ export class SqliteReadWritePoolEngine {
         )
         .all(outletId) as Array<Record<string, unknown>>;
 
-      return rows.map((r) => ({
-        id: String(r.id),
-        itemId: String(r.itemId),
-        itemName: String(r.itemName),
-        variantName: String(r.variantName),
-        sku: String(r.sku),
-        barcode: r.barcode === null ? null : String(r.barcode),
-        unitName: String(r.unitName),
-        priceSatang: Number(r.priceSatang),
-        defaultPurchaseCostMicroBaht: Number(r.defaultPurchaseCostMicroBaht),
-        averageCostMicroBaht: Number(r.averageCostMicroBaht),
-        inStockMilli: Number(r.inStockMilli),
-        optimalStockMilli: Number(r.optimalStockMilli),
-        lowStockThresholdMilli: Number(r.lowStockThresholdMilli),
-        isComposite: Number(r.isComposite) === 1,
-        useProduction: Number(r.useProduction) === 1,
-        isWeightedScale: Number(r.isWeightedScale) === 1,
-        categoryId: r.categoryId === null ? null : String(r.categoryId),
-        categoryName: String(r.categoryName),
-        categoryColor: String(r.categoryColor),
-        kitchenStation: String(r.kitchenStation),
-        active: Number(r.active) === 1,
-      }));
+      return rows
+        .filter((r) => !deletedIds.has(String(r.id)))
+        .map((r) => ({
+          id: String(r.id),
+          itemId: String(r.itemId),
+          itemName: String(r.itemName),
+          variantName: String(r.variantName),
+          sku: String(r.sku),
+          barcode: r.barcode === null ? null : String(r.barcode),
+          unitName: String(r.unitName),
+          priceSatang: Number(r.priceSatang),
+          defaultPurchaseCostMicroBaht: Number(r.defaultPurchaseCostMicroBaht),
+          averageCostMicroBaht: Number(r.averageCostMicroBaht),
+          inStockMilli: Number(r.inStockMilli),
+          optimalStockMilli: Number(r.optimalStockMilli),
+          lowStockThresholdMilli: Number(r.lowStockThresholdMilli),
+          isComposite: Number(r.isComposite) === 1,
+          useProduction: Number(r.useProduction) === 1,
+          isWeightedScale: Number(r.isWeightedScale) === 1,
+          categoryId: r.categoryId === null ? null : String(r.categoryId),
+          categoryName: String(r.categoryName),
+          categoryColor: String(r.categoryColor),
+          kitchenStation: String(r.kitchenStation),
+          active: Number(r.active) === 1,
+        }));
     });
   }
 
@@ -4213,7 +4763,7 @@ export class SqliteReadWritePoolEngine {
                reference_type, reference_id, performed_by
              ) VALUES (?, ?, ?, 'PO_RECEIVE', ?, 0, ?, ?, 'CATALOG_OPENING_STOCK', ?, ?)`
           ).run(
-            `TX-OPEN-${variantId}-${Date.now()}`,
+            `TX-OPEN-${variantId}-${randomUUID().slice(0, 8)}`,
             outletId,
             variantId,
             initStock,
@@ -4244,6 +4794,20 @@ export class SqliteReadWritePoolEngine {
           ).run(lowStockMilli, optimalStockMilli, outletId, variantId);
         }
       }
+
+      if (activeInt === 1) {
+        const deletedSet = this.readDeletedVariantIdSet(db);
+        if (deletedSet.delete(variantId)) {
+          db.prepare(
+            `INSERT INTO store_config (key, value, is_protected, updated_by)
+             VALUES ('deleted_catalog_variant_ids', ?, 0, ?)
+             ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               updated_by = excluded.updated_by,
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+          ).run(JSON.stringify(Array.from(deletedSet)), input.performedByUserId ?? 'USR-OWNER-01');
+        }
+      }
     });
 
     const reloaded = this.listCatalogVariantsDetailed(outletId).find((v) => v.id === variantId);
@@ -4251,6 +4815,155 @@ export class SqliteReadWritePoolEngine {
       throw new Error(`Failed to reload catalog variant ${variantId}`);
     }
     return reloaded;
+  }
+
+  /**
+   * Deletes a catalog variant safely while strictly preserving SQLite immutable ledger invariants:
+   * - If the variant has zero historical ledger/sales/PO references, performs a clean HARD DELETE.
+   * - If immutable audit history exists (e.g., opening stock or past receipts), zeros out remaining stock
+   *   with a balanced write-off ledger entry, frees its barcode/SKU for immediate reuse, marks inactive,
+   *   and registers the variant in `deleted_catalog_variant_ids` so it disappears from all operational views.
+   */
+  public async deleteCatalogVariant(
+    variantId: string,
+    performedByUserId = 'USR-OWNER-01'
+  ): Promise<{ variantId: string; mode: 'HARD_DELETED' | 'ARCHIVED_SAFE' }> {
+    const targetId = variantId.trim();
+    if (!targetId) {
+      throw new Error('variantId is required');
+    }
+
+    let mode: 'HARD_DELETED' | 'ARCHIVED_SAFE' = 'HARD_DELETED';
+
+    await this.executeWriteImmediate((db) => {
+      const existing = db
+        .prepare(`SELECT id, item_id AS itemId, sku FROM item_variants WHERE id = ?`)
+        .get(targetId) as { id: string; itemId: string; sku: string } | undefined;
+
+      if (!existing) {
+        throw new Error(`ไม่พบสินค้าที่ต้องการลบ (${targetId})`);
+      }
+
+      const inTransitRow = db
+        .prepare(
+          `SELECT count(*) AS cnt
+           FROM transfer_orders tr
+           JOIN transfer_order_items toi ON toi.transfer_order_id = tr.id
+           WHERE toi.variant_id = ? AND tr.status IN ('PENDING', 'IN_TRANSIT')`
+        )
+        .get(targetId) as { cnt?: number } | undefined;
+      if (Number(inTransitRow?.cnt ?? 0) > 0) {
+        throw new Error('HTTP 409 ไม่สามารถลบสินค้าที่มีใบโอนสาขากำลังรอรับเข้า (IN_TRANSIT)');
+      }
+
+      // Detach BOM graph edges and modifier links
+      db.prepare(
+        `DELETE FROM item_components WHERE composite_variant_id = ? OR component_variant_id = ?`
+      ).run(targetId, targetId);
+      db.prepare(
+        `UPDATE modifiers SET component_variant_id = NULL WHERE component_variant_id = ?`
+      ).run(targetId);
+
+      const countRef = (sql: string): number => {
+        const row = db.prepare(sql).get(targetId) as { cnt?: number } | undefined;
+        return Number(row?.cnt ?? 0);
+      };
+
+      const totalRefs =
+        countRef(`SELECT count(*) AS cnt FROM inventory_transactions WHERE variant_id = ?`) +
+        countRef(`SELECT count(*) AS cnt FROM sales_order_items WHERE variant_id = ?`) +
+        countRef(`SELECT count(*) AS cnt FROM purchase_order_items WHERE variant_id = ?`) +
+        countRef(`SELECT count(*) AS cnt FROM transfer_order_items WHERE variant_id = ?`) +
+        countRef(`SELECT count(*) AS cnt FROM inventory_count_items WHERE variant_id = ?`) +
+        countRef(`SELECT count(*) AS cnt FROM stock_adjustment_items WHERE variant_id = ?`);
+
+      if (totalRefs === 0) {
+        mode = 'HARD_DELETED';
+        db.prepare(`DELETE FROM inventory_levels WHERE variant_id = ?`).run(targetId);
+        db.prepare(`DELETE FROM item_variants WHERE id = ?`).run(targetId);
+
+        const siblingCount = Number(
+          (
+            db
+              .prepare(`SELECT count(*) AS cnt FROM item_variants WHERE item_id = ?`)
+              .get(existing.itemId) as { cnt?: number } | undefined
+          )?.cnt ?? 0
+        );
+        if (siblingCount === 0) {
+          db.prepare(`DELETE FROM item_modifier_groups WHERE item_id = ?`).run(existing.itemId);
+          db.prepare(`DELETE FROM items WHERE id = ?`).run(existing.itemId);
+        }
+      } else {
+        mode = 'ARCHIVED_SAFE';
+        // Write balanced zero-out ledger entries so Ledger Conservation Invariant stays 100% valid
+        const levels = db
+          .prepare(
+            `SELECT outlet_id AS outletId, in_stock_milli AS inStockMilli, average_cost_micro_baht AS mac
+             FROM inventory_levels WHERE variant_id = ?`
+          )
+          .all(targetId) as Array<{ outletId: string; inStockMilli: number; mac: number }>;
+
+        for (const lvl of levels) {
+          const curStock = Number(lvl.inStockMilli);
+          if (curStock !== 0) {
+            const delta = -curStock;
+            db.prepare(
+              `INSERT INTO inventory_transactions (
+                 id, outlet_id, variant_id, transaction_type, quantity_change_milli,
+                 stock_before_milli, stock_after_milli, unit_cost_micro_baht,
+                 reference_type, reference_id, performed_by
+               ) VALUES (?, ?, ?, 'ADJUSTMENT', ?, ?, 0, ?, 'CATALOG_DELETE_WRITEOFF', ?, ?)`
+            ).run(
+              `TX-DEL-${targetId}-${lvl.outletId}-${randomUUID().slice(0, 8)}`,
+              lvl.outletId,
+              targetId,
+              delta,
+              curStock,
+              Number(lvl.mac),
+              targetId,
+              performedByUserId
+            );
+
+            db.prepare(
+              `UPDATE inventory_levels
+               SET in_stock_milli = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               WHERE outlet_id = ? AND variant_id = ?`
+            ).run(lvl.outletId, targetId);
+          }
+        }
+
+        // Release barcode & SKU so user can immediately scan/re-create a fresh product with the same barcode
+        const archivedSku = `${existing.sku}__DEL_${randomUUID().slice(0, 8)}`;
+        db.prepare(
+          `UPDATE item_variants SET active = 0, barcode = NULL, sku = ? WHERE id = ?`
+        ).run(archivedSku, targetId);
+
+        const deletedSet = this.readDeletedVariantIdSet(db);
+        deletedSet.add(targetId);
+        db.prepare(
+          `INSERT INTO store_config (key, value, is_protected, updated_by)
+           VALUES ('deleted_catalog_variant_ids', ?, 0, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+        ).run(JSON.stringify(Array.from(deletedSet)), performedByUserId);
+
+        const activeSiblings = (
+          db
+            .prepare(`SELECT id FROM item_variants WHERE item_id = ? AND active = 1`)
+            .all(existing.itemId) as Array<{ id: string }>
+        ).filter((r) => !deletedSet.has(String(r.id)));
+        if (activeSiblings.length === 0) {
+          db.prepare(`UPDATE items SET active = 0 WHERE id = ?`).run(existing.itemId);
+        }
+      }
+
+      db.prepare(
+        `INSERT INTO security_audit_logs (
+           event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+         ) VALUES ('CATALOG_VARIANT_DELETED', ?, 'POS-TERM-01', ?, ?, ?)`
+      ).run(performedByUserId, targetId, existing.sku, mode);
+    });
+
+    return { variantId: targetId, mode };
   }
 
   public async deleteBomComponentEdge(
@@ -4864,13 +5577,31 @@ export class SqliteReadWritePoolEngine {
     if (cleanPromptPay.length !== 10 && cleanPromptPay.length !== 13 && cleanPromptPay.length !== 15) {
       throw new Error('PromptPay ID must be 10, 13, or 15 digits');
     }
-    const ownerPinHash = this.hashStaffPin(input.ownerPin);
-
-    if (input.loadDemoSampleCatalog) {
-      await this.seedDefaultWarehouseAndCatalog(outletId);
+    if (
+      input.businessProfile !== 'RETAIL' &&
+      input.businessProfile !== 'HOSPITALITY' &&
+      input.businessProfile !== 'HYBRID'
+    ) {
+      throw new Error(`Invalid BusinessProfile mode: ${String(input.businessProfile)}`);
     }
 
-    await this.executeWriteImmediate((db) => {
+    // Precompute scrypt PIN hash and HMAC signatures outside the writer transaction
+    const ownerPinHash = this.hashStaffPin(input.ownerPin);
+    const businessProfileHmac = this.computeProtectedConfigHmacHex(
+      'business_profile',
+      input.businessProfile
+    );
+    const promptPayHmac = this.computeProtectedConfigHmacHex(
+      'promptpay_merchant_id',
+      cleanPromptPay
+    );
+    const openingCashSatang = Math.max(0, input.openingCashSatang);
+
+    const activeShift = await this.executeWriteImmediate((db) => {
+      if (input.loadDemoSampleCatalog) {
+        this.seedDefaultWarehouseAndCatalogOnDb(db, outletId);
+      }
+
       db.prepare(
         `INSERT INTO outlets (id, code, name, tax_id, branch_code, rd_pos_reg_no, is_warehouse, active)
          VALUES (?, 'HQ-01', ?, ?, ?, ?, 1, 1)
@@ -4927,6 +5658,19 @@ export class SqliteReadWritePoolEngine {
          ON CONFLICT(key) DO UPDATE SET value = '1', updated_by = 'USR-OWNER-01'`
       ).run();
 
+      this.upsertProtectedStoreConfigOnDb(db, {
+        key: 'business_profile',
+        value: input.businessProfile,
+        hmacSignatureHex: businessProfileHmac,
+        updatedByUserId: 'USR-OWNER-01',
+      });
+      this.upsertProtectedStoreConfigOnDb(db, {
+        key: 'promptpay_merchant_id',
+        value: cleanPromptPay,
+        hmacSignatureHex: promptPayHmac,
+        updatedByUserId: 'USR-OWNER-01',
+      });
+
       db.prepare(
         `INSERT INTO security_audit_logs (
            event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
@@ -4934,26 +5678,63 @@ export class SqliteReadWritePoolEngine {
       ).run(
         `profile=${input.businessProfile}:cleanStart=${!input.loadDemoSampleCatalog}`
       );
-    });
 
-    await this.setBusinessProfileMode(input.businessProfile, 'USR-OWNER-01');
-    await this.setProtectedStoreConfig({
-      key: 'promptpay_merchant_id',
-      value: cleanPromptPay,
-      updatedByUserId: 'USR-OWNER-01',
-    });
+      const existingOpenShift = db
+        .prepare(
+          `SELECT
+             id, shift_number AS shiftNumber, outlet_id AS outletId, terminal_id AS terminalId,
+             opened_by AS openedBy, status, opening_cash_satang AS openingCashSatang,
+             expected_cash_satang AS expectedCashSatang, counted_cash_satang AS countedCashSatang,
+             cash_variance_satang AS cashVarianceSatang, opened_at AS openedAt
+           FROM pos_shifts
+           WHERE outlet_id = ? AND terminal_id = 'POS-TERM-01' AND status = 'OPEN'
+           ORDER BY opened_at DESC LIMIT 1`
+        )
+        .get(outletId) as Record<string, unknown> | undefined;
 
-    let activeShift = this.getActiveShift(outletId, 'POS-TERM-01');
-    if (!activeShift) {
-      activeShift = await this.openPosShift({
+      if (existingOpenShift) {
+        return {
+          id: String(existingOpenShift.id),
+          shiftNumber: String(existingOpenShift.shiftNumber),
+          outletId: String(existingOpenShift.outletId),
+          terminalId: String(existingOpenShift.terminalId),
+          openedBy: String(existingOpenShift.openedBy),
+          status: String(existingOpenShift.status) as 'OPEN' | 'CLOSED',
+          openingCashSatang: Number(existingOpenShift.openingCashSatang),
+          expectedCashSatang: Number(existingOpenShift.expectedCashSatang),
+          countedCashSatang:
+            existingOpenShift.countedCashSatang === null
+              ? null
+              : Number(existingOpenShift.countedCashSatang),
+          cashVarianceSatang:
+            existingOpenShift.cashVarianceSatang === null
+              ? null
+              : Number(existingOpenShift.cashVarianceSatang),
+          openedAt: String(existingOpenShift.openedAt),
+        } satisfies PosShiftDto;
+      }
+
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const checkDupShift = db.prepare(`SELECT 1 FROM pos_shifts WHERE shift_number = ? LIMIT 1`);
+      let shiftSeq = 1;
+      let shiftNumber = '';
+      while (true) {
+        shiftNumber = `SHF-${dateStr}-${String(shiftSeq).padStart(3, '0')}`;
+        if (!checkDupShift.get(shiftNumber)) {
+          break;
+        }
+        shiftSeq += 1;
+      }
+
+      return this.insertOpenPosShiftOnDb(db, {
         outletId,
         terminalId: 'POS-TERM-01',
-        shiftNumber: `SHF-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-001`,
+        shiftNumber,
         openedByUserId: 'USR-OWNER-01',
-        openingCashSatang: Math.max(0, input.openingCashSatang),
+        openingCashSatang,
         notes: 'Initial shift opened via First-Run Setup Wizard',
       });
-    }
+    });
 
     const ownerUser = this.listStaffUsers().find((u) => u.id === 'USR-OWNER-01')!;
     return {

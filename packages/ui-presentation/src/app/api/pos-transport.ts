@@ -6,6 +6,8 @@ import type {
   CategoryDto,
   CheckoutOrderRequest,
   ComponentRole,
+  DiscoveredStorageDriveDto,
+  HeldBillRecordDto,
   KdsTicketDto,
   ModifierDto,
   ModifierGroupWithItemsDto,
@@ -19,9 +21,39 @@ import type {
   SupplierDto,
   TaxMode,
   UpsAlertBannerDto,
+  UsbBackupConfigStatusDto,
   UsbBackupFileDto,
   UserRole,
 } from '../types.ts';
+
+const POS_SESSION_TOKEN_STORAGE_KEY = 'rube_pos_v3_session_token';
+
+let activeSessionToken: string | null = (() => {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.sessionStorage.getItem(POS_SESSION_TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+})();
+
+export function getPosSessionToken(): string | null {
+  return activeSessionToken;
+}
+
+export function setPosSessionToken(token: string | null): void {
+  activeSessionToken = token && token.trim() ? token.trim() : null;
+  if (typeof window === 'undefined') return;
+  try {
+    if (activeSessionToken) {
+      window.sessionStorage.setItem(POS_SESSION_TOKEN_STORAGE_KEY, activeSessionToken);
+    } else {
+      window.sessionStorage.removeItem(POS_SESSION_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage restrictions
+  }
+}
 
 function resolveApiBase(): string {
   if (typeof window === 'undefined') return '';
@@ -42,17 +74,32 @@ function resolveApiBase(): string {
   return '';
 }
 
+export function resolveBackendAssetUrl(assetPath: string | null | undefined): string | null {
+  if (!assetPath) return null;
+  if (assetPath.startsWith('http://') || assetPath.startsWith('https://') || assetPath.startsWith('data:')) {
+    return assetPath;
+  }
+  return `${resolveApiBase()}${assetPath}`;
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const url = path.startsWith('http') ? path : `${resolveApiBase()}${path}`;
   const res = await fetch(url, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      ...(activeSessionToken ? { Authorization: `Bearer ${activeSessionToken}` } : {}),
       ...(init?.headers ?? {}),
     },
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
   if (!res.ok) {
+    if (res.status === 401 && !path.startsWith('/api/auth/pin-login')) {
+      setPosSessionToken(null);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('rube-pos-session-expired'));
+      }
+    }
     throw new Error(data.error || `HTTP ${res.status} Request failed on ${path}`);
   }
   return data;
@@ -173,7 +220,7 @@ export const posTransport = {
     );
   },
 
-  completeFirstRunOnboarding(input: {
+  async completeFirstRunOnboarding(input: {
     businessProfile: BusinessProfile;
     storeName: string;
     taxId: string;
@@ -194,11 +241,26 @@ export const posTransport = {
     storeSettings: StoreIdentitySettingsDto;
     recoveryKitFilename: string;
     recoveryKitContent: string;
+    sessionToken?: string;
+    expiresAt?: string;
   }> {
-    return requestJson('/api/onboarding/complete', {
+    const res = await requestJson<{
+      ok: boolean;
+      ownerUser: StaffUserDto;
+      activeShift: PosShiftDto;
+      storeSettings: StoreIdentitySettingsDto;
+      recoveryKitFilename: string;
+      recoveryKitContent: string;
+      sessionToken?: string;
+      expiresAt?: string;
+    }>('/api/onboarding/complete', {
       method: 'POST',
       body: JSON.stringify(input),
     });
+    if (res.sessionToken) {
+      setPosSessionToken(res.sessionToken);
+    }
+    return res;
   },
 
   setPreviewFirstRunWizard(show: boolean): Promise<{ ok: boolean }> {
@@ -269,11 +331,42 @@ export const posTransport = {
     });
   },
 
-  pinLogin(pin: string, userId?: string): Promise<{ user: StaffUserDto }> {
-    return requestJson('/api/auth/pin-login', {
+  async pinLogin(pin: string, userId?: string): Promise<{ user: StaffUserDto }> {
+    const res = await requestJson<{
+      user: StaffUserDto;
+      sessionToken?: string;
+      expiresAt?: string;
+    }>('/api/auth/pin-login', {
       method: 'POST',
       body: JSON.stringify({ pin, ...(userId ? { userId } : {}) }),
     });
+    if (res.sessionToken) {
+      setPosSessionToken(res.sessionToken);
+    }
+    return { user: res.user };
+  },
+
+  async verifyManagerOverridePin(
+    pin: string
+  ): Promise<{ user: StaffUserDto; overrideToken: string }> {
+    const res = await requestJson<{
+      user: StaffUserDto;
+      sessionToken?: string;
+    }>('/api/auth/pin-login', {
+      method: 'POST',
+      body: JSON.stringify({ pin, statelessOverride: true }),
+    });
+    return { user: res.user, overrideToken: res.sessionToken ?? '' };
+  },
+
+  async logoutSession(): Promise<void> {
+    try {
+      await requestJson<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // ignore network error on lock/logout
+    } finally {
+      setPosSessionToken(null);
+    }
   },
 
   upsertStaffUser(input: {
@@ -317,6 +410,7 @@ export const posTransport = {
       variantId: string;
       quantityMilli: number;
       unitPriceSatang: number;
+      overrideLineTotalSatang?: number | undefined;
       selectedModifierIds: string[];
     }>;
   }): Promise<{
@@ -341,6 +435,7 @@ export const posTransport = {
       variantId: string;
       quantityMilli: number;
       unitPriceSatang: number;
+      overrideLineTotalSatang?: number | undefined;
       selectedModifierIds: string[];
     }>;
   }): Promise<SlipConfirmationModalDto> {
@@ -351,6 +446,7 @@ export const posTransport = {
   },
 
   checkoutOrder(input: {
+    idempotencyKey?: string | undefined;
     outletId?: string;
     cashierId: string;
     orderType: CheckoutOrderRequest['orderType'];
@@ -368,6 +464,7 @@ export const posTransport = {
       unitName: string;
       quantityMilli: number;
       unitPriceSatang: number;
+      overrideLineTotalSatang?: number | undefined;
       selectedModifierIds: string[];
     }>;
   }): Promise<{
@@ -412,6 +509,33 @@ export const posTransport = {
     return requestJson(`/api/pos/orders?outletId=${encodeURIComponent(outletId)}`);
   },
 
+  listHeldBills(outletId = 'OUTLET-HQ'): Promise<{ heldBills: HeldBillRecordDto[] }> {
+    return requestJson(`/api/pos/held-bills?outletId=${encodeURIComponent(outletId)}`);
+  },
+
+  saveHeldBill(input: {
+    outletId?: string;
+    actorUserId?: string;
+    bill: HeldBillRecordDto;
+  }): Promise<{ ok: boolean; heldBills: HeldBillRecordDto[] }> {
+    return requestJson('/api/pos/held-bills', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  deleteHeldBill(input: {
+    outletId?: string;
+    actorUserId?: string;
+    id: string;
+    recall?: boolean | undefined;
+  }): Promise<{ ok: boolean; heldBills: HeldBillRecordDto[] }> {
+    return requestJson('/api/pos/held-bills', {
+      method: 'DELETE',
+      body: JSON.stringify(input),
+    });
+  },
+
   reprintOrder(
     salesOrderId: string,
     outletId = 'OUTLET-HQ'
@@ -433,6 +557,7 @@ export const posTransport = {
     salesOrderId: string;
     voidedByUserId: string;
     voidReason: string;
+    overrideToken?: string | undefined;
   }): Promise<{
     salesOrderId: string;
     receiptNumber: string;
@@ -445,7 +570,14 @@ export const posTransport = {
   }> {
     return requestJson('/api/pos/void', {
       method: 'POST',
-      body: JSON.stringify(input),
+      ...(input.overrideToken
+        ? { headers: { 'X-Rube-Override-Token': input.overrideToken } }
+        : {}),
+      body: JSON.stringify({
+        salesOrderId: input.salesOrderId,
+        voidedByUserId: input.voidedByUserId,
+        voidReason: input.voidReason,
+      }),
     });
   },
 
@@ -496,16 +628,44 @@ export const posTransport = {
     });
   },
 
+  deleteCatalogVariant(input: {
+    variantId: string;
+    performedByUserId?: string;
+  }): Promise<{ ok: boolean; variantId: string; mode: 'HARD_DELETED' | 'ARCHIVED_SAFE' }> {
+    return requestJson('/api/catalog/variant', {
+      method: 'DELETE',
+      body: JSON.stringify(input),
+    });
+  },
+
+  uploadCatalogVariantImage(input: {
+    variantId: string;
+    dataUrl: string | null;
+    actorUserId?: string;
+  }): Promise<{ ok: boolean; variantId: string; imageUrl: string | null }> {
+    return requestJson('/api/catalog/variant-image', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
   upsertCategory(input: {
     id?: string;
     name: string;
     displayColor: string;
     kitchenStation: string;
     sortOrder?: number;
-  }): Promise<{ category: CategoryDto }> {
+  }): Promise<{ category: CategoryDto; categories?: CategoryDto[] }> {
     return requestJson('/api/catalog/category', {
       method: 'POST',
       body: JSON.stringify(input),
+    });
+  },
+
+  deleteCategory(id: string): Promise<{ ok: boolean; deletedCategoryId: string; categories: CategoryDto[] }> {
+    return requestJson('/api/catalog/category', {
+      method: 'DELETE',
+      body: JSON.stringify({ id }),
     });
   },
 
@@ -862,6 +1022,7 @@ export const posTransport = {
   },
 
   recordCashMovement(input: {
+    outletId?: string;
     shiftId?: string;
     movementType: 'PAID_IN' | 'PAID_OUT' | 'CASH_DROP';
     amountSatang: number;
@@ -878,6 +1039,7 @@ export const posTransport = {
   },
 
   closeShiftAndBackup(input: {
+    outletId?: string;
     countedCashSatang: number;
     closedByUserId: string;
     reopenNextShift?: boolean;
@@ -891,11 +1053,52 @@ export const posTransport = {
       retainedBackupsCount: number;
       cleanedOrphanedPartFilesCount: number;
     };
+    backupWarningThai?: string | undefined;
+    usbBackupConfig?: UsbBackupConfigStatusDto | undefined;
     usbBackups: UsbBackupFileDto[];
   }> {
     return requestJson('/api/shift/close-and-reopen', {
       method: 'POST',
       body: JSON.stringify(input),
+    });
+  },
+
+  listUsbBackupDrives(): Promise<{
+    drives: DiscoveredStorageDriveDto[];
+    usbBackupConfig: UsbBackupConfigStatusDto;
+  }> {
+    return requestJson('/api/usb-backup/drives');
+  },
+
+  saveUsbBackupConfig(input: {
+    customBackupDir: string;
+    mirrorToLocalFallback: boolean;
+  }): Promise<{
+    ok: boolean;
+    usbBackupConfig: UsbBackupConfigStatusDto;
+    usbBackups: UsbBackupFileDto[];
+  }> {
+    return requestJson('/api/usb-backup/config', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  runUsbBackupNow(): Promise<{
+    ok: boolean;
+    usbBackup: {
+      writtenBackupPath: string;
+      evictedOldestBackupPath: string | null;
+      retainedBackupsCount: number;
+      cleanedOrphanedPartFilesCount: number;
+    };
+    backupWarningThai?: string | undefined;
+    usbBackupConfig: UsbBackupConfigStatusDto;
+    usbBackups: UsbBackupFileDto[];
+  }> {
+    return requestJson('/api/usb-backup/run-now', {
+      method: 'POST',
+      body: JSON.stringify({}),
     });
   },
 
@@ -908,11 +1111,16 @@ export const posTransport = {
     return requestJson('/api/shift/simulate-yank-usb', { method: 'POST' });
   },
 
-  getReports(outletId = 'OUTLET-HQ', shiftId?: string): Promise<ReportsBundleDto> {
-    const q = shiftId
-      ? `/api/reports?outletId=${encodeURIComponent(outletId)}&shiftId=${encodeURIComponent(shiftId)}`
-      : `/api/reports?outletId=${encodeURIComponent(outletId)}`;
-    return requestJson<ReportsBundleDto>(q);
+  getReports(
+    outletId = 'OUTLET-HQ',
+    shiftId?: string,
+    dateRange?: { startDate?: string | undefined; endDate?: string | undefined }
+  ): Promise<ReportsBundleDto> {
+    const params = new URLSearchParams({ outletId });
+    if (shiftId) params.set('shiftId', shiftId);
+    if (dateRange?.startDate) params.set('startDate', dateRange.startDate);
+    if (dateRange?.endDate) params.set('endDate', dateRange.endDate);
+    return requestJson<ReportsBundleDto>(`/api/reports?${params.toString()}`);
   },
 
   switchBusinessProfile(

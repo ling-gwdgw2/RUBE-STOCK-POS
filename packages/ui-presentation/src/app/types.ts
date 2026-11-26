@@ -53,6 +53,7 @@ export interface CatalogVariantDetailDto extends ItemVariantDto {
   categoryColor: string;
   kitchenStation: string;
   active: boolean;
+  imageUrl?: string | null | undefined;
 }
 
 export interface CategoryDto {
@@ -199,6 +200,24 @@ export interface UsbBackupFileDto {
   modifiedAt: string;
 }
 
+export interface UsbBackupConfigStatusDto {
+  customBackupDir: string;
+  defaultLocalBackupDir: string;
+  activeEffectiveDir: string;
+  isExternalCustomDir: boolean;
+  targetWritable: boolean;
+  mirrorToLocalFallback: boolean;
+}
+
+export interface DiscoveredStorageDriveDto {
+  driveLetter: string;
+  volumeName: string;
+  driveKind: 'REMOVABLE_USB' | 'FIXED_DISK' | 'NETWORK_DRIVE' | 'OTHER';
+  freeBytes: number;
+  totalBytes: number;
+  suggestedBackupPath: string;
+}
+
 export interface UpsAlertBannerDto {
   visible: boolean;
   severity: 'NONE' | 'WARNING_ON_BATTERY' | 'CRITICAL_LOW_BATTERY_LOCK';
@@ -210,6 +229,7 @@ export interface UpsAlertBannerDto {
 
 export interface BootstrapPayload {
   onboarded: boolean;
+  isSessionAuthenticated?: boolean | undefined;
   isPreviewWizard?: boolean | undefined;
   profile: BusinessProfile;
   featureFlags: ProfileFeatureFlagsDto;
@@ -224,11 +244,13 @@ export interface BootstrapPayload {
   modifierGroups: ModifierGroupWithItemsDto[];
   kdsTickets: KdsTicketDto[];
   recentOrders: SalesOrderHistoryDto[];
+  heldBills?: HeldBillRecordDto[] | undefined;
   shiftsHistory: PosShiftDto[];
   drawerMovements: DrawerMovementDto[];
   staffUsers: StaffUserDto[];
   storeSettings: StoreIdentitySettingsDto;
   printerConfig: PrinterHardwareConfigDto;
+  usbBackupConfig?: UsbBackupConfigStatusDto | undefined;
   usbBackups: UsbBackupFileDto[];
   ledgerInvariant: {
     valid: boolean;
@@ -265,9 +287,24 @@ export interface CartItem {
   unitName: string;
   quantityMilli: number;
   unitPriceSatang: number;
+  overrideLineTotalSatang?: number | undefined;
   selectedModifierIds: string[];
   isWeightedScale: boolean;
   scaleBadgeText?: string | undefined;
+}
+
+export interface HeldBillRecordDto {
+  id: string;
+  outletId: string;
+  referenceLabel: string;
+  orderType: CheckoutOrderRequest['orderType'];
+  taxMode: TaxMode;
+  discountMode?: 'BAHT' | 'PERCENT' | undefined;
+  discountInput?: string | undefined;
+  cart: CartItem[];
+  totalSatang: number;
+  heldByName: string;
+  heldAtIso: string;
 }
 
 export interface PrintedReceiptPreview {

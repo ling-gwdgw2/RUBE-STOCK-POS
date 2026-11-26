@@ -17,6 +17,7 @@ import type {
   StaffUserDto,
   StoreIdentitySettingsDto,
 } from '../types.ts';
+import { sanitizePinInput } from '../utils/keyboard-digits.ts';
 import { UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface FirstRunWizardModalProps {
@@ -476,9 +477,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 <input
                   id={`${uid}-owner-pin`}
                   type="password"
+                  inputMode="numeric"
+                  maxLength={8}
                   placeholder="เช่น 258099"
                   value={ownerPin}
-                  onChange={(e) => setOwnerPin(e.target.value)}
+                  onChange={(e) => setOwnerPin(sanitizePinInput(e.target.value))}
                   className={`h-12 w-full rounded-[4px] border border-hairline px-4 text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               </div>
@@ -489,9 +492,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 <input
                   id={`${uid}-owner-pin-confirm`}
                   type="password"
+                  inputMode="numeric"
+                  maxLength={8}
                   placeholder="พิมพ์รหัส PIN ซ้ำอีกครั้ง"
                   value={ownerPinConfirm}
-                  onChange={(e) => setOwnerPinConfirm(e.target.value)}
+                  onChange={(e) => setOwnerPinConfirm(sanitizePinInput(e.target.value))}
                   className={`h-12 w-full rounded-[4px] border border-hairline px-4 text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               </div>

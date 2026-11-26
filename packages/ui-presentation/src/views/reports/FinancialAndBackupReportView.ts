@@ -16,6 +16,7 @@ import type {
   AbbSalesTaxReportDto,
   InventoryValuationReportDto,
   MenuGrossMarginReportDto,
+  ReportDateRangeFilter,
   SchemaUpgradeInput,
   SchemaUpgradeResult,
   ShiftZReportDto,
@@ -33,16 +34,22 @@ export class FinancialAndBackupReportViewController {
     return this.ipc.generateShiftZReport(shiftId);
   }
 
-  public getAbbSalesTaxReportView(outletId = 'OUTLET-HQ'): AbbSalesTaxReportDto {
-    return this.ipc.generateAbbSalesTaxReport(outletId);
+  public getAbbSalesTaxReportView(
+    outletId = 'OUTLET-HQ',
+    dateRange?: ReportDateRangeFilter
+  ): AbbSalesTaxReportDto {
+    return this.ipc.generateAbbSalesTaxReport(outletId, dateRange);
   }
 
   public getInventoryValuationReportView(outletId = 'OUTLET-HQ'): InventoryValuationReportDto {
     return this.ipc.generateInventoryValuationReport(outletId);
   }
 
-  public getMenuCogsAndMarginReportView(outletId = 'OUTLET-HQ'): MenuGrossMarginReportDto {
-    return this.ipc.generateMenuGrossMarginAndCogsReport(outletId);
+  public getMenuCogsAndMarginReportView(
+    outletId = 'OUTLET-HQ',
+    dateRange?: ReportDateRangeFilter
+  ): MenuGrossMarginReportDto {
+    return this.ipc.generateMenuGrossMarginAndCogsReport(outletId, dateRange);
   }
 
   /**

@@ -32,6 +32,9 @@ const PHYSICAL_CODE_MAP: Readonly<Record<string, string>> = {
   Numpad9: '9',
   Minus: '-',
   NumpadSubtract: '-',
+  Period: '.',
+  Slash: '/',
+  Semicolon: ';',
   KeyA: 'A',
   KeyB: 'B',
   KeyC: 'C',
@@ -64,16 +67,31 @@ export function isPhysicalBarcodeKeyCode(code: string): boolean {
   return Object.prototype.hasOwnProperty.call(PHYSICAL_CODE_MAP, code);
 }
 
+export type PhysicalKeyCodeEntry =
+  | string
+  | { code: string; shiftKey?: boolean | undefined };
+
 /**
  * Maps a sequence of physical `KeyboardEvent.code` values to an ASCII barcode string,
  * completely immune to Windows Thai Kedmanee/Pattachote keyboard layouts.
+ * String entries remain uppercase for 1D compatibility; explicit `shiftKey` samples preserve
+ * mixed-case letters (`KeyA..Z`) and `Minus` + `shiftKey` -> `'_'` for 2D BOT Slip Mini-QR payloads.
  */
-export function decodePhysicalKeyCodesToBarcode(codes: readonly string[]): string {
+export function decodePhysicalKeyCodesToBarcode(
+  codes: readonly PhysicalKeyCodeEntry[]
+): string {
   let result = '';
-  for (const code of codes) {
+  for (const entry of codes) {
+    const code = typeof entry === 'string' ? entry : entry.code;
+    const shiftKey = typeof entry === 'string' ? undefined : entry.shiftKey;
     if (code === 'Enter' || code === 'NumpadEnter') break;
     const mapped = PHYSICAL_CODE_MAP[code];
-    if (mapped !== undefined) {
+    if (mapped === undefined) continue;
+    if (code === 'Minus' && shiftKey === true) {
+      result += '_';
+    } else if (code.startsWith('Key') && shiftKey !== undefined) {
+      result += shiftKey ? mapped : mapped.toLowerCase();
+    } else {
       result += mapped;
     }
   }

@@ -19,11 +19,13 @@ import {
   Plus,
   Printer,
   QrCode,
+  RefreshCw,
   RotateCcw,
   Scale,
   ScanBarcode,
   Search,
   ShieldAlert,
+  SlidersHorizontal,
   Sparkles,
   Tag,
   Trash2,
@@ -38,13 +40,25 @@ import {
   SCALE_BASIS_POINTS,
   SCALE_MILLI,
 } from '../../../../shared-contracts/src/fixed-point.ts';
-import { posTransport, type SlipConfirmationModalDto } from '../api/pos-transport.ts';
+import {
+  posTransport,
+  resolveBackendAssetUrl,
+  type SlipConfirmationModalDto,
+} from '../api/pos-transport.ts';
+import type { GlobalScannerRoutingMode } from '../hooks/useGlobalBarcodeScanner.ts';
+import {
+  getAllowedOrderTypesForProfile,
+  getCategoriesForProfile,
+  getOrderReferenceFieldMeta,
+  isVariantInProfileDomain,
+} from '../utils/profile-domain.ts';
 import { renderThaiReceiptTo203DpiCanvasRaster } from '../utils/thai-canvas-rasterizer.ts';
 import type {
   BootstrapPayload,
   CartItem,
   CatalogVariantDetailDto,
   CheckoutOrderRequest,
+  HeldBillRecordDto,
   ModifierDto,
   PrintedReceiptPreview,
   SplitPaymentLegInput,
@@ -52,8 +66,10 @@ import type {
   TaxMode,
 } from '../types.ts';
 import { ConfirmDialog, ModalDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
+import { VoidOrderAuthModal, type VoidTargetOrderSummary } from './VoidOrderAuthModal.tsx';
 
 interface PosRegisterWorkspaceProps {
+  outletId?: string;
   bootstrap: BootstrapPayload;
   currentUser: StaffUserDto;
   cart: CartItem[];
@@ -64,24 +80,18 @@ interface PosRegisterWorkspaceProps {
   onScanBarcodeString: (barcode: string, multiplierCount?: number) => void;
   lastPrintedReceipt: PrintedReceiptPreview | null;
   setLastPrintedReceipt: (r: PrintedReceiptPreview | null) => void;
+  simulationModeEnabled?: boolean;
+  onScannerRoutingModeChange?: (mode: GlobalScannerRoutingMode) => void;
+  onRegisterSlipScannerHandlers?: (
+    onSlipQr: ((qrRaw: string) => void) | null,
+    onSlipRollback: (() => void) | null,
+    onSlipBeforeSnapshot?: (() => void) | null
+  ) => void;
   onRefreshState: () => Promise<void>;
   onToast: (msg: string, tone?: 'success' | 'warn' | 'error') => void;
 }
 
-interface HeldBillRecord {
-  id: string;
-  referenceLabel: string;
-  orderType: CheckoutOrderRequest['orderType'];
-  taxMode: TaxMode;
-  discountMode?: 'BAHT' | 'PERCENT' | undefined;
-  discountInput?: string | undefined;
-  cart: CartItem[];
-  totalSatang: number;
-  heldByName: string;
-  heldAtIso: string;
-}
-
-const HELD_BILLS_STORAGE_KEY = 'rube_pos_v3_held_bills';
+const HELD_BILLS_LEGACY_STORAGE_KEY = 'rube_pos_v3_held_bills';
 const MULTIPLIER_PRESETS = [1, 2, 6, 12] as const;
 
 const SLIP_PRESETS: ReadonlyArray<{ label: string; sub: string; raw: string }> = [
@@ -102,6 +112,67 @@ const SLIP_PRESETS: ReadonlyArray<{ label: string; sub: string; raw: string }> =
   },
 ];
 
+interface PreBurstSlipSnapshot {
+  el: HTMLInputElement | null;
+  value: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+}
+
+function captureSlipInputSnapshot(
+  el: Element | null,
+  fallbackValue: string
+): PreBurstSlipSnapshot {
+  if (el instanceof HTMLInputElement && el.dataset.scannerSlipAllow === 'true') {
+    return {
+      el,
+      value: el.value,
+      selectionStart: el.selectionStart,
+      selectionEnd: el.selectionEnd,
+    };
+  }
+  return {
+    el: null,
+    value: fallbackValue,
+    selectionStart: null,
+    selectionEnd: null,
+  };
+}
+
+function restoreSlipInputSnapshotDom(snap: PreBurstSlipSnapshot): void {
+  const { el, value, selectionStart, selectionEnd } = snap;
+  if (!el || !document.contains(el)) return;
+  el.value = value;
+  if (selectionStart !== null && selectionEnd !== null) {
+    try {
+      el.setSelectionRange(selectionStart, selectionEnd);
+    } catch {
+      // ignore selection errors
+    }
+    window.setTimeout(() => {
+      if (
+        document.contains(el) &&
+        document.activeElement === el &&
+        el.value === value
+      ) {
+        try {
+          el.setSelectionRange(selectionStart, selectionEnd);
+        } catch {
+          // ignore
+        }
+      }
+    }, 0);
+  }
+}
+
+function withManualCartLineQty(line: CartItem, nextQuantityMilli: number): CartItem {
+  const { overrideLineTotalSatang: _omitOv, scaleBadgeText: _omitSb, ...rest } = line;
+  return {
+    ...rest,
+    quantityMilli: nextQuantityMilli,
+  };
+}
+
 /**
  * Editorial edge-to-edge top artwork for `card-photo` (google.design.md lines 24 & 378):
  * Chrome stays strictly monochrome (#ffffff / #202124 / #dadce0) + singular #1a73e8;
@@ -111,16 +182,35 @@ const ProductEditorialArtwork: React.FC<{
   item: CatalogVariantDetailDto;
   inCartQtyMilli: number;
 }> = React.memo(({ item, inCartQtyMilli }) => {
-  const isCafe = item.categoryId === 'CAT-CAFE' || item.isComposite;
+  const isCafe = item.categoryId === 'CAT-CAFE' || item.isComposite || item.kitchenStation === 'BAR' || item.kitchenStation === 'MAIN';
   const isScale = item.isWeightedScale;
+  const outOfStock = !item.isComposite && item.inStockMilli <= 0;
+  const lowStock =
+    !item.isComposite && item.inStockMilli > 0 && item.inStockMilli <= item.lowStockThresholdMilli;
+  const photoUrl = resolveBackendAssetUrl(item.imageUrl);
+
+  // Deterministic visual offset per SKU so items within a category remain distinct at a glance
+  let hash = 0;
+  for (let i = 0; i < item.id.length; i++) {
+    hash = (hash * 31 + item.id.charCodeAt(i)) | 0;
+  }
+  const shiftX = Math.abs(hash % 56);
+  const shiftR = 46 + Math.abs((hash >> 3) % 32);
 
   return (
     <div className="relative h-[132px] w-full overflow-hidden bg-[#f8f9fa] border-b border-[#dadce0]">
-      {isCafe ? (
+      {photoUrl ? (
+        <img
+          src={photoUrl}
+          alt={item.itemName}
+          loading="lazy"
+          className={`h-full w-full object-cover ${outOfStock ? 'opacity-55 grayscale' : ''}`}
+        />
+      ) : isCafe ? (
         /* Warm editorial espresso / tea botanical studio composition */
         <svg
           viewBox="0 0 360 132"
-          className="h-full w-full object-cover"
+          className={`h-full w-full object-cover ${outOfStock ? 'opacity-55 grayscale' : ''}`}
           aria-hidden="true"
           preserveAspectRatio="xMidYMid slice"
         >
@@ -132,17 +222,17 @@ const ProductEditorialArtwork: React.FC<{
             </linearGradient>
           </defs>
           <rect width="360" height="132" fill={`url(#cafe-${item.id})`} />
-          <circle cx="288" cy="106" r="74" fill="#f3dfc6" fillOpacity="0.18" />
-          <circle cx="256" cy="40" r="34" fill="#ffffff" fillOpacity="0.1" />
-          <circle cx="76" cy="100" r="8" fill="#1b110c" fillOpacity="0.55" />
-          <circle cx="96" cy="106" r="7" fill="#1b110c" fillOpacity="0.55" />
-          <circle cx="114" cy="98" r="8" fill="#1b110c" fillOpacity="0.55" />
+          <circle cx={260 + shiftX} cy="104" r={shiftR} fill="#f3dfc6" fillOpacity="0.2" />
+          <circle cx={230 + shiftX} cy="38" r="32" fill="#ffffff" fillOpacity="0.12" />
+          <circle cx={72 + (shiftX >> 1)} cy="100" r="8" fill="#1b110c" fillOpacity="0.55" />
+          <circle cx={92 + (shiftX >> 1)} cy="106" r="7" fill="#1b110c" fillOpacity="0.55" />
+          <circle cx={110 + (shiftX >> 1)} cy="98" r="8" fill="#1b110c" fillOpacity="0.55" />
         </svg>
       ) : isScale ? (
         /* Crisp butcher / fresh-market architectural composition */
         <svg
           viewBox="0 0 360 132"
-          className="h-full w-full object-cover"
+          className={`h-full w-full object-cover ${outOfStock ? 'opacity-55 grayscale' : ''}`}
           aria-hidden="true"
           preserveAspectRatio="xMidYMid slice"
         >
@@ -159,13 +249,21 @@ const ProductEditorialArtwork: React.FC<{
             fill="#ffffff"
             fillOpacity="0.16"
           />
-          <rect x="248" y="22" width="88" height="44" rx="2" fill="#ffffff" fillOpacity="0.14" />
+          <rect
+            x={224 + (shiftX >> 1)}
+            y="22"
+            width="88"
+            height="44"
+            rx="2"
+            fill="#ffffff"
+            fillOpacity="0.14"
+          />
         </svg>
       ) : (
         /* Clean architectural retail / glacial hydration composition */
         <svg
           viewBox="0 0 360 132"
-          className="h-full w-full object-cover"
+          className={`h-full w-full object-cover ${outOfStock ? 'opacity-55 grayscale' : ''}`}
           aria-hidden="true"
           preserveAspectRatio="xMidYMid slice"
         >
@@ -177,7 +275,7 @@ const ProductEditorialArtwork: React.FC<{
             </linearGradient>
           </defs>
           <rect width="360" height="132" fill={`url(#ret-${item.id})`} />
-          <circle cx="295" cy="28" r="58" fill="#ffffff" fillOpacity="0.14" />
+          <circle cx={265 + shiftX} cy="30" r={shiftR} fill="#ffffff" fillOpacity="0.14" />
           <path
             d="M0 102 C90 80 180 118 360 86 L360 132 L0 132 Z"
             fill="#ffffff"
@@ -186,8 +284,8 @@ const ProductEditorialArtwork: React.FC<{
         </svg>
       )}
 
-      {/* Subtle top-left monochrome metadata tag */}
-      <div className="absolute left-3 top-3 flex items-center gap-1.5">
+      {/* Subtle top-left monochrome metadata + stock alert tags */}
+      <div className="absolute left-3 top-3 flex flex-wrap items-center gap-1.5">
         <span className="rounded-[4px] bg-white/95 px-2 py-0.5 text-[11px] font-medium text-ink">
           {item.isComposite
             ? 'สูตร BOM'
@@ -195,6 +293,15 @@ const ProductEditorialArtwork: React.FC<{
               ? 'ชั่งน้ำหนัก กก.'
               : item.sku}
         </span>
+        {outOfStock ? (
+          <span className="rounded-[4px] bg-ink px-2 py-0.5 text-[11px] font-medium text-white">
+            สินค้าหมด
+          </span>
+        ) : lowStock ? (
+          <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-[11px] font-medium text-ink">
+            ใกล้หมด
+          </span>
+        ) : null}
       </div>
 
       {/* Active In-Cart Counter Pill (Google Blue #1a73e8 48px pill) */}
@@ -212,6 +319,7 @@ const ProductEditorialArtwork: React.FC<{
 ProductEditorialArtwork.displayName = 'ProductEditorialArtwork';
 
 export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
+  outletId = 'OUTLET-HQ',
   bootstrap,
   currentUser,
   cart,
@@ -222,6 +330,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   onScanBarcodeString,
   lastPrintedReceipt,
   setLastPrintedReceipt,
+  simulationModeEnabled = false,
+  onScannerRoutingModeChange,
+  onRegisterSlipScannerHandlers,
   onRefreshState,
   onToast,
 }) => {
@@ -246,28 +357,71 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   const [editingCartKey, setEditingCartKey] = useState<string | null>(null);
   const [editingQtyInput, setEditingQtyInput] = useState<string>('');
 
-  // Held Bills (persisted in localStorage for real lane continuity)
-  const [heldBills, setHeldBills] = useState<HeldBillRecord[]>(() => {
-    try {
-      const raw = window.localStorage.getItem(HELD_BILLS_STORAGE_KEY);
-      return raw ? (JSON.parse(raw) as HeldBillRecord[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  // Server-Synced Held Bills (shared across POS terminals on the same SQLite Leader DB)
+  const [heldBills, setHeldBills] = useState<HeldBillRecordDto[]>(
+    () => bootstrap.heldBills ?? []
+  );
+  const [syncingHeldBills, setSyncingHeldBills] = useState<boolean>(false);
+
+  // Order History Search & Status Filter (P3.1)
+  const [orderHistoryQuery, setOrderHistoryQuery] = useState<string>('');
+  const [orderStatusFilter, setOrderStatusFilter] = useState<'ALL' | 'COMPLETED' | 'VOIDED'>(
+    'ALL'
+  );
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(HELD_BILLS_STORAGE_KEY, JSON.stringify(heldBills));
-    } catch {
-      // ignore storage quota errors
+    if (bootstrap.heldBills) {
+      setHeldBills(bootstrap.heldBills);
     }
-  }, [heldBills]);
+  }, [bootstrap.heldBills]);
 
-  // Modifier customization dialog state
+  // One-time seamless migration of any legacy localStorage held bills into server SQLite `store_config`
+  useEffect(() => {
+    try {
+      const legacyRaw = window.localStorage.getItem(HELD_BILLS_LEGACY_STORAGE_KEY);
+      if (!legacyRaw) return;
+      const legacyList = JSON.parse(legacyRaw) as Array<Omit<HeldBillRecordDto, 'outletId'>>;
+      window.localStorage.removeItem(HELD_BILLS_LEGACY_STORAGE_KEY);
+      if (Array.isArray(legacyList) && legacyList.length > 0) {
+        void (async () => {
+          for (const item of legacyList.reverse()) {
+            const res = await posTransport.saveHeldBill({
+              outletId,
+              actorUserId: currentUser.id,
+              bill: { ...item, outletId },
+            });
+            setHeldBills(res.heldBills);
+          }
+        })().catch(() => {});
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, [currentUser.id, outletId]);
+
+  const refreshServerHeldBills = useCallback(async () => {
+    setSyncingHeldBills(true);
+    try {
+      const res = await posTransport.listHeldBills(outletId);
+      setHeldBills(res.heldBills);
+    } catch {
+      // ignore transient network errors
+    } finally {
+      setSyncingHeldBills(false);
+    }
+  }, [outletId]);
+
+  useEffect(() => {
+    if (posSubView === 'HELD_BILLS') {
+      void refreshServerHeldBills();
+    }
+  }, [posSubView, refreshServerHeldBills]);
+
+  // Modifier customization dialog state (supports both new item and editing an existing cart line)
   const [customizingVariant, setCustomizingVariant] = useState<CatalogVariantDetailDto | null>(
     null
   );
+  const [editingModifierCartKey, setEditingModifierCartKey] = useState<string | null>(null);
   const [draftModIds, setDraftModIds] = useState<string[]>(['MOD-SWEET-100']);
   const [draftQtyInput, setDraftQtyInput] = useState<string>('1');
 
@@ -283,12 +437,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrPayloadText, setQrPayloadText] = useState<string>('');
   const [qrCrcHex, setQrCrcHex] = useState<string>('');
-  const [slipMiniQrInput, setSlipMiniQrInput] = useState<string>(
-    `0041000600000101030040220KBANK${Date.now().toString().slice(-12)}5102TH9104ABCD`
-  );
+  const [slipMiniQrInput, setSlipMiniQrInput] = useState<string>('');
   const [slipVerificationModal, setSlipVerificationModal] =
     useState<SlipConfirmationModalDto | null>(null);
   const [processingCheckout, setProcessingCheckout] = useState(false);
+
+  // Non-blocking Post-Checkout Change & Last Sale Banner (auto-dismisses when next customer item enters cart)
+  const [lastCompletedSaleSummary, setLastCompletedSaleSummary] = useState<{
+    receiptNumber: string;
+    abbTaxInvoiceNo: string;
+    totalSatang: number;
+    tenderedSatang?: number | undefined;
+    changeGivenSatang: number;
+    paymentLabel: string;
+    spoolStatus: string;
+  } | null>(null);
+
+  // Void Authorization Modal state (Mandatory Reason + Stateless Manager PIN Override)
+  const [voidTargetOrder, setVoidTargetOrder] = useState<VoidTargetOrderSummary | null>(null);
 
   // Receipt Preview Dialog & 203-DPI Canvas Rasterizer
   const [receiptModalOpen, setReceiptModalOpen] = useState(false);
@@ -316,6 +482,15 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const discountInputRef = useRef<HTMLInputElement | null>(null);
 
+  const allowedOrderTypes = useMemo(
+    () => getAllowedOrderTypesForProfile(bootstrap.profile),
+    [bootstrap.profile]
+  );
+  const orderRefMeta = useMemo(
+    () => getOrderReferenceFieldMeta(bootstrap.profile),
+    [bootstrap.profile]
+  );
+
   useEffect(() => {
     if (bootstrap.profile === 'RETAIL') {
       setPosSubView('SCAN_LEDGER');
@@ -323,8 +498,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     } else if (bootstrap.profile === 'HOSPITALITY') {
       setPosSubView('STUDIO_CARDS');
       setOrderType('DINE_IN');
+    } else if (!allowedOrderTypes.some((o) => o.value === orderType)) {
+      setOrderType(allowedOrderTypes[0]?.value ?? 'TAKEAWAY');
     }
-  }, [bootstrap.profile]);
+  }, [allowedOrderTypes, bootstrap.profile]);
 
   const modifiersById = useMemo(() => {
     return new Map<string, ModifierDto>(bootstrap.modifiers.map((m) => [m.id, m]));
@@ -338,15 +515,32 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     return map;
   }, [cart]);
 
-  // Sellable items filtered by profile, category, and search query
+  // Auto-clear previous customer's change banner as soon as the next customer's first item enters the cart
+  useEffect(() => {
+    if (cart.length > 0 && lastCompletedSaleSummary) {
+      setLastCompletedSaleSummary(null);
+    }
+  }, [cart.length, lastCompletedSaleSummary]);
+
+  const visibleCategories = useMemo(
+    () => getCategoriesForProfile(bootstrap.categories, bootstrap.profile, 'POS'),
+    [bootstrap.categories, bootstrap.profile]
+  );
+
+  useEffect(() => {
+    if (
+      selectedCategoryId !== 'ALL' &&
+      !visibleCategories.some((c) => c.id === selectedCategoryId)
+    ) {
+      setSelectedCategoryId('ALL');
+    }
+  }, [selectedCategoryId, visibleCategories]);
+
+  // Sellable items strictly separated by active shop profile, category, and search query
   const sellableCatalog = useMemo(() => {
     return bootstrap.catalogDetailed.filter((item) => {
       if (!item.active) return false;
-      if (bootstrap.profile === 'RETAIL' && item.categoryId === 'CAT-CAFE') return false;
-      if (bootstrap.profile === 'HOSPITALITY' && item.categoryId === 'CAT-RETAIL') return false;
-      if (selectedCategoryId === 'ALL' && item.categoryId === 'CAT-RAW' && !searchQuery.trim()) {
-        return false;
-      }
+      if (!isVariantInProfileDomain(item, bootstrap.profile, 'POS')) return false;
       if (selectedCategoryId !== 'ALL' && item.categoryId !== selectedCategoryId) {
         return false;
       }
@@ -371,9 +565,15 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         .filter((m): m is ModifierDto => m !== undefined);
       const modDeltaSatang = mods.reduce((s, m) => s + m.priceDeltaSatang, 0);
       const effectiveUnitSatang = line.unitPriceSatang + modDeltaSatang;
-      const lineTotalSatang = Number(
-        roundDivBigInt(BigInt(line.quantityMilli) * BigInt(effectiveUnitSatang), SCALE_MILLI)
+      const baseLineSatang =
+        line.overrideLineTotalSatang ??
+        Number(
+          roundDivBigInt(BigInt(line.quantityMilli) * BigInt(line.unitPriceSatang), SCALE_MILLI)
+        );
+      const modsSatang = Number(
+        roundDivBigInt(BigInt(line.quantityMilli) * BigInt(modDeltaSatang), SCALE_MILLI)
       );
+      const lineTotalSatang = Math.max(0, baseLineSatang + modsSatang);
       subtotalSatang += lineTotalSatang;
       return {
         ...line,
@@ -473,6 +673,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           if (preferred) defaultSingleMods.push(preferred.id);
         }
       }
+      setEditingModifierCartKey(null);
       setCustomizingVariant(variant);
       setDraftModIds(defaultSingleMods);
       setDraftQtyInput(String(scanMultiplier));
@@ -480,12 +681,64 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       return;
     }
     addVariantToCartDirect(variant, qtyMilli, []);
+    if (!variant.isComposite && variant.inStockMilli <= 0) {
+      onToast(
+        `"${variant.itemName}" สต็อกในระบบเหลือ 0 — เพิ่มลงบิลแล้ว (โปรดตรวจสอบสินค้าหน้าร้าน)`,
+        'warn'
+      );
+    }
     if (scanMultiplier > 1) {
       setScanMultiplier(1);
     }
   };
 
-  const handleHoldCurrentBill = useCallback(() => {
+  const handleOpenCartLineModifierEditor = (line: CartItem) => {
+    const matchedVariant = bootstrap.catalogDetailed.find((v) => v.id === line.variantId);
+    if (!matchedVariant) return;
+    setEditingModifierCartKey(line.cartKey);
+    setCustomizingVariant(matchedVariant);
+    setDraftModIds([...line.selectedModifierIds]);
+    setDraftQtyInput(
+      line.isWeightedScale
+        ? formatMilliUnitsToQtyString(line.quantityMilli)
+        : String(Math.max(1, Math.round(line.quantityMilli / 1000)))
+    );
+  };
+
+  const holdRecallInFlightRef = useRef(false);
+  const checkoutInFlightRef = useRef(false);
+  const cartCheckoutIdemKeyRef = useRef<string | null>(null);
+  const cartCheckoutIdemSigRef = useRef<string>('');
+  const qrReqSeqRef = useRef(0);
+  const lastQrSigRef = useRef<string>('');
+  const prevModalAmountsRef = useRef<{ open: boolean; total: number; splitRem: number }>({
+    open: false,
+    total: 0,
+    splitRem: 0,
+  });
+  const slipPreBurstSnapshotRef = useRef<PreBurstSlipSnapshot | null>(null);
+  const slipMiniQrInputRef = useRef(slipMiniQrInput);
+  slipMiniQrInputRef.current = slipMiniQrInput;
+
+  const cartSignature = useMemo(() => {
+    const linesSig = cartSummary.lines
+      .map(
+        (l) =>
+          `${l.cartKey}:${l.quantityMilli}:${l.unitPriceSatang}:${l.overrideLineTotalSatang ?? ''}:${l.selectedModifierIds.join('+')}`
+      )
+      .join('|');
+    return `${outletId}|${taxMode}|${cartSummary.discountSatang}|${paymentTab}|${linesSig}`;
+  }, [cartSummary.discountSatang, cartSummary.lines, outletId, paymentTab, taxMode]);
+
+  useEffect(() => {
+    if (cartSignature !== cartCheckoutIdemSigRef.current) {
+      cartCheckoutIdemKeyRef.current = null;
+      cartCheckoutIdemSigRef.current = cartSignature;
+    }
+  }, [cartSignature]);
+
+  const handleHoldCurrentBill = useCallback(async () => {
+    if (holdRecallInFlightRef.current) return;
     if (cart.length === 0) {
       if (heldBills.length > 0) {
         setPosSubView('HELD_BILLS');
@@ -494,10 +747,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       }
       return;
     }
+    holdRecallInFlightRef.current = true;
     const refLabel =
       queueOrTableLabel.trim() || `คิวพัก #${String(heldBills.length + 1).padStart(2, '0')}`;
-    const record: HeldBillRecord = {
-      id: `HOLD-${Date.now()}`,
+    const record: HeldBillRecordDto = {
+      id: `HOLD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      outletId,
       referenceLabel: refLabel,
       orderType,
       taxMode,
@@ -508,35 +763,169 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       heldByName: currentUser.displayName,
       heldAtIso: new Date().toISOString(),
     };
-    setHeldBills((prev) => [record, ...prev]);
-    setCart([]);
-    setQueueOrTableLabel('');
-    setDiscountInput('0');
-    onToast(`พักบิล "${refLabel}" เรียบร้อยแล้ว (กด F8 เพื่อเรียกคืน)`, 'success');
+    try {
+      const saved = await posTransport.saveHeldBill({
+        outletId,
+        actorUserId: currentUser.id,
+        bill: record,
+      });
+      setHeldBills(saved.heldBills);
+      setCart([]);
+      setQueueOrTableLabel('');
+      setDiscountInput('0');
+      void onRefreshState();
+      onToast(`พักบิล "${refLabel}" ลงเซิร์ฟเวอร์เรียบร้อยแล้ว (เรียกข้ามเครื่องได้ · F8)`, 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      holdRecallInFlightRef.current = false;
+    }
   }, [
     cart,
     cartSummary.totalSatang,
     currentUser.displayName,
+    currentUser.id,
     discountInput,
     discountMode,
     heldBills.length,
+    onRefreshState,
     onToast,
     orderType,
+    outletId,
     queueOrTableLabel,
     setCart,
     taxMode,
   ]);
 
-  const handleRecallHeldBill = (held: HeldBillRecord) => {
-    setCart(held.cart);
-    setOrderType(held.orderType);
-    setTaxMode(held.taxMode);
-    if (held.discountMode) setDiscountMode(held.discountMode);
-    if (held.discountInput !== undefined) setDiscountInput(held.discountInput);
-    setQueueOrTableLabel(held.referenceLabel);
-    setHeldBills((prev) => prev.filter((h) => h.id !== held.id));
-    setPosSubView(bootstrap.profile === 'RETAIL' ? 'SCAN_LEDGER' : 'STUDIO_CARDS');
-    onToast(`เรียกบิล "${held.referenceLabel}" กลับมาที่หน้าขายแล้ว`, 'success');
+  const executeRecallHeldBill = async (
+    held: HeldBillRecordDto,
+    reconciledCart: CartItem[],
+    warnings: string[]
+  ) => {
+    if (holdRecallInFlightRef.current) return;
+    holdRecallInFlightRef.current = true;
+    try {
+      const removed = await posTransport.deleteHeldBill({
+        outletId,
+        actorUserId: currentUser.id,
+        id: held.id,
+        recall: true,
+      });
+      setHeldBills(removed.heldBills);
+      setCart(reconciledCart);
+      setOrderType(held.orderType);
+      setTaxMode(held.taxMode);
+      if (held.discountMode) setDiscountMode(held.discountMode);
+      if (held.discountInput !== undefined) setDiscountInput(held.discountInput);
+      setQueueOrTableLabel(held.referenceLabel);
+      setPosSubView(bootstrap.profile === 'RETAIL' ? 'SCAN_LEDGER' : 'STUDIO_CARDS');
+      void onRefreshState();
+      if (warnings.length > 0) {
+        onToast(`เรียกบิล "${held.referenceLabel}" แล้ว (${warnings.join(' · ')})`, 'warn');
+      } else {
+        onToast(`เรียกบิล "${held.referenceLabel}" กลับมาที่หน้าขายแล้ว`, 'success');
+      }
+    } catch (err) {
+      void refreshServerHeldBills();
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      holdRecallInFlightRef.current = false;
+    }
+  };
+
+  const handleRecallHeldBill = async (held: HeldBillRecordDto) => {
+    if (holdRecallInFlightRef.current) return;
+
+    const droppedNames: string[] = [];
+    const repricedNames: string[] = [];
+    let droppedModifiersCount = 0;
+    const reconciledCart: CartItem[] = [];
+
+    for (const line of held.cart) {
+      const variant = bootstrap.catalogDetailed.find((v) => v.id === line.variantId);
+      if (!variant || !variant.active) {
+        droppedNames.push(line.itemName);
+        continue;
+      }
+      const validModIds = line.selectedModifierIds.filter((id) => modifiersById.has(id));
+      if (validModIds.length < line.selectedModifierIds.length) {
+        droppedModifiersCount += line.selectedModifierIds.length - validModIds.length;
+      }
+      const sortedMods = [...validModIds].sort();
+      const hasScaleOverride = line.overrideLineTotalSatang !== undefined;
+      const nextUnitPriceSatang = hasScaleOverride ? line.unitPriceSatang : variant.priceSatang;
+      if (!hasScaleOverride && line.unitPriceSatang !== variant.priceSatang) {
+        repricedNames.push(variant.itemName);
+      }
+      const nextCartKey =
+        hasScaleOverride || line.scaleBadgeText
+          ? line.cartKey
+          : `${variant.id}::${sortedMods.join(',')}`;
+
+      const reconciledLine: CartItem = {
+        cartKey: nextCartKey,
+        variantId: variant.id,
+        itemName: variant.itemName,
+        variantName: variant.variantName,
+        sku: variant.sku,
+        unitName: variant.unitName,
+        quantityMilli: line.quantityMilli,
+        unitPriceSatang: nextUnitPriceSatang,
+        selectedModifierIds: sortedMods,
+        isWeightedScale: variant.isWeightedScale,
+        ...(line.scaleBadgeText !== undefined ? { scaleBadgeText: line.scaleBadgeText } : {}),
+        ...(line.overrideLineTotalSatang !== undefined
+          ? { overrideLineTotalSatang: line.overrideLineTotalSatang }
+          : {}),
+      };
+
+      if (!hasScaleOverride && !line.scaleBadgeText) {
+        const existingIdx = reconciledCart.findIndex((c) => c.cartKey === nextCartKey);
+        if (existingIdx >= 0) {
+          const existing = reconciledCart[existingIdx]!;
+          reconciledCart[existingIdx] = {
+            ...existing,
+            quantityMilli: existing.quantityMilli + reconciledLine.quantityMilli,
+          };
+          continue;
+        }
+      }
+      reconciledCart.push(reconciledLine);
+    }
+
+    if (reconciledCart.length === 0) {
+      onToast(
+        `ไม่สามารถเรียกบิล "${held.referenceLabel}" ได้ เนื่องจากสินค้าทั้งหมดถูกลบหรือพักการขายไปแล้ว`,
+        'warn'
+      );
+      return;
+    }
+
+    const warnings: string[] = [];
+    if (droppedNames.length > 0) {
+      warnings.push(`ตัดสินค้าที่ลบ/พักขาย ${droppedNames.length} รายการ (${droppedNames.join(', ')})`);
+    }
+    if (repricedNames.length > 0) {
+      warnings.push(`ปรับราคาตามปัจจุบัน ${repricedNames.length} รายการ`);
+    }
+    if (droppedModifiersCount > 0) {
+      warnings.push(`ตัดตัวเลือกเสริมที่ถูกลบ ${droppedModifiersCount} รายการ`);
+    }
+
+    if (cart.length > 0) {
+      setConfirmAction({
+        title: `แทนที่บิลปัจจุบันด้วย "${held.referenceLabel}"?`,
+        description: `บิลปัจจุบันมีสินค้าอยู่ ${cartSummary.totalItemUnitsCount} รายการ (฿${formatSatangToThbString(cartSummary.totalSatang)}) การเรียกบิลที่พักไว้จะล้างรายการปัจจุบันออกทั้งหมด`,
+        confirmLabel: 'ยืนยันเรียกบิลแทนที่',
+        tone: 'primary',
+        onConfirm: async () => {
+          await executeRecallHeldBill(held, reconciledCart, warnings);
+        },
+      });
+      return;
+    }
+
+    await executeRecallHeldBill(held, reconciledCart, warnings);
   };
 
   const splitCashSatang = useMemo(() => {
@@ -550,11 +939,30 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
   const splitRemainingSatang = Math.max(0, cartSummary.totalSatang - splitCashSatang);
 
+  const clearPromptPayQrState = useCallback(() => {
+    qrReqSeqRef.current += 1;
+    lastQrSigRef.current = '';
+    setQrDataUrl(null);
+    setQrPayloadText('');
+    setQrCrcHex('');
+  }, []);
+
   const loadPromptPayQr = useCallback(
     async (overrideAmountSatang?: number) => {
-      if (cart.length === 0) return;
+      const effectiveTargetSatang = overrideAmountSatang ?? cartSummary.totalSatang;
+      if (cart.length === 0 || effectiveTargetSatang <= 0) {
+        clearPromptPayQrState();
+        return;
+      }
+      const reqSeq = ++qrReqSeqRef.current;
+      const qrSig = `${outletId}|${taxMode}|${cartSummary.discountSatang}|${cartSummary.totalSatang}|${effectiveTargetSatang}`;
+      lastQrSigRef.current = qrSig;
+      setQrDataUrl(null);
+      setQrPayloadText('');
+      setQrCrcHex('');
       try {
         const qr = await posTransport.generatePromptPayQr({
+          outletId,
           taxMode,
           discountSatang: cartSummary.discountSatang,
           ...(overrideAmountSatang !== undefined ? { overrideAmountSatang } : {}),
@@ -563,22 +971,89 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             quantityMilli: l.quantityMilli,
             unitPriceSatang: l.unitPriceSatang,
             selectedModifierIds: l.selectedModifierIds,
+            ...(l.overrideLineTotalSatang !== undefined
+              ? { overrideLineTotalSatang: l.overrideLineTotalSatang }
+              : {}),
           })),
         });
-        setQrPayloadText(qr.payload);
-        setQrCrcHex(qr.crcHex);
+        if (reqSeq !== qrReqSeqRef.current) return;
         const url = await QRCode.toDataURL(qr.payload, {
           width: 224,
           margin: 1,
           color: { dark: '#202124', light: '#ffffff' },
         });
+        if (reqSeq !== qrReqSeqRef.current) return;
+        setQrPayloadText(qr.payload);
+        setQrCrcHex(qr.crcHex);
         setQrDataUrl(url);
       } catch (err) {
+        if (reqSeq !== qrReqSeqRef.current) return;
+        lastQrSigRef.current = '';
+        setQrDataUrl(null);
+        setQrPayloadText('');
+        setQrCrcHex('');
         onToast(err instanceof Error ? err.message : String(err), 'error');
       }
     },
-    [cart, cartSummary.discountSatang, onToast, taxMode]
+    [
+      cart,
+      cartSummary.discountSatang,
+      cartSummary.totalSatang,
+      clearPromptPayQrState,
+      onToast,
+      outletId,
+      taxMode,
+    ]
   );
+
+  // Reset stale slip verification & QR whenever bill total or split remainder changes while Checkout modal is open
+  useEffect(() => {
+    const prev = prevModalAmountsRef.current;
+    if (
+      checkoutModalOpen &&
+      prev.open &&
+      (prev.total !== cartSummary.totalSatang || prev.splitRem !== splitRemainingSatang)
+    ) {
+      setSlipVerificationModal(null);
+      clearPromptPayQrState();
+    }
+    prevModalAmountsRef.current = {
+      open: checkoutModalOpen,
+      total: cartSummary.totalSatang,
+      splitRem: splitRemainingSatang,
+    };
+  }, [cartSummary.totalSatang, checkoutModalOpen, clearPromptPayQrState, splitRemainingSatang]);
+
+  // Debounced (250ms) auto-regeneration of Split PromptPay QR when cash split amount changes
+  useEffect(() => {
+    if (
+      !checkoutModalOpen ||
+      paymentTab !== 'SPLIT' ||
+      splitSecondMethod !== 'PROMPTPAY_QR' ||
+      splitRemainingSatang <= 0 ||
+      cartSummary.totalSatang <= 0
+    ) {
+      return;
+    }
+    const targetSig = `${outletId}|${taxMode}|${cartSummary.discountSatang}|${cartSummary.totalSatang}|${splitRemainingSatang}`;
+    if (lastQrSigRef.current === targetSig) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void loadPromptPayQr(splitRemainingSatang);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [
+    cartSummary.discountSatang,
+    cartSummary.totalSatang,
+    checkoutModalOpen,
+    loadPromptPayQr,
+    outletId,
+    paymentTab,
+    splitRemainingSatang,
+    splitSecondMethod,
+    taxMode,
+  ]);
 
   const dispatch203DpiThaiCanvasPrint = useCallback(
     async (input: {
@@ -587,6 +1062,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       abbTaxInvoiceNo: string;
       createdAtIso: string;
       cashierName: string;
+      taxMode?: TaxMode | undefined;
       lines: Array<{
         itemName: string;
         qtyText: string;
@@ -613,6 +1089,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         abbTaxInvoiceNo: input.abbTaxInvoiceNo,
         createdAtText: new Date(input.createdAtIso).toLocaleString('th-TH'),
         cashierName: input.cashierName,
+        taxMode: input.taxMode ?? taxMode,
         lines: input.lines,
         subtotalText: `฿${formatSatangToThbString(input.subtotalSatang)}`,
         discountText: `฿${formatSatangToThbString(input.discountSatang)}`,
@@ -646,6 +1123,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       bootstrap.storeSettings.storeName,
       bootstrap.storeSettings.taxId,
       printPaperWidthMm,
+      taxMode,
     ]
   );
 
@@ -655,28 +1133,51 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         onToast('กรุณาเลือกรายการสินค้าก่อนรับชำระเงิน', 'warn');
         return;
       }
-      setPaymentTab(initialTab);
+      clearPromptPayQrState();
+      const resolvedTab =
+        cartSummary.totalSatang <= 0 && (initialTab === 'PROMPTPAY_QR' || initialTab === 'SPLIT')
+          ? 'CASH'
+          : initialTab;
+      if (resolvedTab !== initialTab) {
+        onToast('ยอดชำระสุทธิเป็น ฿0.00 กรุณารับชำระผ่านช่องทางเงินสด ฿0.00', 'warn');
+      }
+      setPaymentTab(resolvedTab);
       setCashTenderedBahtInput(
         formatSatangToThbString(cartSummary.totalSatang).replace(/,/g, '')
       );
-      // Pre-populate half of total for split payment convenience
-      if (initialTab === 'SPLIT' || cartSummary.totalSatang > 200) {
-        const halfSatang = Math.floor(cartSummary.totalSatang / 200) * 100;
-        setSplitCashBahtInput(formatSatangToThbString(Math.max(100, halfSatang)).replace(/,/g, ''));
+      const computedHalf =
+        cartSummary.totalSatang > 200
+          ? Math.floor(cartSummary.totalSatang / 200) * 100
+          : Math.floor(cartSummary.totalSatang / 2);
+      const initialSplitCash =
+        cartSummary.totalSatang > 100 ? Math.max(100, computedHalf) : computedHalf;
+      if (resolvedTab === 'SPLIT' || cartSummary.totalSatang > 200) {
+        setSplitCashBahtInput(formatSatangToThbString(initialSplitCash).replace(/,/g, ''));
       }
       setCashNumpadPristine(true);
+      setSlipMiniQrInput('');
       setSlipVerificationModal(null);
       setCheckoutModalOpen(true);
 
-      if (initialTab === 'PROMPTPAY_QR') {
+      if (resolvedTab === 'PROMPTPAY_QR' && cartSummary.totalSatang > 0) {
         await loadPromptPayQr();
-      } else if (initialTab === 'SPLIT' && splitSecondMethod === 'PROMPTPAY_QR') {
-        const halfSatang = Math.floor(cartSummary.totalSatang / 200) * 100;
-        const rem = Math.max(0, cartSummary.totalSatang - Math.max(100, halfSatang));
+      } else if (
+        resolvedTab === 'SPLIT' &&
+        splitSecondMethod === 'PROMPTPAY_QR' &&
+        cartSummary.totalSatang > 0
+      ) {
+        const rem = Math.max(0, cartSummary.totalSatang - initialSplitCash);
         if (rem > 0) await loadPromptPayQr(rem);
       }
     },
-    [cart.length, cartSummary.totalSatang, loadPromptPayQr, onToast, splitSecondMethod]
+    [
+      cart.length,
+      cartSummary.totalSatang,
+      clearPromptPayQrState,
+      loadPromptPayQr,
+      onToast,
+      splitSecondMethod,
+    ]
   );
 
   const instantExactCashCheckoutRef = useRef<(() => void) | null>(null);
@@ -684,6 +1185,19 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   // Cashier Function-Key Ergonomics (F2, F4, F8, F9, F10, F12, Escape)
   useEffect(() => {
     const onWindowKeyDown = (e: KeyboardEvent) => {
+      if (
+        document.querySelector('[role="dialog"], [role="alertdialog"]') !== null ||
+        checkoutModalOpen ||
+        Boolean(customizingVariant) ||
+        receiptModalOpen ||
+        Boolean(confirmAction) ||
+        Boolean(voidTargetOrder)
+      ) {
+        return;
+      }
+      if (e.repeat) {
+        return;
+      }
       if (e.key === 'F2') {
         e.preventDefault();
         searchInputRef.current?.focus();
@@ -696,23 +1210,23 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         });
       } else if (e.key === 'F8') {
         e.preventDefault();
-        handleHoldCurrentBill();
+        void handleHoldCurrentBill();
       } else if (e.key === 'F9') {
         e.preventDefault();
         discountInputRef.current?.focus();
         discountInputRef.current?.select();
       } else if (e.key === 'F10') {
         e.preventDefault();
-        if (!checkoutModalOpen && cart.length > 0) {
+        if (cart.length > 0) {
           void openCheckoutModal('CASH');
         }
       } else if (e.key === 'F12') {
         e.preventDefault();
-        if (!checkoutModalOpen && !customizingVariant && !receiptModalOpen && cart.length > 0) {
+        if (cart.length > 0) {
           instantExactCashCheckoutRef.current?.();
         }
       } else if (e.key === 'Escape') {
-        if (!confirmAction && !checkoutModalOpen && !customizingVariant && !receiptModalOpen && editingCartKey) {
+        if (editingCartKey) {
           setEditingCartKey(null);
         }
       }
@@ -728,100 +1242,211 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     handleHoldCurrentBill,
     openCheckoutModal,
     receiptModalOpen,
+    voidTargetOrder,
   ]);
 
-  const handleVerifySlipStep1 = async (overrideAmountSatang?: number) => {
-    if (!slipMiniQrInput.trim()) {
-      onToast('กรุณาสแกนหรือวางข้อมูล BOT Mini-QR จากสลิปธนาคาร', 'warn');
-      return;
-    }
-    setProcessingCheckout(true);
-    try {
-      const modal = await posTransport.verifyBotSlipStep1({
-        miniQrRaw: slipMiniQrInput.trim(),
-        taxMode,
-        discountSatang: cartSummary.discountSatang,
-        ...(overrideAmountSatang !== undefined ? { overrideAmountSatang } : {}),
-        lines: cart.map((l) => ({
-          variantId: l.variantId,
-          quantityMilli: l.quantityMilli,
-          unitPriceSatang: l.unitPriceSatang,
-          selectedModifierIds: l.selectedModifierIds,
-        })),
-      });
-      setSlipVerificationModal(modal);
-      if (!modal.valid) {
-        onToast(modal.errorMessageThai || 'สลิปไม่ผ่านการตรวจสอบ', 'error');
+  const handleVerifySlipStep1 = useCallback(
+    async (overrideAmountSatang?: number, explicitQrRaw?: string) => {
+      const rawQr = (explicitQrRaw ?? slipMiniQrInput).trim();
+      if (!rawQr) {
+        onToast('กรุณาสแกนหรือวางข้อมูล BOT Mini-QR จากสลิปธนาคารลูกค้า', 'warn');
+        return;
       }
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      setProcessingCheckout(false);
+      setProcessingCheckout(true);
+      try {
+        const modal = await posTransport.verifyBotSlipStep1({
+          miniQrRaw: rawQr,
+          taxMode,
+          discountSatang: cartSummary.discountSatang,
+          ...(overrideAmountSatang !== undefined ? { overrideAmountSatang } : {}),
+          lines: cart.map((l) => ({
+            variantId: l.variantId,
+            quantityMilli: l.quantityMilli,
+            unitPriceSatang: l.unitPriceSatang,
+            selectedModifierIds: l.selectedModifierIds,
+            ...(l.overrideLineTotalSatang !== undefined
+              ? { overrideLineTotalSatang: l.overrideLineTotalSatang }
+              : {}),
+          })),
+        });
+        setSlipVerificationModal(modal);
+        if (!modal.valid) {
+          onToast(modal.errorMessageThai || 'สลิปไม่ผ่านการตรวจสอบ', 'error');
+        }
+      } catch (err) {
+        onToast(err instanceof Error ? err.message : String(err), 'error');
+      } finally {
+        setProcessingCheckout(false);
+      }
+    },
+    [cart, cartSummary.discountSatang, onToast, slipMiniQrInput, taxMode]
+  );
+
+  // Sync context-aware 2D scanner mode with App-level global scanner listener
+  useEffect(() => {
+    const isAwaitingSlipQr =
+      checkoutModalOpen &&
+      !processingCheckout &&
+      !slipVerificationModal?.valid &&
+      cartSummary.totalSatang > 0 &&
+      (paymentTab === 'PROMPTPAY_QR' ||
+        (paymentTab === 'SPLIT' &&
+          splitSecondMethod === 'PROMPTPAY_QR' &&
+          splitCashSatang > 0 &&
+          splitRemainingSatang > 0));
+
+    if (isAwaitingSlipQr) {
+      onScannerRoutingModeChange?.('SLIP_QR');
+    } else if (
+      checkoutModalOpen ||
+      Boolean(customizingVariant) ||
+      receiptModalOpen ||
+      Boolean(confirmAction) ||
+      Boolean(voidTargetOrder)
+    ) {
+      onScannerRoutingModeChange?.('BLOCKED');
+    } else {
+      onScannerRoutingModeChange?.('POS_CART');
     }
-  };
+
+    return () => {
+      onScannerRoutingModeChange?.('POS_CART');
+    };
+  }, [
+    cartSummary.totalSatang,
+    checkoutModalOpen,
+    confirmAction,
+    customizingVariant,
+    onScannerRoutingModeChange,
+    paymentTab,
+    processingCheckout,
+    receiptModalOpen,
+    slipVerificationModal?.valid,
+    splitCashSatang,
+    splitRemainingSatang,
+    splitSecondMethod,
+    voidTargetOrder,
+  ]);
+
+  useEffect(() => {
+    if (!onRegisterSlipScannerHandlers) return;
+    onRegisterSlipScannerHandlers(
+      (qrRaw: string) => {
+        slipPreBurstSnapshotRef.current = null;
+        setSlipMiniQrInput(qrRaw);
+        setSlipVerificationModal(null);
+        const overrideAmt = paymentTab === 'SPLIT' ? splitRemainingSatang : undefined;
+        void handleVerifySlipStep1(overrideAmt, qrRaw);
+      },
+      () => {
+        const snap = slipPreBurstSnapshotRef.current;
+        slipPreBurstSnapshotRef.current = null;
+        if (snap) {
+          restoreSlipInputSnapshotDom(snap);
+          setSlipMiniQrInput(snap.value);
+        } else {
+          setSlipMiniQrInput((prev) => prev.slice(0, -1));
+        }
+      },
+      () => {
+        const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
+        slipPreBurstSnapshotRef.current = captureSlipInputSnapshot(
+          activeEl,
+          slipMiniQrInputRef.current
+        );
+      }
+    );
+    return () => {
+      onRegisterSlipScannerHandlers(null, null, null);
+    };
+  }, [
+    handleVerifySlipStep1,
+    onRegisterSlipScannerHandlers,
+    paymentTab,
+    splitRemainingSatang,
+  ]);
 
   const executeFinalCheckout = async (
     method: 'CASH' | 'PROMPTPAY_QR' | 'CARD' | 'SPLIT',
     verifiedSlipRaw?: string,
     instantExactCash = false
   ) => {
-    if (processingCheckout || cart.length === 0) return;
+    if (checkoutInFlightRef.current || processingCheckout || cart.length === 0) return;
+    checkoutInFlightRef.current = true;
 
-    let tenderedSatang = cartSummary.totalSatang;
-    let splitPaymentsPayload: SplitPaymentLegInput[] | undefined;
-
-    if (method === 'CASH') {
-      if (!instantExactCash) {
-        try {
-          tenderedSatang = parseDecimalStringToScaledInt(cashTenderedBahtInput || '0', 2);
-        } catch {
-          onToast('จำนวนเงินสดที่รับมาไม่ถูกต้อง', 'error');
-          return;
-        }
-        if (tenderedSatang < cartSummary.totalSatang) {
-          onToast('จำนวนเงินสดที่รับมาน้อยกว่ายอดสุทธิที่ต้องชำระ', 'warn');
-          return;
-        }
-      }
-    } else if (method === 'SPLIT') {
-      if (splitCashSatang <= 0 || splitRemainingSatang <= 0) {
-        onToast('สำหรับการแยกจ่าย กรุณาระบุยอดเงินสดให้มากกว่า 0 และน้อยกว่ายอดสุทธิ', 'warn');
+    try {
+      if ((method === 'PROMPTPAY_QR' || method === 'SPLIT') && cartSummary.totalSatang <= 0) {
+        onToast('ยอดสุทธิเป็น ฿0.00 กรุณารับชำระผ่านช่องทางเงินสด ฿0.00', 'warn');
         return;
       }
-      splitPaymentsPayload = [
-        {
-          paymentMethod: 'CASH',
-          amountSatang: splitCashSatang,
-          cashTenderedSatang: splitCashSatang,
-        },
-        {
-          paymentMethod: splitSecondMethod,
-          amountSatang: splitRemainingSatang,
-          ...(splitSecondMethod === 'PROMPTPAY_QR'
-            ? { slipTransRefRaw: verifiedSlipRaw || slipMiniQrInput.trim() }
-            : {}),
-        },
-      ];
-    }
 
-    const cartSnapshotLines = cartSummary.lines.map((l) => ({
-      itemName: l.itemName,
-      qtyText: l.isWeightedScale
-        ? formatMilliUnitsToQtyString(l.quantityMilli, l.unitName)
-        : `${Math.round(l.quantityMilli / 1000)} ${l.unitName}`,
-      totalText: `฿${formatSatangToThbString(l.lineTotalSatang)}`,
-      ...(l.mods.length > 0 ? { modifiersText: l.mods.map((m) => m.name).join(', ') } : {}),
-    }));
-    const snapshotSubtotal = cartSummary.subtotalSatang;
-    const snapshotDiscount = cartSummary.discountSatang;
-    const snapshotNet = cartSummary.netBeforeTaxSatang;
-    const snapshotTax = cartSummary.taxSatang;
-    const snapshotQueueOrTable = queueOrTableLabel.trim();
+      let tenderedSatang = cartSummary.totalSatang;
+      let splitPaymentsPayload: SplitPaymentLegInput[] | undefined;
 
-    setProcessingCheckout(true);
-    try {
+      if (method === 'CASH') {
+        if (!instantExactCash) {
+          try {
+            tenderedSatang = parseDecimalStringToScaledInt(cashTenderedBahtInput || '0', 2);
+          } catch {
+            onToast('จำนวนเงินสดที่รับมาไม่ถูกต้อง', 'error');
+            return;
+          }
+          if (tenderedSatang < cartSummary.totalSatang) {
+            onToast('จำนวนเงินสดที่รับมาน้อยกว่ายอดสุทธิที่ต้องชำระ', 'warn');
+            return;
+          }
+        }
+      } else if (method === 'SPLIT') {
+        if (splitCashSatang <= 0 || splitRemainingSatang <= 0) {
+          onToast('สำหรับการแยกจ่าย กรุณาระบุยอดเงินสดให้มากกว่า 0 และน้อยกว่ายอดสุทธิ', 'warn');
+          return;
+        }
+        splitPaymentsPayload = [
+          {
+            paymentMethod: 'CASH',
+            amountSatang: splitCashSatang,
+            cashTenderedSatang: splitCashSatang,
+          },
+          {
+            paymentMethod: splitSecondMethod,
+            amountSatang: splitRemainingSatang,
+            ...(splitSecondMethod === 'PROMPTPAY_QR'
+              ? { slipTransRefRaw: verifiedSlipRaw || slipMiniQrInput.trim() }
+              : {}),
+          },
+        ];
+      }
+
+      const effectiveIdemSig = `${cartSignature}|${method}`;
+      if (cartCheckoutIdemSigRef.current !== effectiveIdemSig || !cartCheckoutIdemKeyRef.current) {
+        cartCheckoutIdemSigRef.current = effectiveIdemSig;
+        const randomPart =
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        cartCheckoutIdemKeyRef.current = `POS-IDEM-${randomPart}`;
+      }
+      const idempotencyKey = cartCheckoutIdemKeyRef.current;
+
+      const cartSnapshotLines = cartSummary.lines.map((l) => ({
+        itemName: l.itemName,
+        qtyText: l.isWeightedScale
+          ? formatMilliUnitsToQtyString(l.quantityMilli, l.unitName)
+          : `${Math.round(l.quantityMilli / 1000)} ${l.unitName}`,
+        totalText: `฿${formatSatangToThbString(l.lineTotalSatang)}`,
+        ...(l.mods.length > 0 ? { modifiersText: l.mods.map((m) => m.name).join(', ') } : {}),
+      }));
+      const snapshotSubtotal = cartSummary.subtotalSatang;
+      const snapshotDiscount = cartSummary.discountSatang;
+      const snapshotNet = cartSummary.netBeforeTaxSatang;
+      const snapshotTax = cartSummary.taxSatang;
+      const snapshotQueueOrTable = queueOrTableLabel.trim();
+
+      setProcessingCheckout(true);
       const res = await posTransport.checkoutOrder({
+        outletId,
         cashierId: currentUser.id,
+        idempotencyKey,
         orderType,
         ...(snapshotQueueOrTable ? { tableOrQueueNo: snapshotQueueOrTable } : {}),
         paymentMethod: method === 'SPLIT' ? 'CASH' : method,
@@ -840,6 +1465,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           quantityMilli: l.quantityMilli,
           unitPriceSatang: l.unitPriceSatang,
           selectedModifierIds: l.selectedModifierIds,
+          ...(l.overrideLineTotalSatang !== undefined
+            ? { overrideLineTotalSatang: l.overrideLineTotalSatang }
+            : {}),
         })),
       });
 
@@ -871,6 +1499,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           abbTaxInvoiceNo: res.order.abbTaxInvoiceNo,
           createdAtIso: res.order.createdAt,
           cashierName: currentUser.displayName,
+          taxMode,
           lines: cartSnapshotLines,
           subtotalSatang: snapshotSubtotal,
           discountSatang: snapshotDiscount,
@@ -883,8 +1512,16 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         rasterPreviewUrl = printed.raster.previewDataUrl;
         hardwareDispatched = printed.hwRes.hardwareOutcome.dispatchedToHardware;
         hardwareError = printed.hwRes.hardwareOutcome.errorMessage;
-      } catch {
-        // Canvas raster preview is best-effort; fallback to formatted text lines
+      } catch (printErr) {
+        onToast(
+          'ไม่สามารถส่งคำสั่งพิมพ์แบบ Canvas 203-DPI ได้ — ใช้ข้อมูลใบเสร็จสำรองแทน',
+          'warn'
+        );
+        hardwareDispatched = false;
+        hardwareError = printErr instanceof Error ? printErr.message : String(printErr);
+        if (shouldKickDrawer) {
+          await posTransport.kickCashDrawer().catch(() => {});
+        }
       }
 
       const receiptPreview: PrintedReceiptPreview = {
@@ -902,16 +1539,37 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         ...(hardwareError ? { hardwareError } : {}),
       };
       setLastPrintedReceipt(receiptPreview);
+      setLastCompletedSaleSummary({
+        receiptNumber: res.order.receiptNumber,
+        abbTaxInvoiceNo: res.order.abbTaxInvoiceNo,
+        totalSatang: res.order.totalSatang,
+        ...(method === 'CASH' ? { tenderedSatang } : {}),
+        changeGivenSatang: res.order.changeGivenSatang ?? 0,
+        paymentLabel:
+          method === 'SPLIT'
+            ? `แยกจ่าย (เงินสด + ${splitSecondMethod === 'PROMPTPAY_QR' ? 'Thai QR' : 'บัตร EDC'})`
+            : method === 'PROMPTPAY_QR'
+              ? 'Thai QR PromptPay'
+              : method === 'CARD'
+                ? 'บัตรเครดิต / EDC'
+                : 'เงินสด (Cash)',
+        spoolStatus: res.spoolResult.status,
+      });
+
+      cartCheckoutIdemKeyRef.current = null;
+      cartCheckoutIdemSigRef.current = '';
       setCart([]);
       setQueueOrTableLabel('');
       setDiscountInput('0');
       setCheckoutModalOpen(false);
       setSlipVerificationModal(null);
-      setSlipMiniQrInput(
-        `0041000600000101030040220KBANK${Date.now().toString().slice(-12)}5102TH9104ABCD`
-      );
+      setSlipMiniQrInput('');
       await onRefreshState();
-      setReceiptModalOpen(true);
+
+      // Only open blocking modal automatically when OS print dialog mode explicitly requires user action
+      if (bootstrap.printerConfig?.mode === 'BROWSER_PRINT_DIALOG') {
+        setReceiptModalOpen(true);
+      }
 
       const changeText =
         res.order.changeGivenSatang && res.order.changeGivenSatang > 0
@@ -924,6 +1582,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
+      checkoutInFlightRef.current = false;
       setProcessingCheckout(false);
     }
   };
@@ -932,21 +1591,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     void executeFinalCheckout('CASH', undefined, true);
   };
 
-  const handleVoidOrder = async (salesOrderId: string, receiptNo: string) => {
-    try {
-      const res = await posTransport.voidOrder({
-        salesOrderId,
-        voidedByUserId: currentUser.id,
-        voidReason: `Voided by ${currentUser.displayName}`,
-      });
-      await onRefreshState();
-      onToast(
-        `ยกเลิกบิล ${receiptNo} และคืนสต็อกต้นทุนเดิม (${res.reversedLedgerEntries.length} รายการ) สำเร็จ`,
-        'warn'
-      );
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err), 'error');
-    }
+  const handleAuthorizedVoidOrder = async (params: {
+    salesOrderId: string;
+    receiptNumber: string;
+    voidedByUserId: string;
+    voidReason: string;
+    overrideToken?: string | undefined;
+  }) => {
+    const res = await posTransport.voidOrder({
+      salesOrderId: params.salesOrderId,
+      voidedByUserId: params.voidedByUserId,
+      voidReason: params.voidReason,
+      ...(params.overrideToken ? { overrideToken: params.overrideToken } : {}),
+    });
+    await onRefreshState();
+    onToast(
+      `ยกเลิกบิล ${params.receiptNumber} และคืนสต็อกต้นทุนเดิม (${res.reversedLedgerEntries.length} รายการ) สำเร็จ`,
+      'warn'
+    );
   };
 
   const handleReprintOrder = async (
@@ -956,7 +1618,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     overridePaperWidthMm?: 80 | 58
   ) => {
     try {
-      const res = await posTransport.reprintOrder(salesOrderId);
+      const res = await posTransport.reprintOrder(salesOrderId, outletId);
       const matched = bootstrap.recentOrders.find((o) => o.salesOrderId === salesOrderId);
       const targetWidth = overridePaperWidthMm ?? printPaperWidthMm;
 
@@ -978,6 +1640,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             abbTaxInvoiceNo: matched.abbTaxInvoiceNo ?? '-',
             createdAtIso: matched.createdAt,
             cashierName: matched.cashierName,
+            taxMode: matched.taxMode,
             lines: matched.lines.map((l) => ({
               itemName: l.itemName,
               qtyText: formatMilliUnitsToQtyString(l.quantityMilli, l.unitName),
@@ -1021,6 +1684,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   };
 
   const handleCashNumpadPress = (key: string) => {
+    if (key === 'EXACT') {
+      setCashTenderedBahtInput(formatSatangToThbString(cartSummary.totalSatang).replace(/,/g, ''));
+      setCashNumpadPristine(false);
+      return;
+    }
     if (key === 'CLEAR') {
       setCashTenderedBahtInput('0');
       setCashNumpadPristine(false);
@@ -1032,15 +1700,41 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       return;
     }
     if (cashNumpadPristine) {
-      setCashTenderedBahtInput(key === '.' ? '0.' : key);
+      setCashTenderedBahtInput(key === '.' ? '0.' : key === '00' ? '0' : key);
       setCashNumpadPristine(false);
       return;
     }
     setCashTenderedBahtInput((prev) => {
       if (key === '.' && prev.includes('.')) return prev;
-      return prev === '0' && key !== '.' ? key : prev + key;
+      if (prev.includes('.')) {
+        const [, decimals = ''] = prev.split('.');
+        if (decimals.length >= 2) return prev;
+        if (key === '00') {
+          return decimals.length === 1 ? `${prev}0` : prev;
+        }
+      }
+      if (prev === '0' && key !== '.') {
+        return key === '00' ? '0' : key;
+      }
+      return prev + key;
     });
   };
+
+  const filteredOrderHistory = useMemo(() => {
+    const q = orderHistoryQuery.trim().toLowerCase();
+    return bootstrap.recentOrders.filter((ord) => {
+      if (orderStatusFilter !== 'ALL' && ord.status !== orderStatusFilter) {
+        return false;
+      }
+      if (!q) return true;
+      if (ord.receiptNumber.toLowerCase().includes(q)) return true;
+      if ((ord.abbTaxInvoiceNo ?? '').toLowerCase().includes(q)) return true;
+      if ((ord.tableOrQueueNo ?? '').toLowerCase().includes(q)) return true;
+      if (ord.cashierName.toLowerCase().includes(q)) return true;
+      if ((ord.slipTransRefLast4 ?? '').toLowerCase().includes(q)) return true;
+      return ord.lines.some((l) => l.itemName.toLowerCase().includes(q));
+    });
+  }, [bootstrap.recentOrders, orderHistoryQuery, orderStatusFilter]);
 
   const cashTenderedSatangPreview = useMemo(() => {
     try {
@@ -1061,23 +1755,21 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-4">
             {/* Canonical Google Nav-Link Tabs (4px #1a73e8 bottom-rule indicator, 48px height, zero fill) */}
             <div className="flex items-center gap-1 overflow-x-auto" role="tablist" aria-label="มุมมองหน้าขาย POS">
-              {bootstrap.profile !== 'RETAIL' && (
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={posSubView === 'STUDIO_CARDS'}
-                  onClick={() => setPosSubView('STUDIO_CARDS')}
-                  className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
-                    posSubView === 'STUDIO_CARDS' ? 'text-ink' : 'text-ink-muted hover:text-ink'
-                  }`}
-                >
-                  <LayoutGrid className="h-4 w-4" />
-                  <span>การ์ดสินค้า</span>
-                  {posSubView === 'STUDIO_CARDS' && (
-                    <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
-                  )}
-                </button>
-              )}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={posSubView === 'STUDIO_CARDS'}
+                onClick={() => setPosSubView('STUDIO_CARDS')}
+                className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                  posSubView === 'STUDIO_CARDS' ? 'text-ink' : 'text-ink-muted hover:text-ink'
+                }`}
+              >
+                <LayoutGrid className="h-4 w-4" />
+                <span>{bootstrap.profile === 'RETAIL' ? 'การ์ดรูปสินค้า' : 'การ์ดเมนู'}</span>
+                {posSubView === 'STUDIO_CARDS' && (
+                  <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
+                )}
+              </button>
 
               {bootstrap.profile !== 'HOSPITALITY' && (
                 <button
@@ -1186,15 +1878,15 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   }
                 }}
                 placeholder="ยิงบาร์โค้ด หรือพิมพ์ชื่อสินค้า / SKU... (กด F2)"
-                className={`h-[50px] w-full rounded-[48px] border border-hairline bg-canvas pl-12 pr-28 sm:pr-44 text-[15px] sm:text-[16px] text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
+                className={`h-[50px] w-full rounded-[48px] border border-hairline bg-canvas pl-12 pr-32 sm:pr-48 text-[15px] sm:text-[16px] text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
-              <div className="absolute right-3 flex items-center gap-1.5 sm:gap-2">
+              <div className="absolute right-2 flex items-center gap-1.5 sm:gap-2">
                 {searchQuery && (
                   <button
                     type="button"
                     aria-label="ล้างคำค้นหา"
                     onClick={() => setSearchQuery('')}
-                    className={`flex h-8 w-8 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
+                    className={`flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
                   >
                     <X className="h-4 w-4" />
                   </button>
@@ -1223,7 +1915,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               >
                 รายการขายทั้งหมด
               </button>
-              {bootstrap.categories.map((cat) => {
+              {visibleCategories.map((cat) => {
                 const active = selectedCategoryId === cat.id;
                 return (
                   <button
@@ -1278,8 +1970,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6">
               {sellableCatalog.map((item) => {
+                const outOfStock = !item.isComposite && item.inStockMilli <= 0;
                 const lowStock =
-                  !item.isComposite && item.inStockMilli <= item.lowStockThresholdMilli;
+                  !item.isComposite &&
+                  item.inStockMilli > 0 &&
+                  item.inStockMilli <= item.lowStockThresholdMilli;
                 const inCartQty = inCartQtyByVariant.get(item.id) ?? 0;
 
                 return (
@@ -1299,12 +1994,18 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         <h3 className="font-google-display text-[20px] font-normal leading-[28px] tracking-normal text-ink line-clamp-2">
                           {item.itemName}
                         </h3>
-                        <p className="mt-1 text-[14px] leading-[20px] text-ink-muted">
+                        <p
+                          className={`mt-1 text-[14px] leading-[20px] ${
+                            outOfStock ? 'font-medium text-ink' : 'text-ink-muted'
+                          }`}
+                        >
                           {item.isComposite && !item.useProduction
                             ? 'ตัดวัตถุดิบสดตามสูตร Multi-Level BOM'
-                            : lowStock
-                              ? `สต็อกใกล้หมด · เหลือ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`
-                              : `คงเหลือ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`}
+                            : outOfStock
+                              ? `สินค้าหมดสต็อก (0 ${item.unitName})`
+                              : lowStock
+                                ? `สต็อกใกล้หมด · เหลือ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`
+                                : `คงเหลือ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`}
                         </p>
                       </div>
                     </div>
@@ -1341,21 +2042,21 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 <span>คลิกแถวสินค้าเพื่อเพิ่มลงบิลทันที (×{scanMultiplier}) หรือยิงปืนบาร์โค้ดต่อเนื่อง</span>
               </div>
 
-              {bootstrap.featureFlags.enableScaleBarcodeParser && (
+              {simulationModeEnabled && bootstrap.featureFlags.enableScaleBarcodeParser && (
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => onScanBarcodeString('2010045012505', 1)}
                     className={`min-h-[38px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                   >
-                    + สแกนตราชั่ง 1.250 กก. (Prefix 20)
+                    + จำลองตราชั่ง 1.250 กก. (Prefix 20)
                   </button>
                   <button
                     type="button"
                     onClick={() => onScanBarcodeString('2510045225009', 1)}
                     className={`min-h-[38px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                   >
-                    + สแกนป้ายฝังราคา ฿225 (Prefix 25)
+                    + จำลองป้ายฝังราคา ฿225 (Prefix 25)
                   </button>
                 </div>
               )}
@@ -1385,6 +2086,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   ) : (
                     sellableCatalog.map((item) => {
                       const inCartQty = inCartQtyByVariant.get(item.id) ?? 0;
+                      const outOfStock = !item.isComposite && item.inStockMilli <= 0;
+                      const lowStock =
+                        !item.isComposite &&
+                        item.inStockMilli > 0 &&
+                        item.inStockMilli <= item.lowStockThresholdMilli;
                       return (
                         <tr
                           key={item.id}
@@ -1396,19 +2102,41 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             <div className="text-xs text-ink-muted">{item.sku}</div>
                           </td>
                           <td className="py-3.5 px-5">
-                            <div className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
-                              <span>{item.itemName}</span>
-                              {inCartQty > 0 && (
-                                <span className="rounded-[48px] bg-primary px-2.5 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
-                                  ×{item.isWeightedScale ? formatMilliUnitsToQtyString(inCartQty) : Math.round(inCartQty / 1000)}
-                                </span>
+                            <div className="flex items-center gap-3">
+                              {resolveBackendAssetUrl(item.imageUrl) && (
+                                <img
+                                  src={resolveBackendAssetUrl(item.imageUrl)!}
+                                  alt={item.itemName}
+                                  loading="lazy"
+                                  className={`h-10 w-10 rounded-[4px] border border-hairline object-cover shrink-0 ${outOfStock ? 'opacity-55 grayscale' : ''}`}
+                                />
                               )}
-                            </div>
-                            {item.isWeightedScale && (
-                              <div className="text-xs text-ink-muted flex items-center gap-1 mt-0.5">
-                                <Scale className="h-3 w-3 text-primary" /> รองรับบาร์โค้ดชั่งน้ำหนักสด EAN-13
+                              <div className="min-w-0">
+                                <div className="font-google-display text-[16px] font-medium text-ink flex flex-wrap items-center gap-2">
+                                  <span>{item.itemName}</span>
+                                  {outOfStock && (
+                                    <span className="rounded-[4px] bg-ink px-2 py-0.5 text-[11px] font-medium text-white">
+                                      สินค้าหมด
+                                    </span>
+                                  )}
+                                  {!outOfStock && lowStock && (
+                                    <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-[11px] font-medium text-ink">
+                                      ใกล้หมด
+                                    </span>
+                                  )}
+                                  {inCartQty > 0 && (
+                                    <span className="rounded-[48px] bg-primary px-2.5 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
+                                      ×{item.isWeightedScale ? formatMilliUnitsToQtyString(inCartQty) : Math.round(inCartQty / 1000)}
+                                    </span>
+                                  )}
+                                </div>
+                                {item.isWeightedScale && (
+                                  <div className="text-xs text-ink-muted flex items-center gap-1 mt-0.5">
+                                    <Scale className="h-3 w-3 text-primary" /> รองรับบาร์โค้ดชั่งน้ำหนักสด EAN-13
+                                  </div>
+                                )}
                               </div>
-                            )}
+                            </div>
                           </td>
                           <td className="py-3.5 px-5 text-xs text-ink-muted">{item.categoryName}</td>
                           <td className="py-3.5 px-5 text-right text-sm text-ink-soft tabular-nums-google">
@@ -1427,7 +2155,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                 e.stopPropagation();
                                 handleProductSelect(item);
                               }}
-                              className={`inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-canvas text-primary hover:border-primary hover:bg-primary hover:text-white ${UI_INTERACTION.focusButton}`}
+                              className={`inline-flex h-11 w-11 items-center justify-center rounded-full border border-hairline bg-canvas text-primary hover:border-primary hover:bg-primary hover:text-white ${UI_INTERACTION.focusButton}`}
                             >
                               <Plus className="h-4 w-4" />
                             </button>
@@ -1447,15 +2175,23 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         {/* ================================================================== */}
         {posSubView === 'HELD_BILLS' && (
           <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
-            <div className="border-b border-hairline bg-surface-1 px-6 py-4 flex items-center justify-between">
+            <div className="border-b border-hairline bg-surface-1 px-6 py-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 className="font-google-display text-[20px] font-normal text-ink">
-                  รายการบิลที่พักไว้ชั่วคราว (Held Bills)
+                  รายการบิลที่พักไว้บนเซิร์ฟเวอร์ (Synced Held Bills · {outletId})
                 </h3>
                 <p className="text-sm text-ink-muted">
-                  พักบิลลูกค้าที่รอเพื่อนหรือหยิบของเพิ่มโดยไม่ขวางคิวหน้าเคาน์เตอร์ (ปุ่มลัด F8)
+                  ซิงค์ลงฐานข้อมูลหลักอัตโนมัติ — พักบิลที่เครื่องจุดขาย 1 แล้วเรียกคิดเงินที่เครื่องจุดขาย 2 ได้ทันที (ปุ่มลัด F8)
                 </p>
               </div>
+              <button
+                type="button"
+                onClick={() => void refreshServerHeldBills()}
+                className={`inline-flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${syncingHeldBills ? 'animate-spin' : ''}`} />
+                <span>รีเฟรชบิลพักข้ามเครื่อง</span>
+              </button>
             </div>
 
             {heldBills.length === 0 ? (
@@ -1510,8 +2246,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             description: `บิลนี้มีสินค้า ${h.cart.length} รายการ (฿${formatSatangToThbString(h.totalSatang)}) หากลบแล้วจะไม่สามารถกู้คืนได้`,
                             confirmLabel: 'ยืนยันลบบิลที่พัก',
                             tone: 'danger',
-                            onConfirm: () => {
-                              setHeldBills((prev) => prev.filter((item) => item.id !== h.id));
+                            onConfirm: async () => {
+                              const removed = await posTransport.deleteHeldBill({
+                                outletId,
+                                actorUserId: currentUser.id,
+                                id: h.id,
+                              });
+                              setHeldBills(removed.heldBills);
+                              void onRefreshState();
                               onToast(`ลบบิลที่พัก "${h.referenceLabel}" แล้ว`, 'warn');
                             },
                           })
@@ -1522,7 +2264,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleRecallHeldBill(h)}
+                        onClick={() => void handleRecallHeldBill(h)}
                         className={`flex h-[46px] items-center gap-2 rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                       >
                         <PlayCircle className="h-4 w-4" />
@@ -1541,14 +2283,72 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         {/* ================================================================== */}
         {posSubView === 'ORDER_HISTORY' && (
           <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
-            <div className="border-b border-hairline bg-surface-1 px-6 py-4 flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="font-google-display text-[20px] font-normal text-ink">
-                  ประวัติใบเสร็จรับเงิน &amp; ใบกำกับภาษีอย่างย่อ (ABB)
-                </h3>
-                <p className="text-sm text-ink-muted">
-                  รองรับการพิมพ์ใบเสร็จซ้ำ และการยกเลิกบิล (Void) โดยคืนสต็อกตามต้นทุนจริง ณ เวลาขาย
-                </p>
+            <div className="border-b border-hairline bg-surface-1 px-6 py-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="font-google-display text-[20px] font-normal text-ink">
+                    ประวัติใบเสร็จรับเงิน &amp; ใบกำกับภาษีอย่างย่อ (ABB)
+                  </h3>
+                  <p className="text-sm text-ink-muted">
+                    ค้นหาเลขใบเสร็จ / เลขใบกำกับภาษี ABB / ป้ายโต๊ะ / ชื่อเมนู พร้อมพิมพ์ซ้ำหรือยกเลิกบิลคืนสต็อกต้นทุนเดิม
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="relative flex-1 min-w-[220px]">
+                  <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-muted" />
+                  <input
+                    type="text"
+                    aria-label="ค้นหาใบเสร็จย้อนหลัง"
+                    value={orderHistoryQuery}
+                    onChange={(e) => setOrderHistoryQuery(e.target.value)}
+                    placeholder="ค้นหาเลขใบเสร็จ, เลข ABB, ป้ายโต๊ะ/คิว, ชื่อเมนู หรือ Ref สลิป..."
+                    className={`h-10 w-full rounded-[48px] border border-hairline bg-canvas pl-10 pr-9 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
+                  />
+                  {orderHistoryQuery && (
+                    <button
+                      type="button"
+                      aria-label="ล้างคำค้นหาใบเสร็จ"
+                      onClick={() => setOrderHistoryQuery('')}
+                      className={`absolute right-2 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(
+                    [
+                      { id: 'ALL', label: `ทั้งหมด (${bootstrap.recentOrders.length})` },
+                      {
+                        id: 'COMPLETED',
+                        label: `สำเร็จ (${bootstrap.recentOrders.filter((o) => o.status === 'COMPLETED').length})`,
+                      },
+                      {
+                        id: 'VOIDED',
+                        label: `ยกเลิก (${bootstrap.recentOrders.filter((o) => o.status === 'VOIDED').length})`,
+                      },
+                    ] as const
+                  ).map((f) => {
+                    const active = orderStatusFilter === f.id;
+                    return (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => setOrderStatusFilter(f.id)}
+                        className={`min-h-[36px] rounded-[48px] border px-3.5 font-google-display text-xs font-medium ${UI_INTERACTION.focusButton} ${
+                          active
+                            ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                            : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
+                        }`}
+                      >
+                        {f.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
 
@@ -1565,20 +2365,22 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-hairline">
-                  {bootstrap.recentOrders.length === 0 ? (
+                  {filteredOrderHistory.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="py-14 text-center text-ink-muted">
-                        ยังไม่มีรายการขายในกะนี้
+                        {orderHistoryQuery.trim() || orderStatusFilter !== 'ALL'
+                          ? 'ไม่พบใบเสร็จที่ตรงกับเงื่อนไขการค้นหา'
+                          : 'ยังไม่มีรายการขายในกะนี้'}
                       </td>
                     </tr>
                   ) : (
-                    bootstrap.recentOrders.map((ord) => (
+                    filteredOrderHistory.map((ord) => (
                       <tr key={ord.salesOrderId} className="hover:bg-surface-1 transition-colors duration-150">
                         <td className="py-3.5 px-5 tabular-nums-google">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <span className="font-medium text-ink">{ord.receiptNumber}</span>
                             {ord.tableOrQueueNo && (
-                              <span className="rounded-[48px] bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary-dark">
+                              <span className="rounded-[48px] border border-hairline bg-surface-1 px-2 py-0.5 text-[11px] font-medium text-ink">
                                 {ord.tableOrQueueNo}
                               </span>
                             )}
@@ -1659,12 +2461,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             <button
                               type="button"
                               onClick={() =>
-                                setConfirmAction({
-                                  title: `ยืนยันยกเลิกบิล ${ord.receiptNumber}?`,
-                                  description: `การยกเลิกบิล (Void) ยอด ฿${formatSatangToThbString(ord.totalSatang)} จะคืนสต็อกตามต้นทุนเดิม ณ เวลาขาย และบันทึกลงสมุดบัญชีห้ามลบ`,
-                                  confirmLabel: 'ยืนยันยกเลิกบิล (Void)',
-                                  tone: 'danger',
-                                  onConfirm: () => handleVoidOrder(ord.salesOrderId, ord.receiptNumber),
+                                setVoidTargetOrder({
+                                  salesOrderId: ord.salesOrderId,
+                                  receiptNumber: ord.receiptNumber,
+                                  abbTaxInvoiceNo: ord.abbTaxInvoiceNo,
+                                  totalSatang: ord.totalSatang,
                                 })
                               }
                               className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
@@ -1710,7 +2511,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               ฿{formatSatangToThbString(cartSummary.totalSatang)}
             </div>
 
-            {/* Order Context Controls on Hero Band */}
+            {/* Order Context Controls on Hero Band (Strictly Scoped to Active Shop Profile) */}
             <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <select
                 aria-label="รูปแบบออเดอร์"
@@ -1718,30 +2519,71 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 onChange={(e) => setOrderType(e.target.value as CheckoutOrderRequest['orderType'])}
                 className="h-10 rounded-[4px] border border-white/25 bg-white/10 px-3 text-xs font-medium text-white transition-colors duration-200 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary cursor-pointer"
               >
-                <option value="TAKEAWAY" className="bg-canvas text-ink">
-                  สั่งกลับบ้าน (Takeaway)
-                </option>
-                <option value="DINE_IN" className="bg-canvas text-ink">
-                  ทานที่ร้าน (Dine-In)
-                </option>
-                <option value="RETAIL" className="bg-canvas text-ink">
-                  ขายปลีกหน้าร้าน (Retail)
-                </option>
-                <option value="DELIVERY" className="bg-canvas text-ink">
-                  เดลิเวอรี (Delivery)
-                </option>
+                {allowedOrderTypes.map((opt) => (
+                  <option key={opt.value} value={opt.value} className="bg-canvas text-ink">
+                    {opt.label}
+                  </option>
+                ))}
               </select>
 
               <input
                 type="text"
-                aria-label="หมายเลขโต๊ะหรือป้ายคิว"
+                aria-label={orderRefMeta.ariaLabel}
                 value={queueOrTableLabel}
                 onChange={(e) => setQueueOrTableLabel(e.target.value)}
-                placeholder="ป้ายคิว / โต๊ะ (เช่น A-04)"
+                placeholder={orderRefMeta.placeholder}
                 className="h-10 rounded-[4px] border border-white/25 bg-white/10 px-3 text-xs text-white placeholder:text-white/65 transition-colors duration-200 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary"
               />
             </div>
           </div>
+
+          {/* 1.5 NON-BLOCKING POST-CHECKOUT CHANGE BANNER (auto-clears on next scan) */}
+          {cartSummary.lines.length === 0 && lastCompletedSaleSummary && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="border-b border-primary bg-surface-1 px-5 py-4 space-y-2.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-primary-dark">
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  <span>ปิดบิลสำเร็จ · {lastCompletedSaleSummary.abbTaxInvoiceNo}</span>
+                </span>
+                <button
+                  type="button"
+                  aria-label="ปิดแถบสรุปเงินทอน"
+                  onClick={() => setLastCompletedSaleSummary(null)}
+                  className={`flex h-10 w-10 items-center justify-center rounded-full text-ink-muted hover:bg-canvas hover:text-ink ${UI_INTERACTION.focusButton}`}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {lastCompletedSaleSummary.changeGivenSatang > 0 ? (
+                <div className="rounded-[4px] border border-primary/30 bg-canvas px-4 py-3 flex items-baseline justify-between gap-2">
+                  <span className="text-xs font-medium text-ink-soft">เงินทอนลูกค้า</span>
+                  <span className="font-google-display text-[32px] font-normal leading-none tracking-[-0.5px] text-primary-dark tabular-nums-google">
+                    ฿{formatSatangToThbString(lastCompletedSaleSummary.changeGivenSatang)}
+                  </span>
+                </div>
+              ) : (
+                <div className="text-xs text-ink-soft tabular-nums-google">
+                  รับชำระครบถ้วน ฿{formatSatangToThbString(lastCompletedSaleSummary.totalSatang)} ({lastCompletedSaleSummary.paymentLabel}) · ไม่ต้องทอนเงิน
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-[11px] text-ink-muted">
+                <span>ยิงบาร์โค้ดหรือแตะสินค้าชิ้นถัดไปเพื่อเริ่มบิลใหม่ทันที</span>
+                <button
+                  type="button"
+                  onClick={() => setReceiptModalOpen(true)}
+                  className={`inline-flex items-center gap-1 rounded-[48px] border border-primary bg-canvas px-3 py-1 text-xs font-medium text-primary-dark hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+                >
+                  <Printer className="h-3 w-3" /> ดูใบเสร็จ / พิมพ์ซ้ำ
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* 2. CART LINE ITEMS ON PURE WHITE CANVAS */}
           <div className="divide-y divide-hairline max-h-[360px] min-h-[220px] overflow-y-auto bg-canvas">
@@ -1781,8 +2623,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           {line.itemName}
                         </button>
 
-                        {line.mods.length > 0 && (
-                          <div className="mt-1 flex flex-wrap gap-1.5">
+                        {(line.mods.length > 0 ||
+                          (bootstrap.featureFlags.enableRoleBasedModifiers &&
+                            bootstrap.modifierGroups.length > 0 &&
+                            bootstrap.catalogDetailed.find((v) => v.id === line.variantId)
+                              ?.isComposite)) && (
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
                             {line.mods.map((m) => (
                               <span
                                 key={m.id}
@@ -1794,6 +2640,19 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                   : ''}
                               </span>
                             ))}
+                            {bootstrap.featureFlags.enableRoleBasedModifiers &&
+                              bootstrap.modifierGroups.length > 0 &&
+                              bootstrap.catalogDetailed.find((v) => v.id === line.variantId)
+                                ?.isComposite && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenCartLineModifierEditor(line)}
+                                  className={`inline-flex items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-2.5 py-0.5 text-[11px] font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+                                >
+                                  <SlidersHorizontal className="h-3 w-3" />
+                                  <span>แก้ตัวเลือก</span>
+                                </button>
+                              )}
                           </div>
                         )}
 
@@ -1824,13 +2683,13 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                               prev
                                 .map((c) =>
                                   c.cartKey === line.cartKey
-                                    ? { ...c, quantityMilli: c.quantityMilli - step }
+                                    ? withManualCartLineQty(c, c.quantityMilli - step)
                                     : c
                                 )
                                 .filter((c) => c.quantityMilli > 0)
                             );
                           }}
-                          className={`flex h-[40px] w-[40px] items-center justify-center rounded-full border border-hairline bg-canvas text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+                          className={`flex h-11 w-11 items-center justify-center rounded-full border border-hairline bg-canvas text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                         >
                           <Minus className="h-4 w-4" />
                         </button>
@@ -1852,7 +2711,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                   setCart((prev) =>
                                     prev.map((c) =>
                                       c.cartKey === line.cartKey
-                                        ? { ...c, quantityMilli: parsedMilli }
+                                        ? withManualCartLineQty(c, parsedMilli)
                                         : c
                                     )
                                   );
@@ -1870,12 +2729,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                               autoFocus
                               value={editingQtyInput}
                               onChange={(e) => setEditingQtyInput(e.target.value)}
-                              className={`h-9 w-20 rounded-[4px] border border-primary bg-canvas px-2 text-center text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                              className={`h-11 w-20 rounded-[4px] border border-primary bg-canvas px-2 text-center text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                             />
                             <button
                               type="submit"
                               aria-label={`ยืนยันจำนวน ${line.itemName}`}
-                              className={`flex h-9 w-9 items-center justify-center rounded-full bg-primary text-white hover:bg-primary-hover ${UI_INTERACTION.focusButton}`}
+                              className={`flex h-11 w-11 items-center justify-center rounded-full bg-primary text-white hover:bg-primary-hover ${UI_INTERACTION.focusButton}`}
                             >
                               <Check className="h-4 w-4" />
                             </button>
@@ -1892,7 +2751,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                   : String(Math.round(line.quantityMilli / 1000))
                               );
                             }}
-                            className={`min-w-[78px] rounded-[4px] border border-transparent px-2 py-1 text-center font-google-display text-sm font-medium text-ink hover:border-hairline tabular-nums-google ${UI_INTERACTION.focusButton}`}
+                            className={`min-h-[44px] min-w-[78px] rounded-[4px] border border-transparent px-2 py-1 text-center font-google-display text-sm font-medium text-ink hover:border-hairline tabular-nums-google ${UI_INTERACTION.focusButton}`}
                           >
                             {line.isWeightedScale
                               ? formatMilliUnitsToQtyString(line.quantityMilli, line.unitName)
@@ -1908,12 +2767,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             setCart((prev) =>
                               prev.map((c) =>
                                 c.cartKey === line.cartKey
-                                  ? { ...c, quantityMilli: c.quantityMilli + step }
+                                  ? withManualCartLineQty(c, c.quantityMilli + step)
                                   : c
                               )
                             );
                           }}
-                          className={`flex h-[40px] w-[40px] items-center justify-center rounded-full border border-hairline bg-canvas text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+                          className={`flex h-11 w-11 items-center justify-center rounded-full border border-hairline bg-canvas text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                         >
                           <Plus className="h-4 w-4" />
                         </button>
@@ -1925,7 +2784,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         onClick={() =>
                           setCart((prev) => prev.filter((c) => c.cartKey !== line.cartKey))
                         }
-                        className={`flex h-[40px] w-[40px] items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
+                        className={`flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -1961,7 +2820,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       type="button"
                       aria-label="ส่วนลดเป็นบาท"
                       onClick={() => setDiscountMode('BAHT')}
-                      className={`rounded-[48px] px-2.5 py-0.5 text-xs font-medium ${UI_INTERACTION.focusButton} ${
+                      className={`min-h-[38px] min-w-[44px] rounded-[48px] px-3 text-xs font-medium ${UI_INTERACTION.focusButton} ${
                         discountMode === 'BAHT'
                           ? 'bg-primary text-white hover:bg-primary-hover'
                           : 'text-ink-muted hover:text-ink'
@@ -1973,7 +2832,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       type="button"
                       aria-label="ส่วนลดเป็นเปอร์เซ็นต์"
                       onClick={() => setDiscountMode('PERCENT')}
-                      className={`rounded-[48px] px-2.5 py-0.5 text-xs font-medium ${UI_INTERACTION.focusButton} ${
+                      className={`min-h-[38px] min-w-[44px] rounded-[48px] px-3 text-xs font-medium ${UI_INTERACTION.focusButton} ${
                         discountMode === 'PERCENT'
                           ? 'bg-primary text-white hover:bg-primary-hover'
                           : 'text-ink-muted hover:text-ink'
@@ -1989,7 +2848,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     aria-label="ส่วนลดท้ายบิล"
                     value={discountInput}
                     onChange={(e) => setDiscountInput(e.target.value)}
-                    className={`h-8 w-20 rounded-[4px] border border-hairline bg-canvas px-2.5 text-right text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                    className={`h-[44px] w-24 rounded-[4px] border border-hairline bg-canvas px-2.5 text-right text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                   />
                 </div>
               </div>
@@ -2032,7 +2891,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   type="button"
                   disabled={cart.length === 0 || processingCheckout}
                   onClick={() => void executeFinalCheckout('CASH', undefined, true)}
-                  className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-primary bg-primary-soft/60 px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary-dark hover:bg-primary-soft ${UI_INTERACTION.focusButton}`}
+                  className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-primary bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
                   <Banknote className="h-4 w-4 shrink-0" />
                   <span>รับเงินสดด่วน (F12)</span>
@@ -2040,7 +2899,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
                 <button
                   type="button"
-                  disabled={cart.length === 0 || processingCheckout}
+                  disabled={cart.length === 0 || processingCheckout || cartSummary.totalSatang <= 0}
                   onClick={() => void openCheckoutModal('SPLIT')}
                   className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                 >
@@ -2052,9 +2911,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <button
                   type="button"
-                  disabled={cart.length === 0}
+                  disabled={cart.length === 0 || processingCheckout || cartSummary.totalSatang <= 0}
                   onClick={() => void openCheckoutModal('PROMPTPAY_QR')}
-                  className={`flex h-[42px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+                  className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
                   <QrCode className="h-4 w-4 shrink-0" />
                   <span>Thai QR</span>
@@ -2062,8 +2921,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
                 <button
                   type="button"
-                  onClick={handleHoldCurrentBill}
-                  className={`flex h-[42px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+                  onClick={() => void handleHoldCurrentBill()}
+                  className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
                   <PauseCircle className="h-4 w-4 shrink-0" />
                   <span>พักบิล {heldBills.length > 0 ? `(${heldBills.length})` : '(F8)'}</span>
@@ -2085,12 +2944,17 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       },
                     })
                   }
-                  className={`flex h-[42px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
+                  className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
                   <Trash2 className="h-4 w-4 shrink-0" />
                   <span>ล้างบิล</span>
                 </button>
               </div>
+              {cart.length > 0 && cartSummary.totalSatang <= 0 && (
+                <p className="rounded-[4px] border border-hairline bg-surface-1 px-3 py-2 text-xs text-ink-soft">
+                  ยอดชำระสุทธิเป็น ฿0.00 (ส่วนลดเต็มจำนวน) — ปิดการขายด้วยปุ่มเงินสด ฿0.00 เท่านั้น (ไม่รองรับ Thai QR หรือแยกจ่าย)
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -2101,7 +2965,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       {/* ==================================================================== */}
       <ModalDialog
         open={Boolean(customizingVariant)}
-        onClose={() => setCustomizingVariant(null)}
+        onClose={() => {
+          setCustomizingVariant(null);
+          setEditingModifierCartKey(null);
+        }}
         labelledBy={`${uid}-modifier-title`}
         maxWidthClass="max-w-lg"
       >
@@ -2110,7 +2977,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             <div className="flex items-center justify-between border-b border-hairline px-6 py-4 shrink-0">
               <div>
                 <h3 id={`${uid}-modifier-title`} className="font-google-display text-[22px] font-normal text-ink">
-                  {customizingVariant.itemName}
+                  {editingModifierCartKey
+                    ? `แก้ไขตัวเลือก: ${customizingVariant.itemName}`
+                    : customizingVariant.itemName}
                 </h3>
                 <p className="text-xs text-ink-muted flex items-center gap-1.5 mt-0.5">
                   <Sparkles className="h-3.5 w-3.5 text-primary" />
@@ -2120,7 +2989,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <button
                 type="button"
                 aria-label="ปิดหน้าต่างตัวเลือกเสริม"
-                onClick={() => setCustomizingVariant(null)}
+                onClick={() => {
+                  setCustomizingVariant(null);
+                  setEditingModifierCartKey(null);
+                }}
                 className={`flex h-10 w-10 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
               >
                 <X className="h-5 w-5" />
@@ -2162,7 +3034,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           }}
                           className={`min-h-[68px] rounded-[4px] border p-3.5 text-left ${UI_INTERACTION.focusButton} ${
                             active
-                              ? 'border-primary bg-primary-soft/60 text-ink'
+                              ? 'border-primary bg-surface-1 text-ink'
                               : 'border-hairline bg-canvas text-ink-soft hover:border-primary'
                           }`}
                         >
@@ -2192,7 +3064,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     type="button"
                     aria-label="ลดจำนวน"
                     onClick={() =>
-                      setDraftQtyInput((prev) => String(Math.max(1, Number(prev || '1') - 1)))
+                      setDraftQtyInput((prev) => {
+                        const parsed = Number.parseInt(prev, 10);
+                        const base = Number.isFinite(parsed) && parsed >= 1 ? parsed : 1;
+                        return String(Math.max(1, base - 1));
+                      })
                     }
                     className={`flex h-11 w-11 items-center justify-center rounded-full border border-hairline text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                   >
@@ -2210,7 +3086,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     type="button"
                     aria-label="เพิ่มจำนวน"
                     onClick={() =>
-                      setDraftQtyInput((prev) => String(Math.max(1, Number(prev || '1') + 1)))
+                      setDraftQtyInput((prev) => {
+                        const parsed = Number.parseInt(prev, 10);
+                        const base = Number.isFinite(parsed) && parsed >= 1 ? parsed : 1;
+                        return String(Math.max(1, base + 1));
+                      })
                     }
                     className={`flex h-11 w-11 items-center justify-center rounded-full border border-hairline text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                   >
@@ -2223,7 +3103,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             <div className="border-t border-hairline bg-surface-1 px-6 py-4 flex flex-wrap items-center justify-end gap-3 shrink-0">
               <button
                 type="button"
-                onClick={() => setCustomizingVariant(null)}
+                onClick={() => {
+                  setCustomizingVariant(null);
+                  setEditingModifierCartKey(null);
+                }}
                 className={`h-[50px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-[15px] font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 ยกเลิก
@@ -2236,15 +3119,48 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       1_000,
                       parseDecimalStringToScaledInt(draftQtyInput || '1', 3)
                     );
-                    addVariantToCartDirect(customizingVariant, qtyMilli, draftModIds);
+                    if (editingModifierCartKey) {
+                      const sortedMods = [...draftModIds].sort();
+                      const newCartKey = `${customizingVariant.id}::${sortedMods.join(',')}`;
+                      setCart((prev) => {
+                        const targetIdx = prev.findIndex(
+                          (c) => c.cartKey === editingModifierCartKey
+                        );
+                        if (targetIdx < 0) return prev;
+                        const duplicateIdx = prev.findIndex(
+                          (c, idx) => idx !== targetIdx && c.cartKey === newCartKey
+                        );
+                        if (duplicateIdx >= 0) {
+                          return prev
+                            .map((c, idx) =>
+                              idx === duplicateIdx
+                                ? { ...c, quantityMilli: c.quantityMilli + qtyMilli }
+                                : c
+                            )
+                            .filter((_, idx) => idx !== targetIdx);
+                        }
+                        const updated = [...prev];
+                        const cur = updated[targetIdx]!;
+                        updated[targetIdx] = {
+                          ...cur,
+                          cartKey: newCartKey,
+                          quantityMilli: qtyMilli,
+                          selectedModifierIds: sortedMods,
+                        };
+                        return updated;
+                      });
+                    } else {
+                      addVariantToCartDirect(customizingVariant, qtyMilli, draftModIds);
+                    }
                     setCustomizingVariant(null);
+                    setEditingModifierCartKey(null);
                   } catch {
                     onToast('รูปแบบจำนวนสินค้าไม่ถูกต้อง', 'error');
                   }
                 }}
                 className={`h-[50px] rounded-[48px] bg-primary px-8 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                เพิ่มลงรายการขาย · ฿
+                {editingModifierCartKey ? 'บันทึกการแก้ไขตัวเลือก · ฿' : 'เพิ่มลงรายการขาย · ฿'}
                 {(() => {
                   const modDelta = draftModIds.reduce(
                     (s, id) => s + (modifiersById.get(id)?.priceDeltaSatang ?? 0),
@@ -2290,21 +3206,28 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             ].map((t) => {
               const Icon = t.icon;
               const active = paymentTab === t.id;
+              const tabDisabled =
+                cartSummary.totalSatang <= 0 &&
+                (t.id === 'PROMPTPAY_QR' || t.id === 'SPLIT');
               return (
                 <button
                   key={t.id}
                   type="button"
                   role="tab"
+                  disabled={tabDisabled}
                   aria-selected={active}
                   onClick={() => {
+                    if (tabDisabled) return;
                     setPaymentTab(t.id);
                     setSlipVerificationModal(null);
-                    if (t.id === 'PROMPTPAY_QR') {
+                    clearPromptPayQrState();
+                    if (t.id === 'PROMPTPAY_QR' && cartSummary.totalSatang > 0) {
                       void loadPromptPayQr();
                     } else if (
                       t.id === 'SPLIT' &&
                       splitSecondMethod === 'PROMPTPAY_QR' &&
-                      splitRemainingSatang > 0
+                      splitRemainingSatang > 0 &&
+                      cartSummary.totalSatang > 0
                     ) {
                       void loadPromptPayQr(splitRemainingSatang);
                     }
@@ -2453,33 +3376,59 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   ))}
                 </div>
 
-                {/* 12-Key Touchscreen Numpad */}
-                <div className="grid grid-cols-3 gap-2">
-                  {['7', '8', '9', '4', '5', '6', '1', '2', '3', 'CLEAR', '0', 'BACKSPACE'].map(
-                    (k) => (
-                      <button
-                        key={k}
-                        type="button"
-                        aria-label={
-                          k === 'BACKSPACE'
-                            ? 'ลบตัวเลขสุดท้าย'
-                            : k === 'CLEAR'
-                              ? 'ล้างจำนวนเงินสด'
-                              : `ป้อนเลข ${k}`
-                        }
-                        onClick={() => handleCashNumpadPress(k)}
-                        className={`flex h-12 items-center justify-center rounded-[4px] border border-hairline bg-surface-1 font-google-display text-[18px] font-normal text-ink hover:border-primary hover:bg-canvas ${UI_INTERACTION.focusButton}`}
-                      >
-                        {k === 'BACKSPACE' ? (
-                          <Delete className="h-5 w-5 text-ink-muted" />
-                        ) : k === 'CLEAR' ? (
-                          <span className="text-xs font-medium text-ink-muted">ล้างค่า</span>
-                        ) : (
-                          k
-                        )}
-                      </button>
-                    )
-                  )}
+                {/* 4x4 Full Touchscreen Cash Numpad with Decimal (.) and 00 */}
+                <div className="grid grid-cols-4 gap-2">
+                  {[
+                    '7',
+                    '8',
+                    '9',
+                    'BACKSPACE',
+                    '4',
+                    '5',
+                    '6',
+                    'CLEAR',
+                    '1',
+                    '2',
+                    '3',
+                    'EXACT',
+                    '0',
+                    '.',
+                    '00',
+                  ].map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      aria-label={
+                        k === 'BACKSPACE'
+                          ? 'ลบตัวเลขสุดท้าย'
+                          : k === 'CLEAR'
+                            ? 'ล้างจำนวนเงินสด'
+                            : k === 'EXACT'
+                              ? 'รับเงินพอดีกับยอดสุทธิ'
+                              : k === '.'
+                                ? 'จุดทศนิยมสตางค์'
+                                : `ป้อนเลข ${k}`
+                      }
+                      onClick={() => handleCashNumpadPress(k)}
+                      className={`flex h-12 items-center justify-center rounded-[4px] border border-hairline font-google-display text-[18px] font-normal hover:border-primary ${UI_INTERACTION.focusButton} ${
+                        k === '0'
+                          ? 'col-span-2 bg-surface-1 text-ink hover:bg-canvas'
+                          : k === 'EXACT'
+                            ? 'border-primary bg-surface-1 text-primary-dark hover:bg-canvas'
+                            : 'bg-surface-1 text-ink hover:bg-canvas'
+                      }`}
+                    >
+                      {k === 'BACKSPACE' ? (
+                        <Delete className="h-5 w-5 text-ink-muted" />
+                      ) : k === 'CLEAR' ? (
+                        <span className="text-xs font-medium text-ink-muted">ล้างค่า</span>
+                      ) : k === 'EXACT' ? (
+                        <span className="text-xs font-medium">พอดี</span>
+                      ) : (
+                        k
+                      )}
+                    </button>
+                  ))}
                 </div>
 
                 <button
@@ -2499,6 +3448,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
             {paymentTab === 'PROMPTPAY_QR' && (
               <div className="space-y-4">
+                {cartSummary.totalSatang <= 0 ? (
+                  <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 text-center space-y-3">
+                    <p className="text-sm font-medium text-ink">
+                      ยอดชำระสุทธิเป็น ฿0.00 ไม่สามารถสร้าง Thai QR PromptPay ได้
+                    </p>
+                    <p className="text-xs text-ink-muted">
+                      กรุณาสลับไปที่แท็บ &ldquo;เงินสด&rdquo; เพื่อปิดบิลยอด ฿0.00
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentTab('CASH')}
+                      className={`h-[44px] rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                    >
+                      สลับไปรับเงินสด ฿0.00
+                    </button>
+                  </div>
+                ) : (
+                  <>
                 <div className="flex flex-col sm:flex-row items-center gap-5 rounded-[4px] border border-hairline p-4">
                   {qrDataUrl ? (
                     <img
@@ -2528,35 +3495,38 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
                 <div className="space-y-2.5">
                   <label htmlFor={`${uid}-slip-miniqr`} className="block text-xs font-medium text-ink">
-                    ขั้นตอนป้องกันสลิปปลอม: ใช้ปืน 2D สแกน Mini-QR บนสลิปโอนเงินลูกค้า
+                    ขั้นตอนป้องกันสลิปปลอม: ยิงปืนสแกน 2D ที่ Mini-QR บนสลิปลูกค้าได้ทันที (ระบบตรวจให้อัตโนมัติ)
                   </label>
                   <input
                     id={`${uid}-slip-miniqr`}
+                    data-scanner-slip-allow="true"
                     type="text"
                     value={slipMiniQrInput}
                     onChange={(e) => {
                       setSlipMiniQrInput(e.target.value);
                       setSlipVerificationModal(null);
                     }}
-                    placeholder="วางหรือยิงข้อมูล BOT Mini-QR..."
+                    placeholder="ยิงปืนสแกน 2D บนสลิปโอนเงินลูกค้าทันทีโดยไม่ต้องคลิกช่องนี้..."
                     className={`h-11 w-full rounded-[4px] border border-hairline px-3.5 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                   />
 
-                  <div className="flex flex-wrap gap-2">
-                    {SLIP_PRESETS.map((p) => (
-                      <button
-                        key={p.label}
-                        type="button"
-                        onClick={() => {
-                          setSlipMiniQrInput(p.raw);
-                          setSlipVerificationModal(null);
-                        }}
-                        className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-xs text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
+                  {simulationModeEnabled && (
+                    <div className="flex flex-wrap gap-2">
+                      {SLIP_PRESETS.map((p) => (
+                        <button
+                          key={p.label}
+                          type="button"
+                          onClick={() => {
+                            setSlipMiniQrInput(p.raw);
+                            setSlipVerificationModal(null);
+                          }}
+                          className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-xs text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
                   {!slipVerificationModal?.valid ? (
                     <>
@@ -2604,7 +3574,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       </div>
                       <button
                         type="button"
-                        disabled={processingCheckout}
+                        disabled={processingCheckout || cartSummary.totalSatang <= 0}
                         onClick={() =>
                           void executeFinalCheckout('PROMPTPAY_QR', slipMiniQrInput.trim())
                         }
@@ -2615,6 +3585,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     </div>
                   )}
                 </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -2646,6 +3618,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
             {paymentTab === 'SPLIT' && (
               <div className="space-y-4">
+                {cartSummary.totalSatang <= 0 ? (
+                  <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 text-center space-y-3">
+                    <p className="text-sm font-medium text-ink">
+                      ยอดชำระสุทธิเป็น ฿0.00 ไม่สามารถใช้โหมดแยกจ่ายได้
+                    </p>
+                    <p className="text-xs text-ink-muted">
+                      กรุณาสลับไปที่แท็บ &ldquo;เงินสด&rdquo; เพื่อปิดบิลยอด ฿0.00
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentTab('CASH')}
+                      className={`h-[44px] rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                    >
+                      สลับไปรับเงินสด ฿0.00
+                    </button>
+                  </div>
+                ) : (
+                  <>
                 <div>
                   <label htmlFor={`${uid}-split-cash`} className="block text-xs font-medium text-ink-muted mb-1.5">
                     ส่วนที่ 1: ยอดรับเงินสด (บาท)
@@ -2658,6 +3648,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       onChange={(e) => {
                         setSplitCashBahtInput(e.target.value);
                         setSlipVerificationModal(null);
+                        clearPromptPayQrState();
                       }}
                       className={`h-12 flex-1 rounded-[4px] border border-hairline bg-canvas px-4 font-google-display text-[22px] text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                     />
@@ -2665,7 +3656,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       <button
                         type="button"
                         onClick={() => void loadPromptPayQr(splitRemainingSatang)}
-                        className={`min-h-[44px] rounded-[48px] border border-primary bg-primary-soft px-4 font-google-display text-xs font-medium text-primary-dark hover:bg-primary-soft/80 whitespace-nowrap ${UI_INTERACTION.focusButton}`}
+                        className={`min-h-[44px] rounded-[48px] border border-primary bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:bg-surface-1 whitespace-nowrap ${UI_INTERACTION.focusButton}`}
                       >
                         อัปเดต QR ยอดคงเหลือ
                       </button>
@@ -2733,6 +3724,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         onClick={() => {
                           setSplitSecondMethod('CARD');
                           setSlipVerificationModal(null);
+                          clearPromptPayQrState();
                         }}
                         className={`rounded-[48px] border px-3.5 py-1.5 text-xs font-medium ${UI_INTERACTION.focusButton} ${
                           splitSecondMethod === 'CARD'
@@ -2771,13 +3763,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
                       <input
                         type="text"
+                        data-scanner-slip-allow="true"
                         aria-label="ข้อมูล BOT Mini-QR สำหรับส่วนที่ 2"
                         value={slipMiniQrInput}
                         onChange={(e) => {
                           setSlipMiniQrInput(e.target.value);
                           setSlipVerificationModal(null);
                         }}
-                        placeholder="ข้อมูล BOT Mini-QR สำหรับส่วนที่ 2..."
+                        placeholder="ยิงปืน 2D สแกนสลิปส่วนที่ 2 ได้ทันที..."
                         className={`h-10 w-full rounded-[4px] border border-hairline px-3 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                       />
 
@@ -2813,18 +3806,23 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       )}
                     </div>
                   ) : (
-                    <button
-                      type="button"
-                      disabled={
-                        processingCheckout || splitCashSatang <= 0 || splitRemainingSatang <= 0
-                      }
-                      onClick={() => void executeFinalCheckout('SPLIT')}
-                      className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
-                    >
-                      ยืนยันแยกจ่าย (เงินสด + บัตร EDC) · เปิดลิ้นชัก &amp; พิมพ์ใบเสร็จ
-                    </button>
-                  )}
-                </div>
+                      <button
+                        type="button"
+                        disabled={
+                          processingCheckout ||
+                          cartSummary.totalSatang <= 0 ||
+                          splitCashSatang <= 0 ||
+                          splitRemainingSatang <= 0
+                        }
+                        onClick={() => void executeFinalCheckout('SPLIT')}
+                        className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                      >
+                        ยืนยันแยกจ่าย (เงินสด + บัตร EDC) · เปิดลิ้นชัก &amp; พิมพ์ใบเสร็จ
+                      </button>
+                    )}
+                  </div>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -2860,7 +3858,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 type="button"
                 aria-label="ปิดหน้าต่างตัวอย่างใบเสร็จ"
                 onClick={() => setReceiptModalOpen(false)}
-                className={`flex h-9 w-9 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
+                className={`flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
               >
                 <X className="h-5 w-5" />
               </button>
@@ -2985,6 +3983,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         )}
       </ModalDialog>
 
+      <VoidOrderAuthModal
+        open={Boolean(voidTargetOrder)}
+        order={voidTargetOrder}
+        currentUser={currentUser}
+        onClose={() => setVoidTargetOrder(null)}
+        onVoidAuthorized={handleAuthorizedVoidOrder}
+      />
+
       <ConfirmDialog
         open={Boolean(confirmAction)}
         title={confirmAction?.title ?? ''}
@@ -2999,6 +4005,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           if (!confirmAction) return;
           setConfirmBusy(true);
           Promise.resolve(confirmAction.onConfirm())
+            .catch((err) => onToast(err instanceof Error ? err.message : String(err), 'error'))
             .finally(() => {
               setConfirmBusy(false);
               setConfirmAction(null);

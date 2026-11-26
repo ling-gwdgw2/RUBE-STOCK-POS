@@ -307,8 +307,22 @@ export class ThermalPrinterSpoolerQueue {
       enqueuedAt: new Date().toISOString(),
     };
 
+    const canDedupeByOrder =
+      Boolean(params.salesOrderId) && !params.salesOrderId.startsWith('MANUAL-');
+
     if (this.printerReady) {
-      this.completedPrintHistory.push(record);
+      if (canDedupeByOrder) {
+        const idx = this.completedPrintHistory.findIndex(
+          (j) => j.salesOrderId === params.salesOrderId
+        );
+        if (idx >= 0) {
+          this.completedPrintHistory[idx] = record;
+        } else {
+          this.completedPrintHistory.push(record);
+        }
+      } else {
+        this.completedPrintHistory.push(record);
+      }
       return {
         status: 'PRINTED_IMMEDIATELY',
         jobId: record.jobId,
@@ -319,7 +333,18 @@ export class ThermalPrinterSpoolerQueue {
       };
     }
 
-    this.pendingQueue.push(record);
+    if (canDedupeByOrder) {
+      const existingIdx = this.pendingQueue.findIndex(
+        (j) => j.salesOrderId === params.salesOrderId
+      );
+      if (existingIdx >= 0) {
+        this.pendingQueue[existingIdx] = record;
+      } else {
+        this.pendingQueue.push(record);
+      }
+    } else {
+      this.pendingQueue.push(record);
+    }
     return {
       status: 'QUEUED_PAPER_OUT_OR_COVER_OPEN',
       jobId: record.jobId,

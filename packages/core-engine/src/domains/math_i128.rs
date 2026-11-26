@@ -39,8 +39,21 @@ pub fn round_div_i128(numerator: i128, denominator: i128) -> Result<i128, FixedP
     let abs_den = denominator.unsigned_abs();
     let half_den = abs_den / 2;
     let quotient = (abs_num + half_den) / abs_den;
-    let signed = quotient as i128;
-    Ok(if is_negative { -signed } else { signed })
+    let max_pos = i128::MAX as u128;
+    if is_negative {
+        if quotient == max_pos + 1 {
+            return Ok(i128::MIN);
+        }
+        if quotient > max_pos + 1 {
+            return Err(FixedPointError::OverflowI64(i128::MIN));
+        }
+        Ok(-(quotient as i128))
+    } else {
+        if quotient > max_pos {
+            return Err(FixedPointError::OverflowI64(i128::MAX));
+        }
+        Ok(quotient as i128)
+    }
 }
 
 /// Computes `round_div` in `i128` and safely downcasts the result back to `i64`.
@@ -75,6 +88,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(res, 535_000_000_000_000);
+    }
+
+    #[test]
+    fn test_extreme_i128_min_and_overflow_guard() {
+        assert_eq!(round_div_i128(i128::MIN, 1).unwrap(), i128::MIN);
+        assert_eq!(round_div_i128(i128::MAX, -1).unwrap(), -i128::MAX);
+        assert!(matches!(
+            round_div_i128(i128::MIN, -1),
+            Err(FixedPointError::OverflowI64(_))
+        ));
+        assert!(matches!(
+            round_div_i128(1, 0),
+            Err(FixedPointError::DivisionByZero)
+        ));
     }
 }
 

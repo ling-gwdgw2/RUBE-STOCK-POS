@@ -29,6 +29,8 @@ import {
   SEED_MODIFIERS,
   SEED_VARIANTS,
 } from '../../packages/shared-contracts/src/mocks/mock-ipc-bridge.ts';
+import { decodePhysicalKeyCodesToBarcode } from '../../packages/hal-drivers/src/scanner/mod.ts';
+import { PhysicalScannerStreamBuffer } from '../../packages/ui-presentation/src/hooks/usePhysicalScanner.ts';
 
 describe('RUBE-STOCK-POS v3.1 Accounting Invariants (Section 9.2)', () => {
   it('Invariant 1 & MAC Negative Stock Guard: Ledger sum equals in_stock_milli and resets MAC when stock <= 0', () => {
@@ -278,6 +280,190 @@ describe('RUBE-STOCK-POS v3.1 Accounting Invariants (Section 9.2)', () => {
         ),
       /Missing component variant VAR-NON-EXISTENT/
     );
+  });
+
+  it('Invariant 6 (3-Tier Deep Audit): Zero-base-cost Landed Cost qty fallback, Pre-Built direct sale, Diamond BOM consolidation & Scanner Case/Snapshot', () => {
+    // 1. 100% Free bonus goods PO (baseUnitCostMicroBaht = 0) with paid ฿500.00 freight MUST allocate 100% of freight by qty
+    const freePoAlloc = allocateLandedCostExact(
+      [
+        { id: 'FREE-A', receivedQtyMilli: 1_000, baseUnitCostMicroBaht: 0 },
+        { id: 'FREE-B', receivedQtyMilli: 2_000, baseUnitCostMicroBaht: 0 },
+      ],
+      50_000
+    );
+    const totalFreeAllocMicro = freePoAlloc.reduce(
+      (sum, entry) => sum + entry.allocatedLandedCostMicroBaht,
+      0n
+    );
+    assert.equal(totalFreeAllocMicro, 50_000n * SATANG_TO_MICRO_BAHT);
+    assert.ok(freePoAlloc[0]!.effectiveUnitCostMicroBaht > 0);
+    assert.ok(freePoAlloc[1]!.effectiveUnitCostMicroBaht > 0);
+
+    // 2. Selling a Pre-Built finished item (isComposite = true, useProduction = true) directly on POS deducts SALE_DIRECT once
+    const catalog = new Map(SEED_VARIANTS.map((v) => [v.id, v]));
+    const prebuiltBoba = catalog.get('VAR-RAW-BOBA')!;
+    const directBobaSale = calculateOrderLineDeductions(
+      prebuiltBoba,
+      5_000,
+      [],
+      catalog,
+      SEED_BOM_EDGES
+    );
+    assert.equal(directBobaSale.length, 1);
+    assert.equal(directBobaSale[0]!.transactionType, 'SALE_DIRECT');
+    assert.equal(directBobaSale[0]!.variantId, 'VAR-RAW-BOBA');
+    assert.equal(directBobaSale[0]!.quantityChangeMilli, -5_000);
+
+    // 3. Diamond BOM DAG: accumulate leaf quantities before COGS division (eliminates multi-branch rounding drift)
+    const diamondCatalog = new Map([
+      [
+        'PARENT',
+        {
+          id: 'PARENT',
+          itemId: 'ITM-P',
+          itemName: 'Diamond Parent',
+          variantName: 'Unit',
+          sku: 'D-P',
+          barcode: null,
+          unitName: 'unit',
+          priceSatang: 10_000,
+          averageCostMicroBaht: 0,
+          inStockMilli: 0,
+          isComposite: true,
+          useProduction: false,
+          isWeightedScale: false,
+        },
+      ],
+      [
+        'SUB-A',
+        {
+          id: 'SUB-A',
+          itemId: 'ITM-A',
+          itemName: 'Sub A',
+          variantName: 'Unit',
+          sku: 'D-A',
+          barcode: null,
+          unitName: 'unit',
+          priceSatang: 0,
+          averageCostMicroBaht: 0,
+          inStockMilli: 0,
+          isComposite: true,
+          useProduction: false,
+          isWeightedScale: false,
+        },
+      ],
+      [
+        'SUB-B',
+        {
+          id: 'SUB-B',
+          itemId: 'ITM-B',
+          itemName: 'Sub B',
+          variantName: 'Unit',
+          sku: 'D-B',
+          barcode: null,
+          unitName: 'unit',
+          priceSatang: 0,
+          averageCostMicroBaht: 0,
+          inStockMilli: 0,
+          isComposite: true,
+          useProduction: false,
+          isWeightedScale: false,
+        },
+      ],
+      [
+        'LEAF',
+        {
+          id: 'LEAF',
+          itemId: 'ITM-L',
+          itemName: 'Shared Leaf',
+          variantName: 'Unit',
+          sku: 'D-L',
+          barcode: null,
+          unitName: 'g',
+          priceSatang: 0,
+          averageCostMicroBaht: 1_500, // 0.0015 THB/unit -> odd half-satang boundary on 1milli
+          inStockMilli: 100_000,
+          isComposite: false,
+          useProduction: false,
+          isWeightedScale: false,
+        },
+      ],
+    ]);
+    const diamondEdges = [
+      {
+        compositeVariantId: 'PARENT',
+        componentVariantId: 'SUB-A',
+        componentRole: 'STANDARD' as const,
+        quantityMilli: 1_000,
+        wastageBasisPoints: 0,
+      },
+      {
+        compositeVariantId: 'PARENT',
+        componentVariantId: 'SUB-B',
+        componentRole: 'STANDARD' as const,
+        quantityMilli: 1_000,
+        wastageBasisPoints: 0,
+      },
+      {
+        compositeVariantId: 'SUB-A',
+        componentVariantId: 'LEAF',
+        componentRole: 'STANDARD' as const,
+        quantityMilli: 1_000,
+        wastageBasisPoints: 0,
+      },
+      {
+        compositeVariantId: 'SUB-B',
+        componentVariantId: 'LEAF',
+        componentRole: 'STANDARD' as const,
+        quantityMilli: 1_000,
+        wastageBasisPoints: 0,
+      },
+    ];
+    const diamondDeds = calculateOrderLineDeductions(
+      diamondCatalog.get('PARENT')!,
+      500, // 0.5 parent -> 500 + 500 = 1,000 leaf total -> COGS = round(1000*1500/1000) = 1,500 (not 750+750 vs half-rounding drift)
+      [],
+      diamondCatalog,
+      diamondEdges
+    );
+    assert.equal(diamondDeds.length, 1);
+    assert.equal(diamondDeds[0]!.quantityChangeMilli, -1_000);
+    assert.equal(diamondDeds[0]!.lineCogsMicroBaht, 1_500);
+
+    // 4. Non-positive soldQtyMilli must throw RangeError
+    assert.throws(
+      () => calculateOrderLineDeductions(diamondCatalog.get('LEAF')!, 0, [], diamondCatalog, []),
+      RangeError
+    );
+
+    // 5. Physical scanner shift/case/`_` preservation & pre-burst first-key snapshot callback
+    const decoded2D = decodePhysicalKeyCodesToBarcode([
+      { code: 'KeyA', shiftKey: false },
+      { code: 'KeyB', shiftKey: true },
+      { code: 'Minus', shiftKey: true },
+      { code: 'Digit4', shiftKey: false },
+    ]);
+    assert.equal(decoded2D, 'aB_4');
+
+    const stream = new PhysicalScannerStreamBuffer(50, 4);
+    let capturedCount = 0;
+    let rollbackCount = 0;
+    stream.pushKeystroke(
+      { code: 'KeyA', timestampMs: 100, shiftKey: false },
+      () => rollbackCount++,
+      () => capturedCount++
+    );
+    stream.pushKeystroke(
+      { code: 'Minus', timestampMs: 110, shiftKey: true },
+      () => rollbackCount++,
+      () => capturedCount++
+    );
+    stream.pushKeystroke({ code: 'Digit1', timestampMs: 120, shiftKey: false });
+    stream.pushKeystroke({ code: 'Digit2', timestampMs: 130, shiftKey: false });
+    const done = stream.pushKeystroke({ code: 'Enter', timestampMs: 140 });
+    assert.equal(capturedCount, 1);
+    assert.equal(rollbackCount, 1);
+    assert.equal(done.completedBarcode, 'a_12');
   });
 });
 

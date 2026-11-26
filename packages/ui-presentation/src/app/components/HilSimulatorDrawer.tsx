@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   BatteryCharging,
   BatteryWarning,
@@ -12,7 +12,15 @@ import {
 } from 'lucide-react';
 import { posTransport } from '../api/pos-transport.ts';
 import type { BootstrapPayload, PrintedReceiptPreview } from '../types.ts';
-import { UI_INTERACTION } from './ui/UiPrimitives.tsx';
+import {
+  getModalZIndex,
+  handleModalFocusTrapKeyDown,
+  isTopmostModal,
+  pushModalEntry,
+  removeModalEntry,
+  subscribeModalStack,
+  UI_INTERACTION,
+} from './ui/UiPrimitives.tsx';
 
 interface HilSimulatorDrawerProps {
   open: boolean;
@@ -33,37 +41,78 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
   onRefreshState,
   onToast,
 }) => {
+  const modalIdRef = useRef<symbol | null>(null);
+  if (!modalIdRef.current) {
+    modalIdRef.current = Symbol('HilSimulatorDrawer');
+  }
+  const modalId = modalIdRef.current;
+
   const uid = useId();
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const prevFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  const [zIndex, setZIndex] = useState<number>(50);
+  const [isTopmost, setIsTopmost] = useState<boolean>(true);
   const [customBarcode, setCustomBarcode] = useState('2010045015004');
   const [lastHilLog, setLastHilLog] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const syncStackState = () => {
+      const nextZ = getModalZIndex(modalId);
+      const nextTop = isTopmostModal(modalId);
+      setZIndex((prev) => (prev === nextZ ? prev : nextZ));
+      setIsTopmost((prev) => (prev === nextTop ? prev : nextTop));
+    };
+
+    const unsubscribe = subscribeModalStack(syncStackState);
+    pushModalEntry(modalId, 50);
+    syncStackState();
+
+    return () => {
+      unsubscribe();
+      removeModalEntry(modalId);
+    };
+  }, [modalId, open]);
 
   useEffect(() => {
     if (!open) return;
     prevFocusRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const t = window.setTimeout(() => {
-      if (drawerRef.current && !drawerRef.current.contains(document.activeElement)) {
+      if (
+        isTopmostModal(modalId) &&
+        drawerRef.current &&
+        !drawerRef.current.contains(document.activeElement)
+      ) {
         drawerRef.current.focus({ preventScroll: true });
       }
     }, 0);
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (!isTopmostModal(modalId)) return;
         e.preventDefault();
-        onClose();
+        e.stopImmediatePropagation();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key === 'Tab') {
+        if (!isTopmostModal(modalId)) return;
+        handleModalFocusTrapKeyDown(e, drawerRef.current);
       }
     };
-    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, { capture: true });
     return () => {
       window.clearTimeout(t);
-      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keydown', onKeyDown, { capture: true });
       if (prevFocusRef.current && document.contains(prevFocusRef.current)) {
         prevFocusRef.current.focus({ preventScroll: true });
       }
     };
-  }, [onClose, open]);
+  }, [modalId, open]);
 
   if (!open) return null;
 
@@ -128,7 +177,9 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-end bg-black/45 transition-opacity duration-200"
+      data-rube-modal-backdrop="true"
+      style={{ zIndex }}
+      className="fixed inset-0 flex justify-end bg-black/45 transition-opacity duration-200"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -138,6 +189,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby={`${uid}-hil-title`}
+        data-rube-modal-topmost={isTopmost ? 'true' : 'false'}
         tabIndex={-1}
         className="w-full max-w-xl bg-canvas border-l border-hairline h-full flex flex-col focus:outline-none"
       >
