@@ -72,6 +72,7 @@ import type {
   CatalogVariantDetailDto,
   CheckoutOrderRequest,
   GuestOrderRecordDto,
+  GuestServiceCallDto,
   HeldBillRecordDto,
   ModifierDto,
   PrintedReceiptPreview,
@@ -417,6 +418,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   const [qrTableSessions, setQrTableSessions] = useState<TableQrSessionDto[]>(
     () => bootstrap.qrTableSessions ?? []
   );
+  const [qrServiceCalls, setQrServiceCalls] = useState<GuestServiceCallDto[]>(
+    () => bootstrap.qrServiceCalls ?? []
+  );
   const [qrStatus, setQrStatus] = useState<QrOrderingRuntimeStatusDto | undefined>(
     () => bootstrap.qrOrderingStatus
   );
@@ -424,6 +428,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   const [tableQrModalOpen, setTableQrModalOpen] = useState<boolean>(false);
   const prevPendingQrCountRef = useRef<number>(
     (bootstrap.qrGuestOrders ?? []).filter((o) => o.status === 'PENDING_CONFIRM').length
+  );
+  const prevPendingServiceCallsRef = useRef<number>(
+    (bootstrap.qrServiceCalls ?? []).filter((c) => c.status === 'PENDING').length
   );
 
   useEffect(() => {
@@ -433,18 +440,29 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     if (bootstrap.qrTableSessions) {
       setQrTableSessions(bootstrap.qrTableSessions);
     }
+    if (bootstrap.qrServiceCalls) {
+      setQrServiceCalls(bootstrap.qrServiceCalls);
+    }
     if (bootstrap.qrOrderingStatus) {
       setQrStatus(bootstrap.qrOrderingStatus);
     }
-  }, [bootstrap.qrGuestOrders, bootstrap.qrTableSessions, bootstrap.qrOrderingStatus]);
+  }, [
+    bootstrap.qrGuestOrders,
+    bootstrap.qrTableSessions,
+    bootstrap.qrServiceCalls,
+    bootstrap.qrOrderingStatus,
+  ]);
 
   const refreshQrGuestOrders = useCallback(
     async (silent = false) => {
       if (!silent) setSyncingQrOrders(true);
       try {
         const res = await posTransport.listQrGuestOrders(outletId);
+        const nextCalls = res.serviceCalls ?? [];
+        const nextPendingCalls = nextCalls.filter((c) => c.status === 'PENDING');
         setQrGuestOrders(res.orders);
         setQrTableSessions(res.tableSessions);
+        setQrServiceCalls(nextCalls);
         setQrStatus(res.status);
         if (res.pendingCount > prevPendingQrCountRef.current) {
           playNewQrOrderChime();
@@ -459,8 +477,28 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               'warn'
             );
           }
+        } else if (nextPendingCalls.length > prevPendingServiceCallsRef.current) {
+          playNewQrOrderChime();
+          const newestCall = nextPendingCalls[0];
+          if (newestCall) {
+            onToast(
+              newestCall.callType === 'REQUEST_BILL'
+                ? pick(
+                    `โต๊ะ ${newestCall.tableLabel} ขอเช็กบิล / ชำระเงิน`,
+                    `ໂຕະ ${newestCall.tableLabel} ຂໍເຊັກບິນ / ຊຳລະເງິນ`,
+                    `Table ${newestCall.tableLabel} requested the bill`
+                  )
+                : pick(
+                    `โต๊ะ ${newestCall.tableLabel} กดเรียกพนักงาน`,
+                    `ໂຕະ ${newestCall.tableLabel} ກົດເອີ້ນພະນັກງານ`,
+                    `Table ${newestCall.tableLabel} called staff`
+                  ),
+              'warn'
+            );
+          }
         }
         prevPendingQrCountRef.current = res.pendingCount;
+        prevPendingServiceCallsRef.current = nextPendingCalls.length;
       } catch {
         // ignore transient polling error
       } finally {
@@ -487,6 +525,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   const pendingQrOrdersCount = useMemo(
     () => qrGuestOrders.filter((o) => o.status === 'PENDING_CONFIRM').length,
     [qrGuestOrders]
+  );
+  const pendingServiceCallsCount = useMemo(
+    () => qrServiceCalls.filter((c) => c.status === 'PENDING').length,
+    [qrServiceCalls]
   );
 
   // Order History Search & Status Filter (P3.1)
@@ -558,7 +600,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     'PROMPTPAY_QR'
   );
   const [splitCashBahtInput, setSplitCashBahtInput] = useState<string>('100');
-  const [cashTenderCurrency, setCashTenderCurrency] = useState<CashTenderCurrencyCode>('LAK');
+  const [cashTenderCurrency, setCashTenderCurrency] = useState<CashTenderCurrencyCode>(() =>
+    isLaos ? 'LAK' : 'THB'
+  );
+  useEffect(() => {
+    setCashTenderCurrency(isLaos ? 'LAK' : 'THB');
+  }, [isLaos]);
   const [cashTenderedBahtInput, setCashTenderedBahtInput] = useState<string>('');
   const [cashNumpadPristine, setCashNumpadPristine] = useState<boolean>(true);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -1009,7 +1056,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         repricedNames.push(variant.itemName);
       }
       const nextCartKey =
-        hasScaleOverride || line.scaleBadgeText
+        hasScaleOverride || line.scaleBadgeText || line.kdsDispatched || line.guestNote
           ? line.cartKey
           : `${variant.id}::${sortedMods.join(',')}`;
 
@@ -1028,9 +1075,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         ...(line.overrideLineTotalSatang !== undefined
           ? { overrideLineTotalSatang: line.overrideLineTotalSatang }
           : {}),
+        ...(line.kdsDispatched === true ? { kdsDispatched: true } : {}),
+        ...(line.guestNote !== undefined ? { guestNote: line.guestNote } : {}),
       };
 
-      if (!hasScaleOverride && !line.scaleBadgeText) {
+      if (!hasScaleOverride && !line.scaleBadgeText && !line.kdsDispatched && !line.guestNote) {
         const existingIdx = reconciledCart.findIndex((c) => c.cartKey === nextCartKey);
         if (existingIdx >= 0) {
           const existing = reconciledCart[existingIdx]!;
@@ -1315,7 +1364,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         );
       }
       setPaymentTab(resolvedTab);
-      setCashTenderCurrency('LAK');
+      setCashTenderCurrency(isLaos ? 'LAK' : 'THB');
       setCashTenderedBahtInput(moneyInput(cartSummary.cashPayableTotalSatang));
       const computedHalf =
         cartSummary.totalSatang > 200
@@ -1664,14 +1713,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       }
       const idempotencyKey = cartCheckoutIdemKeyRef.current;
 
-      const cartSnapshotLines = cartSummary.lines.map((l) => ({
-        itemName: l.itemName,
-        qtyText: l.isWeightedScale
-          ? formatMilliUnitsToQtyString(l.quantityMilli, l.unitName)
-          : `${Math.round(l.quantityMilli / 1000)} ${l.unitName}`,
-        totalText: money(l.lineTotalSatang),
-        ...(l.mods.length > 0 ? { modifiersText: l.mods.map((m) => m.name).join(', ') } : {}),
-      }));
+      const cartSnapshotLines = cartSummary.lines.map((l) => {
+        const modParts: string[] = [];
+        if (l.mods.length > 0) {
+          modParts.push(l.mods.map((m) => m.name).join(', '));
+        }
+        if (l.guestNote && l.guestNote.trim().length > 0) {
+          modParts.push(l.guestNote.trim());
+        }
+        const modifiersText = modParts.join(' · ');
+        return {
+          itemName: l.itemName,
+          qtyText: l.isWeightedScale
+            ? formatMilliUnitsToQtyString(l.quantityMilli, l.unitName)
+            : `${Math.round(l.quantityMilli / 1000)} ${l.unitName}`,
+          totalText: money(l.lineTotalSatang),
+          ...(modifiersText ? { modifiersText } : {}),
+        };
+      });
       const snapshotSubtotal = cartSummary.subtotalSatang;
       const snapshotDiscount = cartSummary.discountSatang;
       const snapshotQueueOrTable = queueOrTableLabel.trim();
@@ -1712,6 +1771,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           ...(l.overrideLineTotalSatang !== undefined
             ? { overrideLineTotalSatang: l.overrideLineTotalSatang }
             : {}),
+          ...(l.kdsDispatched === true ? { skipKds: true } : {}),
+          ...(l.guestNote && l.guestNote.trim().length > 0 ? { notes: l.guestNote.trim() } : {}),
         })),
       });
 
@@ -2132,9 +2193,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               >
                 <QrCode className="h-4 w-4" />
                 <span>{pick('ออเดอร์ QR', 'ອໍເດີ QR', 'QR Orders')}</span>
-                {pendingQrOrdersCount > 0 && (
+                {pendingQrOrdersCount + pendingServiceCallsCount > 0 && (
                   <span className="rounded-[48px] bg-primary px-2 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
-                    {pendingQrOrdersCount}
+                    {pendingQrOrdersCount + pendingServiceCallsCount}
                   </span>
                 )}
                 {posSubView === 'QR_ORDERS' && (
@@ -2629,6 +2690,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             bootstrap={bootstrap}
             guestOrders={qrGuestOrders}
             tableSessions={qrTableSessions}
+            serviceCalls={qrServiceCalls}
             qrStatus={qrStatus}
             syncing={syncingQrOrders}
             onRefreshOrders={() => refreshQrGuestOrders(false)}

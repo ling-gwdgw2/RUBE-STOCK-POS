@@ -16,6 +16,7 @@ import {
 import type { ItemVariantDto } from '../../../../shared-contracts/src/ipc-commands.ts';
 import {
   decodePhysicalKeyCodesToBarcode,
+  matchesScaleBarcodePlu,
   parseScaleBarcodeEan13,
   type ParsedScaleBarcode,
 } from '../../../../hal-drivers/src/scanner/mod.ts';
@@ -113,6 +114,7 @@ export class InventoryViewController {
         catalog.find((item) => item.sku === initialParse.sku) ??
         catalog.find((item) => item.isWeightedScale && item.sku.endsWith(initialParse.sku!)) ??
         catalog.find((item) => item.barcode === rawBarcode) ??
+        catalog.find((item) => item.isWeightedScale && matchesScaleBarcodePlu(item, initialParse.sku!)) ??
         null;
 
       const fullScaleInfo = parseScaleBarcodeEan13(

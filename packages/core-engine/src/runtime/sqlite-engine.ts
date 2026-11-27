@@ -80,6 +80,8 @@ import {
   type GuestOrderLineInputDto,
   type GuestOrderLineSnapshotDto,
   type GuestOrderRecordDto,
+  type GuestServiceCallDto,
+  type GuestServiceCallType,
   type QrGuestOrderStatus,
   type QrOrderingConfigDto,
   type TableQrSessionDto,
@@ -207,6 +209,8 @@ export interface CheckoutOrderLineSummary {
   modifiersTotalSatang: Satang;
   lineTotalSatang: Satang;
   lineCogsMicroBaht: MicroBaht;
+  skipKds?: boolean | undefined;
+  notes?: string | null | undefined;
   selectedModifiers: ReadonlyArray<{
     modifierId: string;
     name: string;
@@ -2134,6 +2138,8 @@ export class SqliteReadWritePoolEngine {
           modifiersTotalSatang,
           lineTotalSatang,
           lineCogsMicroBaht,
+          skipKds: Boolean(reqLine.skipKds),
+          notes: reqLine.notes ? sanitizeGuestText(reqLine.notes, 160) || null : null,
           selectedModifiers: selectedMods.map((m) => ({
             modifierId: m.id,
             name: m.name,
@@ -2450,8 +2456,8 @@ export class SqliteReadWritePoolEngine {
       const insertOrderItem = db.prepare(
         `INSERT INTO sales_order_items (
            id, sales_order_id, variant_id, quantity_milli, unit_price_satang,
-           modifiers_total_satang, discount_satang, line_total_satang, line_cogs_micro_baht
-         ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
+           modifiers_total_satang, discount_satang, line_total_satang, line_cogs_micro_baht, notes
+         ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
       );
       for (const line of lineSummaries) {
         insertOrderItem.run(
@@ -2462,7 +2468,8 @@ export class SqliteReadWritePoolEngine {
           line.unitPriceSatang,
           line.modifiersTotalSatang,
           line.lineTotalSatang,
-          line.lineCogsMicroBaht
+          line.lineCogsMicroBaht,
+          line.notes ?? null
         );
       }
 
@@ -2581,6 +2588,7 @@ export class SqliteReadWritePoolEngine {
       // 9. Enqueue Kitchen Orders (KDS) split automatically per station (BAR / MAIN / etc.)
       let kitchenOrderSequenceId: number | null = null;
       const kitchenLines = lineSummaries.filter((l) => {
+        if (l.skipKds) return false;
         const v = catalogMap.get(l.variantId);
         return v && v.kitchenStation !== 'NONE';
       });
@@ -2621,10 +2629,14 @@ export class SqliteReadWritePoolEngine {
           }
 
           for (const kl of stationLines) {
-            const modText =
-              kl.selectedModifiers.length > 0
-                ? kl.selectedModifiers.map((m) => m.name).join(', ')
-                : null;
+            const modParts: string[] = [];
+            if (kl.selectedModifiers.length > 0) {
+              modParts.push(kl.selectedModifiers.map((m) => m.name).join(', '));
+            }
+            if (kl.notes) {
+              modParts.push(`[Note: ${kl.notes}]`);
+            }
+            const modText = modParts.length > 0 ? modParts.join(' · ') : null;
             insertKoItem.run(
               `KOI-${randomUUID()}`,
               koId,
@@ -6659,7 +6671,7 @@ export class SqliteReadWritePoolEngine {
       tableLabel: cleanTable,
       sessionNonce,
       token,
-      menuUrl: buildTableMenuUrl(effectiveBase, cleanTable, token),
+      menuUrl: buildTableMenuUrl(effectiveBase, cleanTable, token, outletId),
       wifiQrPayload: buildWifiQrPayload(cfg.wifiSsid, cfg.wifiPassword, cfg.wifiSecurity),
       openedByName,
       openedAtIso,
@@ -6683,7 +6695,7 @@ export class SqliteReadWritePoolEngine {
             tableLabel: entry.tableLabel,
             sessionNonce: entry.sessionNonce,
             token,
-            menuUrl: buildTableMenuUrl(effectiveBase, entry.tableLabel, token),
+            menuUrl: buildTableMenuUrl(effectiveBase, entry.tableLabel, token, outletId),
             wifiQrPayload,
             openedByName: entry.openedByName,
             openedAtIso: entry.openedAtIso,
@@ -6793,6 +6805,9 @@ export class SqliteReadWritePoolEngine {
     db: DatabaseSync,
     order: GuestOrderRecordDto
   ): GuestOrderRecordDto {
+    if (order.settledAtIso && order.status !== 'REJECTED') {
+      return { ...order, status: 'SETTLED' };
+    }
     if (
       !order.kdsSalesOrderId ||
       order.status === 'PENDING_CONFIRM' ||
@@ -7124,12 +7139,240 @@ export class SqliteReadWritePoolEngine {
     return { kdsSalesOrderId, kdsSequenceIds };
   }
 
+  private computeRequiredDeductionsForLinesOnDb(
+    db: DatabaseSync,
+    outletId: string,
+    lines: ReadonlyArray<{
+      variantId: string;
+      quantityMilli: number;
+      selectedModifierIds: readonly string[];
+    }>
+  ): Map<string, { itemName: string; requiredMilli: number; availableMilli: number }> {
+    const catalogRows = db
+      .prepare(
+        `SELECT
+           v.id, v.item_id AS itemId, i.name AS itemName, v.variant_name AS variantName,
+           v.sku, v.barcode, i.unit_name AS unitName, v.price_satang AS priceSatang,
+           COALESCE(il.average_cost_micro_baht, v.default_purchase_cost_micro_baht) AS averageCostMicroBaht,
+           COALESCE(il.in_stock_milli, 0) AS inStockMilli,
+           i.is_composite AS isComposite, i.use_production AS useProduction,
+           i.is_weighted_scale AS isWeightedScale
+         FROM item_variants v
+         JOIN items i ON i.id = v.item_id
+         LEFT JOIN inventory_levels il ON il.variant_id = v.id AND il.outlet_id = ?`
+      )
+      .all(outletId) as Array<Record<string, unknown>>;
+    const catalogMap = new Map<string, ItemVariantDto>();
+    for (const r of catalogRows) {
+      catalogMap.set(String(r.id), {
+        id: String(r.id),
+        itemId: String(r.itemId),
+        itemName: String(r.itemName),
+        variantName: String(r.variantName),
+        sku: String(r.sku),
+        barcode: r.barcode === null ? null : String(r.barcode),
+        unitName: String(r.unitName),
+        priceSatang: Number(r.priceSatang),
+        averageCostMicroBaht: Number(r.averageCostMicroBaht),
+        inStockMilli: Number(r.inStockMilli),
+        isComposite: Number(r.isComposite) === 1,
+        useProduction: Number(r.useProduction) === 1,
+        isWeightedScale: Number(r.isWeightedScale) === 1,
+      });
+    }
+    const bomEdges = (
+      db
+        .prepare(
+          `SELECT
+             composite_variant_id AS compositeVariantId,
+             component_variant_id AS componentVariantId,
+             component_role AS componentRole,
+             quantity_milli AS quantityMilli,
+             wastage_basis_points AS wastageBasisPoints
+           FROM item_components`
+        )
+        .all() as Array<Record<string, unknown>>
+    ).map((r) => ({
+      compositeVariantId: String(r.compositeVariantId),
+      componentVariantId: String(r.componentVariantId),
+      componentRole: String(r.componentRole) as ComponentRole,
+      quantityMilli: Number(r.quantityMilli),
+      wastageBasisPoints: Number(r.wastageBasisPoints),
+    }));
+    const modifierMap = new Map<string, ModifierDto>(
+      (
+        db
+          .prepare(
+            `SELECT
+               id, modifier_group_id AS modifierGroupId, name,
+               price_delta_satang AS priceDeltaSatang, modifier_mode AS modifierMode,
+               component_variant_id AS componentVariantId, quantity_delta_milli AS quantityDeltaMilli,
+               target_component_role AS targetComponentRole, scale_basis_points AS scaleBasisPoints
+             FROM modifiers`
+          )
+          .all() as Array<Record<string, unknown>>
+      ).map((r) => [
+        String(r.id),
+        {
+          id: String(r.id),
+          modifierGroupId: String(r.modifierGroupId),
+          name: String(r.name),
+          priceDeltaSatang: Number(r.priceDeltaSatang),
+          modifierMode: String(r.modifierMode) as ModifierDto['modifierMode'],
+          componentVariantId: r.componentVariantId === null ? null : String(r.componentVariantId),
+          quantityDeltaMilli: Number(r.quantityDeltaMilli),
+          targetComponentRole:
+            r.targetComponentRole === null ? null : (String(r.targetComponentRole) as ComponentRole),
+          scaleBasisPoints: Number(r.scaleBasisPoints),
+        } satisfies ModifierDto,
+      ])
+    );
+
+    const result = new Map<string, { itemName: string; requiredMilli: number; availableMilli: number }>();
+    for (const line of lines) {
+      const variant = catalogMap.get(line.variantId);
+      if (!variant) {
+        throw new Error(`HTTP 400 เมนูที่เลือกไม่พร้อมจำหน่าย (${line.variantId})`);
+      }
+      const selectedMods = line.selectedModifierIds
+        .map((id) => modifierMap.get(id))
+        .filter((m): m is ModifierDto => m !== undefined);
+      const hasBomEdges = bomEdges.some((e) => e.compositeVariantId === variant.id);
+      const noBomComposite = variant.isComposite && !variant.useProduction && !hasBomEdges;
+      let deductions: StockDeductionEntry[];
+      if (noBomComposite) {
+        // Composite parent without wired BOM: only modifier components can be checked
+        deductions = calculateOrderLineDeductions(
+          { ...variant, isComposite: false },
+          line.quantityMilli,
+          selectedMods,
+          catalogMap,
+          bomEdges
+        ).filter((d) => d.variantId !== variant.id);
+      } else {
+        deductions = calculateOrderLineDeductions(
+          variant,
+          line.quantityMilli,
+          selectedMods,
+          catalogMap,
+          bomEdges
+        );
+      }
+      for (const d of deductions) {
+        if (d.quantityChangeMilli >= 0) continue;
+        const target = catalogMap.get(d.variantId);
+        const prev = result.get(d.variantId);
+        result.set(d.variantId, {
+          itemName: target?.itemName ?? d.variantId,
+          requiredMilli: (prev?.requiredMilli ?? 0) + -d.quantityChangeMilli,
+          availableMilli: target?.inStockMilli ?? 0,
+        });
+      }
+    }
+    return result;
+  }
+
+  public computeGuestMenuAvailabilityMap(outletId = 'OUTLET-HQ'): Record<string, boolean> {
+    return this.executeRead((db) => {
+      const rows = db
+        .prepare(
+          `SELECT v.id AS id
+           FROM item_variants v
+           JOIN items i ON i.id = v.item_id
+           WHERE v.active = 1 AND i.active = 1 AND i.is_weighted_scale = 0`
+        )
+        .all() as Array<{ id: string }>;
+      const map: Record<string, boolean> = {};
+      for (const row of rows) {
+        const vid = String(row.id);
+        try {
+          const req = this.computeRequiredDeductionsForLinesOnDb(db, outletId, [
+            { variantId: vid, quantityMilli: 1_000, selectedModifierIds: [] },
+          ]);
+          let ok = true;
+          for (const entry of req.values()) {
+            if (entry.availableMilli < entry.requiredMilli) {
+              ok = false;
+              break;
+            }
+          }
+          map[vid] = ok;
+        } catch {
+          map[vid] = false;
+        }
+      }
+      return map;
+    });
+  }
+
+  private validateModifierSelectionsOnDb(
+    db: DatabaseSync,
+    isHospitalityItem: boolean,
+    selectedModifierIds: readonly string[]
+  ): Array<{ id: string; name: string; priceDeltaSatang: number }> {
+    const groups = db
+      .prepare(
+        `SELECT g.id AS id, g.name AS name, g.selection_type AS selectionType,
+                g.min_selections AS minSelections, g.max_selections AS maxSelections,
+                (SELECT COUNT(*) FROM modifiers m WHERE m.modifier_group_id = g.id) AS modifiersCount
+         FROM modifier_groups g`
+      )
+      .all() as Array<Record<string, unknown>>;
+    const modRows = db
+      .prepare(
+        `SELECT id, modifier_group_id AS groupId, name, price_delta_satang AS priceDeltaSatang FROM modifiers`
+      )
+      .all() as Array<Record<string, unknown>>;
+    const modMap = new Map(modRows.map((m) => [String(m.id), m]));
+
+    const picked: Array<{ id: string; name: string; priceDeltaSatang: number }> = [];
+    const selectedByGroup = new Map<string, number>();
+    for (const modId of selectedModifierIds) {
+      const m = modMap.get(modId);
+      if (!m) {
+        throw new Error(`HTTP 400 ไม่พบตัวเลือกเสริมที่เลือก (${modId})`);
+      }
+      picked.push({
+        id: String(m.id),
+        name: String(m.name),
+        priceDeltaSatang: Number(m.priceDeltaSatang),
+      });
+      const gid = String(m.groupId);
+      selectedByGroup.set(gid, (selectedByGroup.get(gid) ?? 0) + 1);
+    }
+
+    for (const g of groups) {
+      const gid = String(g.id);
+      const count = selectedByGroup.get(gid) ?? 0;
+      const gName = String(g.name);
+      if (count > 0) {
+        if (String(g.selectionType) === 'SINGLE' && count > 1) {
+          throw new Error(`HTTP 400 กลุ่มตัวเลือก "${gName}" เลือกได้เพียง 1 รายการ`);
+        }
+        if (count > Number(g.maxSelections)) {
+          throw new Error(
+            `HTTP 400 กลุ่มตัวเลือก "${gName}" เลือกได้ไม่เกิน ${Number(g.maxSelections)} รายการ`
+          );
+        }
+      }
+      if (isHospitalityItem && Number(g.minSelections) > 0 && Number(g.modifiersCount) > 0) {
+        if (count < Number(g.minSelections)) {
+          throw new Error(
+            `HTTP 400 กรุณาเลือก "${gName}" อย่างน้อย ${Number(g.minSelections)} รายการ`
+          );
+        }
+      }
+    }
+    return picked;
+  }
+
   public async submitGuestOrder(input: {
     outletId?: string | undefined;
     tableLabel: string;
     signedToken?: string | null | undefined;
     customerName?: string | undefined;
     customerNote?: string | undefined;
+    clientSubmissionKey?: string | undefined;
     lines: GuestOrderLineInputDto[];
   }): Promise<GuestOrderRecordDto> {
     const outletId = input.outletId ?? 'OUTLET-HQ';
@@ -7143,6 +7386,9 @@ export class SqliteReadWritePoolEngine {
 
     return this.executeWriteImmediate((db) => {
       const qrCfg = this.getQrOrderingConfigOnDb(db);
+      if (!qrCfg.enabled) {
+        throw new Error('HTTP 503 ระบบสั่งอาหารผ่าน QR ปิดรับออเดอร์ชั่วคราว');
+      }
       const fiscal = this.getFiscalConfigOnDb(db);
       const requestedTable = sanitizeGuestText(input.tableLabel, 24);
       if (!requestedTable) {
@@ -7180,6 +7426,19 @@ export class SqliteReadWritePoolEngine {
           ? 'TAKEAWAY'
           : 'DINE_IN';
 
+      const existingOrders = this.readGuestOrdersOnDb(db, outletId);
+      const cleanSubKey = sanitizeGuestText(input.clientSubmissionKey ?? '', 64);
+      if (cleanSubKey) {
+        const dup = existingOrders.find(
+          (o) =>
+            o.clientSubmissionKey === cleanSubKey &&
+            o.tableLabel.toUpperCase() === canonicalTable.toUpperCase()
+        );
+        if (dup) {
+          return this.hydrateGuestOrderKdsStatusOnDb(db, dup);
+        }
+      }
+
       const variantStmt = db.prepare(
         `SELECT
            v.id,
@@ -7190,6 +7449,7 @@ export class SqliteReadWritePoolEngine {
            i.name AS itemName,
            i.unit_name AS unitName,
            i.is_composite AS isComposite,
+           i.is_weighted_scale AS isWeightedScale,
            i.active AS itemActive,
            i.category_id AS categoryId,
            COALESCE(c.kitchen_station, 'MAIN') AS kitchenStation,
@@ -7200,10 +7460,6 @@ export class SqliteReadWritePoolEngine {
          LEFT JOIN inventory_levels il ON il.variant_id = v.id AND il.outlet_id = ?
          WHERE v.id = ?`
       );
-      const modifierStmt = db.prepare(
-        `SELECT id, name, price_delta_satang AS priceDeltaSatang FROM modifiers WHERE id = ?`
-      );
-
       const snapshots: GuestOrderLineSnapshotDto[] = [];
       let subtotalSatang = 0;
 
@@ -7231,9 +7487,8 @@ export class SqliteReadWritePoolEngine {
 
         const quantityMilli = qtyCount * 1_000;
         const isComposite = Number(vRow.isComposite) === 1;
-        const inStockMilli = Number(vRow.inStockMilli ?? 0);
-        if (!isComposite && inStockMilli < quantityMilli) {
-          throw new Error(`HTTP 409 สินค้า "${String(vRow.itemName)}" คงเหลือไม่เพียงพอ`);
+        if (Number(vRow.isWeightedScale) === 1) {
+          throw new Error('HTTP 400 สินค้าชั่งน้ำหนักตามจริงไม่สามารถสั่งผ่าน QR ประจำโต๊ะได้');
         }
 
         const uniqueModIds = Array.from(
@@ -7243,18 +7498,13 @@ export class SqliteReadWritePoolEngine {
               .filter(Boolean)
           )
         );
-        const modNames: string[] = [];
-        const modDeltas: Satang[] = [];
-        for (const modId of uniqueModIds) {
-          const mRow = modifierStmt.get(modId) as
-            | { id: string; name: string; priceDeltaSatang: number }
-            | undefined;
-          if (!mRow) {
-            throw new Error(`HTTP 400 ไม่พบตัวเลือกเสริมที่เลือก (${modId})`);
-          }
-          modNames.push(String(mRow.name));
-          modDeltas.push(Number(mRow.priceDeltaSatang));
-        }
+        const validatedMods = this.validateModifierSelectionsOnDb(
+          db,
+          isComposite,
+          uniqueModIds
+        );
+        const modNames: string[] = validatedMods.map((m) => m.name);
+        const modDeltas: Satang[] = validatedMods.map((m) => m.priceDeltaSatang);
 
         const unitPriceSatang = Number(vRow.priceSatang);
         const calc = computeGuestOrderLineSatang({
@@ -7280,6 +7530,21 @@ export class SqliteReadWritePoolEngine {
         });
       }
 
+      const stockCheck = this.computeRequiredDeductionsForLinesOnDb(
+        db,
+        outletId,
+        snapshots.map((s) => ({
+          variantId: s.variantId,
+          quantityMilli: s.quantityMilli,
+          selectedModifierIds: s.selectedModifierIds,
+        }))
+      );
+      for (const entry of stockCheck.values()) {
+        if (entry.availableMilli < entry.requiredMilli) {
+          throw new Error(`HTTP 409 สินค้าหรือวัตถุดิบ "${entry.itemName}" คงเหลือไม่เพียงพอ`);
+        }
+      }
+
       const financials = computeOrderFinancialTotals({
         subtotalSatang,
         discountSatang: 0,
@@ -7290,7 +7555,6 @@ export class SqliteReadWritePoolEngine {
         cashRoundingStepMajor: 0,
       });
 
-      const existingOrders = this.readGuestOrdersOnDb(db, outletId);
       let maxOrderNum = existingOrders.length;
       for (const ord of existingOrders) {
         const m = /^QR-(\d+)$/.exec(ord.orderCode);
@@ -7326,6 +7590,9 @@ export class SqliteReadWritePoolEngine {
         rejectionReason: null,
         createdAtIso: nowIso,
         updatedAtIso: nowIso,
+        trackingToken: randomBytes(8).toString('hex'),
+        clientSubmissionKey: cleanSubKey || null,
+        settledAtIso: null,
       };
 
       // Auto-Accept ONLY when store enabled AUTO_ACCEPT_SIGNED_TABLE AND guest has valid HMAC-signed Table QR
@@ -7361,12 +7628,210 @@ export class SqliteReadWritePoolEngine {
 
   public getGuestOrderStatusById(
     outletId: string,
-    guestOrderId: string
+    guestOrderId: string,
+    trackingToken?: string | undefined
   ): GuestOrderRecordDto | null {
     return this.executeRead((db) => {
       const orders = this.readGuestOrdersOnDb(db, outletId);
       const found = orders.find((o) => o.id === guestOrderId);
-      return found ? this.hydrateGuestOrderKdsStatusOnDb(db, found) : null;
+      if (!found) return null;
+      if (found.trackingToken && (!trackingToken || trackingToken.trim() !== found.trackingToken)) {
+        return null;
+      }
+      return this.hydrateGuestOrderKdsStatusOnDb(db, found);
+    });
+  }
+
+  public async settleTableQrOrdersAndSessions(input: {
+    outletId?: string | undefined;
+    tableLabel: string;
+    actorUserId?: string | undefined;
+  }): Promise<{ revokedSession: boolean; settledOrdersCount: number }> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const cleanTable = sanitizeGuestText(input.tableLabel, 24);
+    if (!cleanTable) return { revokedSession: false, settledOrdersCount: 0 };
+    const actor = input.actorUserId ?? 'USR-CASHIER-01';
+    const upper = cleanTable.toUpperCase();
+
+    return this.executeWriteImmediate((db) => {
+      const map = this.readTableSessionsMapOnDb(db, outletId);
+      let revokedSession = false;
+      if (upper in map) {
+        delete map[upper];
+        this.writeTableSessionsMapOnDb(db, outletId, map, actor);
+        revokedSession = true;
+      }
+
+      const nowIso = new Date().toISOString();
+      const orders = this.readGuestOrdersOnDb(db, outletId);
+      let settledOrdersCount = 0;
+      const nextOrders = orders.map((o) => {
+        if (
+          o.tableLabel.toUpperCase() === upper &&
+          !o.settledAtIso &&
+          (o.status === 'ACCEPTED' ||
+            o.status === 'PREPARING' ||
+            o.status === 'READY' ||
+            o.status === 'SERVED')
+        ) {
+          settledOrdersCount += 1;
+          return { ...o, status: 'SETTLED' as const, settledAtIso: nowIso, updatedAtIso: nowIso };
+        }
+        return o;
+      });
+      if (settledOrdersCount > 0) {
+        this.writeGuestOrdersOnDb(db, outletId, nextOrders, actor);
+      }
+
+      const calls = this.readServiceCallsOnDb(db, outletId);
+      let callsChanged = false;
+      const nextCalls = calls.map((c) => {
+        if (c.tableLabel.toUpperCase() === upper && c.status === 'PENDING') {
+          callsChanged = true;
+          return {
+            ...c,
+            status: 'ACKNOWLEDGED' as const,
+            acknowledgedByName: 'Auto (Bill Settled)',
+            acknowledgedAtIso: nowIso,
+          };
+        }
+        return c;
+      });
+      if (callsChanged) {
+        this.writeServiceCallsOnDb(db, outletId, nextCalls, actor);
+      }
+      return { revokedSession, settledOrdersCount };
+    });
+  }
+
+  private readServiceCallsOnDb(db: DatabaseSync, outletId: string): GuestServiceCallDto[] {
+    const key = `qr_service_calls_${outletId}`;
+    const row = db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(key) as
+      | { value?: string }
+      | undefined;
+    if (!row?.value) return [];
+    try {
+      const parsed = JSON.parse(row.value) as unknown;
+      return Array.isArray(parsed) ? (parsed as GuestServiceCallDto[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private writeServiceCallsOnDb(
+    db: DatabaseSync,
+    outletId: string,
+    calls: GuestServiceCallDto[],
+    actorUserId: string
+  ): void {
+    const key = `qr_service_calls_${outletId}`;
+    db.prepare(
+      `INSERT INTO store_config (key, value, is_protected, updated_by, updated_at)
+       VALUES (?, ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_by = excluded.updated_by,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+    ).run(key, JSON.stringify(calls.slice(0, 50)), actorUserId);
+  }
+
+  public listGuestServiceCalls(outletId = 'OUTLET-HQ'): GuestServiceCallDto[] {
+    return this.executeRead((db) => this.readServiceCallsOnDb(db, outletId));
+  }
+
+  public async submitGuestServiceCall(input: {
+    outletId?: string | undefined;
+    tableLabel: string;
+    signedToken?: string | null | undefined;
+    callType: GuestServiceCallType;
+    note?: string | undefined;
+  }): Promise<GuestServiceCallDto> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const callType: GuestServiceCallType =
+      input.callType === 'REQUEST_BILL' ? 'REQUEST_BILL' : 'CALL_STAFF';
+
+    return this.executeWriteImmediate((db) => {
+      const qrCfg = this.getQrOrderingConfigOnDb(db);
+      if (!qrCfg.enabled) {
+        throw new Error('HTTP 503 ระบบสั่งอาหารผ่าน QR ปิดรับชั่วคราว');
+      }
+      const requestedTable = sanitizeGuestText(input.tableLabel, 24);
+      if (!requestedTable) {
+        throw new Error('HTTP 400 กรุณาเลือกหมายเลขโต๊ะก่อนเรียกพนักงาน');
+      }
+      const providedToken = typeof input.signedToken === 'string' ? input.signedToken.trim() : '';
+      let isSigned = false;
+      if (providedToken) {
+        const verified = this.verifyTableQrTokenOnDb(db, outletId, requestedTable, providedToken);
+        if (!verified.valid) {
+          throw new Error('HTTP 403 QR โต๊ะนี้หมดอายุหรือถูกปิดบิลแล้ว กรุณาขอใบ QR ใหม่จากพนักงาน');
+        }
+        isSigned = true;
+      } else if (!qrCfg.allowOpenTableSelection) {
+        throw new Error('HTTP 403 ร้านนี้เปิดรับเฉพาะการสแกนจากใบ QR ประจำโต๊ะเท่านั้น');
+      }
+      const canonical = qrCfg.tableLabels.find(
+        (l) => l.trim().toUpperCase() === requestedTable.toUpperCase()
+      );
+      if (!isSigned && !canonical) {
+        throw new Error(`HTTP 400 ไม่พบหมายเลขโต๊ะ "${requestedTable}" ในรายการโต๊ะของร้าน`);
+      }
+      const tableLabel = canonical ?? requestedTable;
+
+      const calls = this.readServiceCallsOnDb(db, outletId);
+      const nowMs = Date.now();
+      const existing = calls.find(
+        (c) =>
+          c.status === 'PENDING' &&
+          c.callType === callType &&
+          c.tableLabel.toUpperCase() === tableLabel.toUpperCase() &&
+          nowMs - Date.parse(c.createdAtIso) < 120_000
+      );
+      if (existing) return existing;
+
+      const record: GuestServiceCallDto = {
+        id: `SCALL-${randomUUID()}`,
+        outletId,
+        tableLabel,
+        callType,
+        note: sanitizeGuestText(input.note ?? '', 120),
+        isSignedTableSession: isSigned,
+        status: 'PENDING',
+        createdAtIso: new Date(nowMs).toISOString(),
+        acknowledgedByName: null,
+        acknowledgedAtIso: null,
+      };
+      this.writeServiceCallsOnDb(db, outletId, [record, ...calls], 'GUEST-QR');
+      return record;
+    });
+  }
+
+  public async acknowledgeGuestServiceCall(input: {
+    outletId?: string | undefined;
+    callId: string;
+    actorUserId?: string | undefined;
+    actorDisplayName?: string | undefined;
+  }): Promise<GuestServiceCallDto> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const actor = input.actorUserId ?? 'USR-CASHIER-01';
+    const actorName = sanitizeGuestText(input.actorDisplayName ?? 'Cashier', 60) || 'Cashier';
+    return this.executeWriteImmediate((db) => {
+      const calls = this.readServiceCallsOnDb(db, outletId);
+      const idx = calls.findIndex((c) => c.id === input.callId);
+      if (idx < 0) {
+        throw new Error('HTTP 404 ไม่พบรายการเรียกพนักงานที่ระบุ');
+      }
+      const target = calls[idx]!;
+      if (target.status === 'ACKNOWLEDGED') return target;
+      const updated: GuestServiceCallDto = {
+        ...target,
+        status: 'ACKNOWLEDGED',
+        acknowledgedByName: actorName,
+        acknowledgedAtIso: new Date().toISOString(),
+      };
+      calls[idx] = updated;
+      this.writeServiceCallsOnDb(db, outletId, calls, actor);
+      return updated;
     });
   }
 
@@ -7394,6 +7859,22 @@ export class SqliteReadWritePoolEngine {
       }
 
       const fiscal = this.getFiscalConfigOnDb(db);
+      const acceptStock = this.computeRequiredDeductionsForLinesOnDb(
+        db,
+        outletId,
+        target.lines.map((l) => ({
+          variantId: l.variantId,
+          quantityMilli: l.quantityMilli,
+          selectedModifierIds: l.selectedModifierIds,
+        }))
+      );
+      for (const entry of acceptStock.values()) {
+        if (entry.availableMilli < entry.requiredMilli) {
+          throw new Error(
+            `HTTP 409 สินค้าหรือวัตถุดิบ "${entry.itemName}" คงเหลือไม่เพียงพอสำหรับการรับออเดอร์นี้`
+          );
+        }
+      }
       const heldBillId = this.mergeGuestOrderIntoHeldBillOnDb(
         db,
         outletId,

@@ -20,6 +20,8 @@ import type {
   GuestMenuPayloadDto,
   GuestOrderLineInputDto,
   GuestOrderRecordDto,
+  GuestServiceCallDto,
+  GuestServiceCallType,
   QrOrderingConfigDto,
   QrOrderingRuntimeStatusDto,
 } from '../../../shared-contracts/src/qr-ordering.ts';
@@ -33,6 +35,7 @@ const CAPTIVE_PORTAL_PROBE_PATHS = new Set<string>([
   '/gen_204',
   '/hotspot-detect.html',
   '/library/test/success.html',
+  '/success.html',
   '/ncsi.txt',
   '/connecttest.txt',
   '/redirect',
@@ -40,6 +43,7 @@ const CAPTIVE_PORTAL_PROBE_PATHS = new Set<string>([
   '/success.txt',
   '/mobile/status.php',
   '/check_network_status.txt',
+  '/kindle-wifi/wifistub.html',
 ]);
 
 const FORBIDDEN_POS_PREFIXES = [
@@ -61,13 +65,53 @@ const FORBIDDEN_POS_PREFIXES = [
   '/api/profile',
 ];
 
+export interface SlidingWindowBucketOptions {
+  nowMs?: number | undefined;
+  windowMs?: number | undefined;
+  maxTrackedKeys?: number | undefined;
+}
+
+/**
+ * Pure sliding-window per-key rate-limit checker with bounded FIFO key eviction.
+ * Rejected calls do not append timestamps, so retries never extend the lockout window.
+ */
+export function checkSlidingWindowBucketLimit(
+  bucketMap: Map<string, number[]>,
+  clientIp: string,
+  maxPerWindow: number,
+  options?: SlidingWindowBucketOptions
+): boolean {
+  const now = options?.nowMs ?? Date.now();
+  const windowMs = Math.max(1, Number(options?.windowMs ?? 60_000));
+  const maxTrackedKeys = Math.max(1, Number(options?.maxTrackedKeys ?? 500));
+  const prev = bucketMap.get(clientIp) ?? [];
+  const active = prev.filter((ts) => now - ts < windowMs);
+  if (active.length >= maxPerWindow) {
+    bucketMap.set(clientIp, active);
+    return false;
+  }
+  active.push(now);
+  if (!bucketMap.has(clientIp) && bucketMap.size >= maxTrackedKeys) {
+    const oldestKey = bucketMap.keys().next().value;
+    if (oldestKey !== undefined) {
+      bucketMap.delete(oldestKey);
+    }
+  }
+  bucketMap.set(clientIp, active);
+  return true;
+}
+
 export interface GuestQrOrderingServerDeps {
   ipc: LocalIpcBridge;
   outletId?: string | undefined;
   productImagesDir: string;
   getProductImagesMap: () => Record<string, string>;
   rateLimitMaxOrdersPerMinute?: number | undefined;
+  rateLimitWindowMs?: number | undefined;
+  nowProvider?: (() => number) | undefined;
+  isWriteLockedByLowBattery?: (() => boolean) | undefined;
   onGuestOrderSubmitted?: ((order: GuestOrderRecordDto) => void) | undefined;
+  onGuestServiceCallSubmitted?: ((call: GuestServiceCallDto) => void) | undefined;
 }
 
 export function detectLanIpv4Addresses(): string[] {
@@ -98,7 +142,10 @@ export function detectLanIpv4Addresses(): string[] {
 export class GuestQrOrderingServer {
   private readonly deps: GuestQrOrderingServerDeps;
   private readonly rateLimitMaxPerMin: number;
+  private readonly rateLimitWindowMs: number;
   private readonly rateBuckets = new Map<string, number[]>();
+  private readonly readRateBuckets = new Map<string, number[]>();
+  private readonly callRateBuckets = new Map<string, number[]>();
   private server: http.Server | null = null;
   private boundPort = 0;
   private lastError: string | undefined = undefined;
@@ -107,10 +154,25 @@ export class GuestQrOrderingServer {
   constructor(deps: GuestQrOrderingServerDeps) {
     this.deps = deps;
     this.rateLimitMaxPerMin = Math.max(1, Number(deps.rateLimitMaxOrdersPerMinute ?? 10));
+    this.rateLimitWindowMs = Math.max(50, Number(deps.rateLimitWindowMs ?? 60_000));
   }
 
   public getActiveOutletId(): string {
     return this.deps.outletId ?? 'OUTLET-HQ';
+  }
+
+  private resolveEffectiveOutletId(rawOutlet?: string | null): string {
+    const clean = (rawOutlet ?? '').trim();
+    if (!clean) return this.getActiveOutletId();
+    try {
+      const outlets = this.deps.ipc.listOutlets();
+      if (outlets.some((o) => o.id === clean)) {
+        return clean;
+      }
+    } catch {
+      // fallback to default outlet
+    }
+    return this.getActiveOutletId();
   }
 
   public getRuntimeStatus(cfg?: QrOrderingConfigDto): QrOrderingRuntimeStatusDto {
@@ -158,6 +220,10 @@ export class GuestQrOrderingServer {
       const srv = http.createServer((req, res) => {
         void this.handleRequest(req, res);
       });
+      srv.headersTimeout = 10_000;
+      srv.requestTimeout = 15_000;
+      srv.keepAliveTimeout = 5_000;
+      srv.maxHeadersCount = 40;
       const onError = (err: Error) => {
         try {
           srv.close();
@@ -236,21 +302,36 @@ export class GuestQrOrderingServer {
     return null;
   }
 
-  private checkRateLimit(clientIp: string): boolean {
-    const now = Date.now();
-    const windowMs = 60_000;
-    const prev = this.rateBuckets.get(clientIp) ?? [];
-    const active = prev.filter((ts) => now - ts < windowMs);
-    if (active.length >= this.rateLimitMaxPerMin) {
-      this.rateBuckets.set(clientIp, active);
-      return false;
+  private checkBucketLimit(
+    bucketMap: Map<string, number[]>,
+    clientIp: string,
+    maxPerMin: number
+  ): boolean {
+    const nowMs = this.deps.nowProvider ? this.deps.nowProvider() : Date.now();
+    return checkSlidingWindowBucketLimit(bucketMap, clientIp, maxPerMin, {
+      nowMs,
+      windowMs: this.rateLimitWindowMs,
+      maxTrackedKeys: 500,
+    });
+  }
+
+  private resolveCaptiveRedirectBase(
+    hostHeader: string | string[] | undefined,
+    status: QrOrderingRuntimeStatusDto
+  ): string {
+    const rawHost = (Array.isArray(hostHeader) ? hostHeader[0] : hostHeader)?.trim() ?? '';
+    const m = /^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$/.exec(rawHost);
+    if (!m) {
+      return status.baseUrl;
     }
-    active.push(now);
-    if (this.rateBuckets.size > 500) {
-      this.rateBuckets.clear();
-    }
-    this.rateBuckets.set(clientIp, active);
-    return true;
+    const ip = m[1]!;
+    const portPart = m[2];
+    const allowedIp =
+      ip === status.activeHost ||
+      ip === '127.0.0.1' ||
+      status.detectedLanIpv4s.includes(ip);
+    const allowedPort = !portPart || portPart === String(status.port);
+    return allowedIp && allowedPort ? `http://${rawHost}` : status.baseUrl;
   }
 
   private async readBoundedJsonBody<T>(req: http.IncomingMessage): Promise<T> {
@@ -305,9 +386,12 @@ export class GuestQrOrderingServer {
       }));
     const visibleCatIds = new Set(visibleCategories.map((c) => c.id));
 
+    const availMap = this.deps.ipc.computeGuestMenuAvailabilityMap(outletId);
+
     const visibleItems = variantsRaw
       .filter((v) => {
         if (!v.active) return false;
+        if (v.isWeightedScale) return false;
         if (v.categoryId === 'CAT-RAW') return false;
         if (v.kitchenStation.toUpperCase() === 'PREP') return false;
         if (v.categoryId && visibleCatIds.size > 0 && !visibleCatIds.has(v.categoryId)) {
@@ -326,7 +410,7 @@ export class GuestQrOrderingServer {
           unitName: v.unitName,
           priceSatang: v.priceSatang,
           imageUrl: fname ? `/api/guest/image/${encodeURIComponent(fname)}` : null,
-          isAvailable: v.isComposite || v.inStockMilli >= 1_000,
+          isAvailable: availMap[v.id] ?? (v.isComposite || v.inStockMilli >= 1_000),
           isComposite: v.isComposite,
           kitchenStation: v.kitchenStation,
         };
@@ -401,13 +485,7 @@ export class GuestQrOrderingServer {
       // 2. Captive Portal OS Connectivity Probe Intercepts (iOS / Android / Windows / Firefox)
       if (method === 'GET' && CAPTIVE_PORTAL_PROBE_PATHS.has(lowerPath)) {
         const status = this.getRuntimeStatus();
-        const hostHeader = Array.isArray(req.headers.host)
-          ? req.headers.host[0]
-          : req.headers.host;
-        const redirectBase =
-          hostHeader && /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(hostHeader.trim())
-            ? `http://${hostHeader.trim()}`
-            : status.baseUrl;
+        const redirectBase = this.resolveCaptiveRedirectBase(req.headers.host, status);
         res.writeHead(302, {
           Location: `${redirectBase}/m?captive=1`,
           'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -439,11 +517,12 @@ export class GuestQrOrderingServer {
 
       // 4. Guest Mobile Web App HTML
       if (method === 'GET' && (pathname === '/' || pathname === '/m' || pathname === '/menu')) {
-        const outletId = this.getActiveOutletId();
+        const outletId = this.resolveEffectiveOutletId(url.searchParams.get('o'));
         const store = this.deps.ipc.getStoreIdentitySettings(outletId);
         const fiscal = this.deps.ipc.getFiscalConfig();
         const html = renderGuestMenuHtml({
           storeName: store.storeName,
+          initialOutletId: outletId,
           initialTableLabel: (url.searchParams.get('t') ?? '').trim().slice(0, 24),
           initialSignedToken: (url.searchParams.get('s') ?? '').trim().slice(0, 80),
           isCaptiveMode: url.searchParams.get('captive') === '1',
@@ -470,7 +549,12 @@ export class GuestQrOrderingServer {
 
       // 6. Sanitized Read-Only Active Menu API
       if (method === 'GET' && pathname === '/api/guest/menu') {
-        const outletId = this.getActiveOutletId();
+        const clientIp = req.socket.remoteAddress ?? 'unknown';
+        if (!this.checkBucketLimit(this.readRateBuckets, clientIp, 120)) {
+          this.sendJson(res, 429, { error: 'HTTP 429 Too Many Requests' });
+          return;
+        }
+        const outletId = this.resolveEffectiveOutletId(url.searchParams.get('o'));
         const tableParam = (url.searchParams.get('t') ?? '').trim().slice(0, 24);
         const tokenParam = (url.searchParams.get('s') ?? '').trim().slice(0, 80);
         const menuPayload = this.buildSanitizedMenuPayload(outletId, tableParam, tokenParam);
@@ -525,8 +609,14 @@ export class GuestQrOrderingServer {
 
       // 8. Rate-Limited Guest Order Submission (Server-side Fixed-Point Price Re-Computation)
       if (method === 'POST' && pathname === '/api/guest/orders') {
+        if (this.deps.isWriteLockedByLowBattery?.()) {
+          this.sendJson(res, 503, {
+            error: 'HTTP 503 Service Unavailable: ระบบสำรองไฟฉุกเฉินกำลังบันทึกข้อมูล งดรับออเดอร์ชั่วคราว',
+          });
+          return;
+        }
         const clientIp = req.socket.remoteAddress ?? 'unknown';
-        if (!this.checkRateLimit(clientIp)) {
+        if (!this.checkBucketLimit(this.rateBuckets, clientIp, this.rateLimitMaxPerMin)) {
           this.sendJson(res, 429, {
             error:
               'HTTP 429 Too Many Requests: ส่งคำสั่งซื้อถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง',
@@ -534,19 +624,24 @@ export class GuestQrOrderingServer {
           return;
         }
         const body = await this.readBoundedJsonBody<{
+          outletId?: string;
           tableLabel?: string;
           signedToken?: string;
           customerName?: string;
           customerNote?: string;
+          clientSubmissionKey?: string;
           lines?: GuestOrderLineInputDto[];
         }>(req);
 
         const order = await this.deps.ipc.submitGuestOrder({
-          outletId: this.getActiveOutletId(),
+          outletId: this.resolveEffectiveOutletId(body.outletId),
           tableLabel: String(body.tableLabel ?? ''),
           signedToken: typeof body.signedToken === 'string' ? body.signedToken : '',
           customerName: typeof body.customerName === 'string' ? body.customerName : '',
           customerNote: typeof body.customerNote === 'string' ? body.customerNote : '',
+          ...(typeof body.clientSubmissionKey === 'string' && body.clientSubmissionKey.trim()
+            ? { clientSubmissionKey: body.clientSubmissionKey.trim() }
+            : {}),
           lines: Array.isArray(body.lines) ? body.lines : [],
         });
 
@@ -555,14 +650,57 @@ export class GuestQrOrderingServer {
         return;
       }
 
+      // 8.5 Rate-Limited Guest Service Call / Request Bill
+      if (method === 'POST' && pathname === '/api/guest/service-call') {
+        if (this.deps.isWriteLockedByLowBattery?.()) {
+          this.sendJson(res, 503, {
+            error: 'HTTP 503 Service Unavailable: ระบบสำรองไฟฉุกเฉิน งดรับคำขอชั่วคราว',
+          });
+          return;
+        }
+        const clientIp = req.socket.remoteAddress ?? 'unknown';
+        if (!this.checkBucketLimit(this.callRateBuckets, clientIp, Math.max(4, this.rateLimitMaxPerMin))) {
+          this.sendJson(res, 429, {
+            error: 'HTTP 429 Too Many Requests: กดเรียกพนักงานถี่เกินไป กรุณารอสักครู่',
+          });
+          return;
+        }
+        const body = await this.readBoundedJsonBody<{
+          outletId?: string;
+          tableLabel?: string;
+          signedToken?: string;
+          callType?: GuestServiceCallType;
+          note?: string;
+        }>(req);
+
+        const call = await this.deps.ipc.submitGuestServiceCall({
+          outletId: this.resolveEffectiveOutletId(body.outletId),
+          tableLabel: String(body.tableLabel ?? ''),
+          signedToken: typeof body.signedToken === 'string' ? body.signedToken : '',
+          callType: body.callType === 'REQUEST_BILL' ? 'REQUEST_BILL' : 'CALL_STAFF',
+          ...(typeof body.note === 'string' ? { note: body.note } : {}),
+        });
+
+        this.deps.onGuestServiceCallSubmitted?.(call);
+        this.sendJson(res, 201, { ok: true, call });
+        return;
+      }
+
       // 9. Single Guest Order Live Status Tracking (KDS-Hydrated)
       if (method === 'GET' && pathname === '/api/guest/order-status') {
+        const clientIp = req.socket.remoteAddress ?? 'unknown';
+        if (!this.checkBucketLimit(this.readRateBuckets, clientIp, 120)) {
+          this.sendJson(res, 429, { error: 'HTTP 429 Too Many Requests' });
+          return;
+        }
         const orderId = (url.searchParams.get('id') ?? '').trim();
         if (!orderId) {
           this.sendJson(res, 400, { error: 'Missing order id' });
           return;
         }
-        const order = this.deps.ipc.getGuestOrderStatusById(this.getActiveOutletId(), orderId);
+        const token = (url.searchParams.get('token') ?? '').trim() || undefined;
+        const outletId = this.resolveEffectiveOutletId(url.searchParams.get('o'));
+        const order = this.deps.ipc.getGuestOrderStatusById(outletId, orderId, token);
         if (!order) {
           this.sendJson(res, 404, { error: 'Order not found' });
           return;
@@ -584,7 +722,9 @@ export class GuestQrOrderingServer {
               ? 413
               : message.includes('429')
                 ? 429
-                : 400;
+                : message.includes('503')
+                  ? 503
+                  : 400;
       this.sendJson(res, statusCode, { error: message });
     }
   }

@@ -26,7 +26,23 @@ export type QrGuestOrderStatus =
   | 'PREPARING'
   | 'READY'
   | 'SERVED'
+  | 'SETTLED'
   | 'REJECTED';
+
+export type GuestServiceCallType = 'CALL_STAFF' | 'REQUEST_BILL';
+
+export interface GuestServiceCallDto {
+  id: string;
+  outletId: string;
+  tableLabel: string;
+  callType: GuestServiceCallType;
+  note: string;
+  isSignedTableSession: boolean;
+  status: 'PENDING' | 'ACKNOWLEDGED';
+  createdAtIso: string;
+  acknowledgedByName: string | null;
+  acknowledgedAtIso: string | null;
+}
 
 export interface QrOrderingConfigDto {
   /** Master switch for the isolated LAN Guest Server (default OFF for zero-trust safety). */
@@ -180,6 +196,9 @@ export interface GuestOrderRecordDto {
   rejectionReason: string | null;
   createdAtIso: string;
   updatedAtIso: string;
+  trackingToken?: string | undefined;
+  clientSubmissionKey?: string | null | undefined;
+  settledAtIso?: string | null | undefined;
 }
 
 export const DEFAULT_QR_TABLE_LABELS: readonly string[] = [
@@ -315,7 +334,8 @@ export function buildWifiQrPayload(
 export function buildTableMenuUrl(
   baseUrl: string,
   tableLabel: string,
-  signedToken?: string | null
+  signedToken?: string | null,
+  outletId?: string | null
 ): string {
   const cleanBase = baseUrl.replace(/\/+$/, '');
   const params = new URLSearchParams();
@@ -324,6 +344,9 @@ export function buildTableMenuUrl(
   }
   if (signedToken && signedToken.trim()) {
     params.set('s', signedToken.trim());
+  }
+  if (outletId && outletId.trim() && outletId.trim() !== 'OUTLET-HQ') {
+    params.set('o', outletId.trim());
   }
   const qs = params.toString();
   return qs ? `${cleanBase}/m?${qs}` : `${cleanBase}/m`;

@@ -21,6 +21,7 @@ import { useI18n } from '../i18n/index.tsx';
 import type {
   BootstrapPayload,
   GuestOrderRecordDto,
+  GuestServiceCallDto,
   QrOrderingConfigDto,
   QrOrderingRuntimeStatusDto,
   StaffUserDto,
@@ -80,6 +81,7 @@ interface QrOrderingInboxPanelProps {
   onOpenTableQrModal: () => void;
   onAcceptedOrder: () => Promise<void>;
   onToast: (msg: string, tone?: 'success' | 'warn' | 'error') => void;
+  serviceCalls?: GuestServiceCallDto[] | undefined;
 }
 
 export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
@@ -93,18 +95,37 @@ export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
   onOpenTableQrModal,
   onAcceptedOrder,
   onToast,
+  serviceCalls = [],
 }) => {
-  const { fiscal, pick } = useI18n();
+  const { dateTime, fiscal, pick } = useI18n();
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
+  const [acknowledgingCallId, setAcknowledgingCallId] = useState<string | null>(null);
   const [rejectTarget, setRejectTarget] = useState<GuestOrderRecordDto | null>(null);
   const [rejectReason, setRejectReason] = useState('');
 
   const qrConfig: QrOrderingConfigDto =
     bootstrap.qrOrderingConfig ?? DEFAULT_QR_ORDERING_CONFIG;
+  const pendingCalls = serviceCalls.filter((c) => c.status === 'PENDING');
   const pendingOrders = guestOrders.filter((o) => o.status === 'PENDING_CONFIRM');
   const handledOrders = guestOrders.filter((o) => o.status !== 'PENDING_CONFIRM').slice(0, 25);
 
   const money = (satang: number) => formatMoney(satang, fiscal.currencyCode);
+
+  const handleAcknowledgeCall = async (callId: string) => {
+    setAcknowledgingCallId(callId);
+    try {
+      await posTransport.acknowledgeQrServiceCall({ outletId, callId });
+      await onRefreshOrders();
+      onToast(
+        pick('รับทราบคำขอลูกค้าแล้ว', 'ຮັບຊາບຄຳຂໍລູກຄ້າແລ້ວ', 'Service call acknowledged'),
+        'success'
+      );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setAcknowledgingCallId(null);
+    }
+  };
 
   const handleAccept = async (order: GuestOrderRecordDto) => {
     setBusyOrderId(order.id);
@@ -183,6 +204,10 @@ export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
       SERVED: {
         label: pick('เสิร์ฟแล้ว', 'ເສີບແລ້ວ', 'Served'),
         cls: 'border-hairline bg-surface-1 text-ink-muted',
+      },
+      SETTLED: {
+        label: pick('ชำระเงินแล้ว', 'ຊຳລະເງິນແລ້ວ', 'Settled'),
+        cls: 'border-hairline bg-surface-2 text-ink-muted',
       },
       REJECTED: {
         label: pick('ปฏิเสธแล้ว', 'ປະຕິເສດແລ້ວ', 'Rejected'),
@@ -272,6 +297,66 @@ export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
 
       {/* Pending Confirmation Queue */}
       <div className="p-6 space-y-6">
+        {pendingCalls.length > 0 && (
+          <div className="space-y-2.5">
+            <h4 className="font-google-display text-[15px] font-medium text-ink flex items-center gap-2">
+              <BellRing className="h-4 w-4 text-danger" />
+              <span>
+                {pick(
+                  `คำขอเรียกพนักงาน / เช็กบิลจากโต๊ะ (${pendingCalls.length})`,
+                  `ຄຳຂໍເອີ້ນພະນັກງານ / ເຊັກບິນຈາກໂຕະ (${pendingCalls.length})`,
+                  `Table Service Calls & Bill Requests (${pendingCalls.length})`
+                )}
+              </span>
+            </h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {pendingCalls.map((call) => {
+                const isCallBusy = acknowledgingCallId === call.id;
+                const isBill = call.callType === 'REQUEST_BILL';
+                return (
+                  <div
+                    key={call.id}
+                    className="flex items-center justify-between gap-3 rounded-[6px] border border-danger/40 bg-danger-soft/30 px-4 py-3"
+                  >
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="rounded-[48px] bg-ink px-2.5 py-0.5 text-xs font-medium text-white">
+                          {pick('โต๊ะ', 'ໂຕະ', 'Table')} {call.tableLabel}
+                        </span>
+                        <span className="text-sm font-medium text-ink">
+                          {isBill
+                            ? pick('ขอเช็กบิล', 'ຂໍເຊັກບິນ', 'Request Bill')
+                            : pick('เรียกพนักงาน', 'ເອີ້ນພະນັກງານ', 'Call Staff')}
+                        </span>
+                      </div>
+                      <div className="text-xs text-ink-muted flex items-center gap-1.5">
+                        <Clock className="h-3 w-3 shrink-0" />
+                        <span>{dateTime(call.createdAtIso)}</span>
+                        {call.note && (
+                          <>
+                            <span>·</span>
+                            <span className="truncate text-ink">{call.note}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isCallBusy}
+                      onClick={() => void handleAcknowledgeCall(call.id)}
+                      className="shrink-0 rounded-[48px] bg-ink px-3.5 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                    >
+                      {isCallBusy
+                        ? pick('กำลังบันทึก...', 'ກຳລັງບັນທຶກ...', 'Saving...')
+                        : pick('รับทราบ', 'ຮັບຊາບ', 'Acknowledge')}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h4 className="font-google-display text-[15px] font-medium text-ink flex items-center gap-2">
@@ -336,7 +421,7 @@ export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
                         </div>
                         <div className="text-xs text-ink-muted flex flex-wrap items-center gap-2">
                           <Clock className="h-3.5 w-3.5" />
-                          <span>{new Date(ord.createdAtIso).toLocaleTimeString('th-TH')}</span>
+                          <span>{dateTime(ord.createdAtIso)}</span>
                           {ord.customerName && (
                             <>
                               <span>·</span>
@@ -462,7 +547,7 @@ export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
                   <div className="text-right tabular-nums-google">
                     <div className="font-medium text-ink">{money(ord.estimatedTotalSatang)}</div>
                     <div className="text-[11px] text-ink-muted">
-                      {new Date(ord.createdAtIso).toLocaleTimeString('th-TH')}
+                      {dateTime(ord.createdAtIso)}
                     </div>
                   </div>
                 </div>
@@ -582,7 +667,7 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
   onSessionsChanged,
   onToast,
 }) => {
-  const { fiscal, pick } = useI18n();
+  const { dateTime, fiscal, pick } = useI18n();
   const qrCfg = bootstrap.qrOrderingConfig ?? DEFAULT_QR_ORDERING_CONFIG;
   const paperWidthMm: 80 | 58 = bootstrap.printerConfig.paperWidthMm;
 
@@ -616,7 +701,7 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
         wifiSecurity: qrCfg.wifiSecurity,
         wifiQrPayload: activeSession.wifiQrPayload,
         openedByName: activeSession.openedByName,
-        openedAtText: new Date(activeSession.openedAtIso).toLocaleString('th-TH'),
+        openedAtText: dateTime(activeSession.openedAtIso),
       });
       setSlipRaster(raster);
     } catch {

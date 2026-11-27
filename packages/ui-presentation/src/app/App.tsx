@@ -13,7 +13,10 @@ import {
   Wallet,
   XCircle,
 } from 'lucide-react';
-import { parseScaleBarcodeEan13 } from '../../../hal-drivers/src/scanner/mod.ts';
+import {
+  matchesScaleBarcodePlu,
+  parseScaleBarcodeEan13,
+} from '../../../hal-drivers/src/scanner/mod.ts';
 import { formatMilliUnitsToQtyString } from '../../../shared-contracts/src/fixed-point.ts';
 import {
   DEFAULT_TH_FISCAL_CONFIG,
@@ -411,11 +414,17 @@ export const App: React.FC = () => {
           priceEmbeddedMultiplier: activeFiscal.scalePriceEmbeddedMultiplier,
         });
         if (prefixCheck.isScaleBarcode && prefixCheck.sku) {
-          const matchedScaleItem = bootstrap.catalogDetailed.find(
-            (v) =>
-              v.isWeightedScale &&
-              (v.sku.endsWith(prefixCheck.sku!) || (v.barcode ?? '').includes(prefixCheck.sku!))
-          );
+          const matchedScaleItem =
+            bootstrap.catalogDetailed.find(
+              (v) =>
+                v.isWeightedScale &&
+                (v.sku === prefixCheck.sku! ||
+                  v.sku.endsWith(prefixCheck.sku!) ||
+                  (v.barcode ?? '').includes(prefixCheck.sku!))
+            ) ??
+            bootstrap.catalogDetailed.find(
+              (v) => v.isWeightedScale && matchesScaleBarcodePlu(v, prefixCheck.sku!)
+            );
           if (matchedScaleItem) {
             if (!matchedScaleItem.active) {
               pushToast(

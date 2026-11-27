@@ -12,6 +12,7 @@ import {
   ImagePlus,
   PackagePlus,
   Plus,
+  Printer,
   RefreshCw,
   ScanBarcode,
   Search,
@@ -30,6 +31,7 @@ import {
 } from '../../../../shared-contracts/src/fixed-point.ts';
 import { formatMicroUnitCostForInput } from '../../../../shared-contracts/src/currency.ts';
 import { PhysicalScannerStreamBuffer } from '../../hooks/usePhysicalScanner.ts';
+import { generateValidInternalEan13 } from '../../../../hal-drivers/src/barcode/mod.ts';
 import { posTransport, resolveBackendAssetUrl } from '../api/pos-transport.ts';
 import { useI18n } from '../i18n/index.tsx';
 import type {
@@ -51,6 +53,11 @@ import {
   type ShopCategoryDepartment,
 } from '../utils/profile-domain.ts';
 import { BarcodeCameraScannerModal } from './BarcodeCameraScannerModal.tsx';
+import {
+  BarcodeLabelPrintWorkspace,
+  QuickBarcodePrintModal,
+  type BarcodeQueueEntry,
+} from './BarcodeLabelPrintWorkspace.tsx';
 import { ConfirmDialog, ModalDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface WarehouseWorkspaceProps {
@@ -68,6 +75,7 @@ type WmsSubTab =
   | 'PO_LANDED'
   | 'PREP_BUILD'
   | 'STOCKTAKE_TRANSFER'
+  | 'BARCODE_PRINT'
   | 'LEDGER';
 
 export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
@@ -164,6 +172,16 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   const [adjTarget, setAdjTarget] = useState<CatalogVariantDetailDto | null>(null);
   const [adjDeltaInput, setAdjDeltaInput] = useState('-1.000');
   const [adjReason, setAdjReason] = useState('DAMAGED / ตัดของชำรุด');
+
+  // Product Barcode Label Printing Queue & Quick Print Modal
+  const [barcodeQueue, setBarcodeQueue] = useState<BarcodeQueueEntry[]>([]);
+  const [quickBarcodeTarget, setQuickBarcodeTarget] = useState<CatalogVariantDetailDto | null>(
+    null
+  );
+  const [lastReceivedPoBatch, setLastReceivedPoBatch] = useState<{
+    poNumber: string;
+    items: BarcodeQueueEntry[];
+  } | null>(null);
 
   // Purchase Order Builder
   const [poSupplierId, setPoSupplierId] = useState(bootstrap.suppliers[0]?.id ?? 'SUP-001');
@@ -330,7 +348,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     if (!modItemName.trim() || !modTargetGroupId) return;
     setBusy(true);
     try {
-      const priceDeltaSatang = parseDecimalStringToScaledInt(modPriceDeltaBaht || '0', 2);
+      const priceDeltaSatang = parseMoney(modPriceDeltaBaht || '0');
       const quantityDeltaMilli = parseDecimalStringToScaledInt(modQtyDeltaInput || '0', 3);
       const scaleBasisPoints = parseDecimalStringToScaledInt(modScalePctInput || '0', 2);
 
@@ -474,7 +492,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   // Dedicated USB/Bluetooth Physical Barcode Gun Listener inside Warehouse Catalog & Add/Edit Product Modal
   useEffect(() => {
     whFirstKeySnapshotRef.current = null;
-    if (cameraModal || confirmDeleteVariant || confirmDeleteCategory || confirmDeleteMod || adjTarget) {
+    if (
+      cameraModal ||
+      confirmDeleteVariant ||
+      confirmDeleteCategory ||
+      confirmDeleteMod ||
+      adjTarget ||
+      quickBarcodeTarget
+    ) {
       return;
     }
     const listenInModal = productModalOpen;
@@ -607,6 +632,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     handleWarehouseBarcodeLookupOrCreate,
     onToast,
     productModalOpen,
+    quickBarcodeTarget,
     subTab,
     uid,
   ]);
@@ -816,6 +842,16 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         landedCosts,
       });
       setPoPreviewLines(null);
+      const poBarcodeItems: BarcodeQueueEntry[] = items
+        .map((it) => ({
+          variantId: it.variantId,
+          copies: Math.max(1, Math.min(200, Math.round(it.receivedQtyMilli / 1_000) || 1)),
+        }))
+        .filter((it) => it.copies > 0);
+      setLastReceivedPoBatch({
+        poNumber: res.poNumber,
+        items: poBarcodeItems,
+      });
       const hist = await posTransport.listPoHistory(outletId);
       setPoHistory(hist.purchaseOrders);
       await onRefreshState();
@@ -1009,6 +1045,12 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       id: 'STOCKTAKE_TRANSFER' as const,
       label: t('wms.tab.stocktake'),
       icon: ArrowLeftRight,
+      visible: true,
+    },
+    {
+      id: 'BARCODE_PRINT' as const,
+      label: t('wms.tab.barcodes'),
+      icon: Printer,
       visible: true,
     },
     {
@@ -1298,6 +1340,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           }`}
                         >
                           {v.active ? 'พักขาย' : 'เปิดขาย'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setQuickBarcodeTarget(v)}
+                          className={`inline-flex items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-3 py-1.5 text-[11px] font-medium text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+                        >
+                          <Printer className="h-3.5 w-3.5" />
+                          <span>บาร์โค้ด</span>
                         </button>
                         <button
                           type="button"
@@ -1982,6 +2032,35 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
 
           {/* Right: Live Preview + Recent PO History */}
           <div className="lg:col-span-5 space-y-5">
+            {lastReceivedPoBatch && lastReceivedPoBatch.items.length > 0 && (
+              <div className="rounded-[8px] border border-primary/30 bg-primary-soft p-4 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-google-display text-sm font-medium text-primary-dark">
+                      รับสินค้าใบ PO {lastReceivedPoBatch.poNumber} สำเร็จ
+                    </div>
+                    <div className="text-[11px] text-ink-soft">
+                      พร้อมส่งสินค้าที่รับเข้าทั้ง {lastReceivedPoBatch.items.length} รายการไปพิมพ์สติกเกอร์บาร์โค้ดติดกล่อง/ซอง
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBarcodeQueue(lastReceivedPoBatch.items);
+                    setSubTab('BARCODE_PRINT');
+                    onToast(
+                      `โหลดสินค้าจากใบรับของ ${lastReceivedPoBatch.poNumber} เข้าคิวพิมพ์บาร์โค้ดแล้ว`,
+                      'success'
+                    );
+                  }}
+                  className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-4 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                >
+                  <Printer className="h-4 w-4" />
+                  <span>พิมพ์สติกเกอร์บาร์โค้ดตามจำนวนที่รับเข้า PO นี้</span>
+                </button>
+              </div>
+            )}
             {poPreviewLines && (
               <div className="rounded-[8px] bg-primary-soft p-5 space-y-3">
                 <h4 className="font-google-display text-sm font-medium text-primary-dark">
@@ -2334,7 +2413,20 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         </div>
       )}
 
-      {/* TAB 5: IMMUTABLE DOUBLE-ENTRY AUDIT LEDGER */}
+      {/* TAB 5: BARCODE LABEL PRINTING WORKSPACE */}
+      {subTab === 'BARCODE_PRINT' && (
+        <BarcodeLabelPrintWorkspace
+          outletId={outletId}
+          bootstrap={bootstrap}
+          currentUser={currentUser}
+          queueEntries={barcodeQueue}
+          setQueueEntries={setBarcodeQueue}
+          onRefreshState={onRefreshState}
+          onToast={onToast}
+        />
+      )}
+
+      {/* TAB 6: IMMUTABLE DOUBLE-ENTRY AUDIT LEDGER */}
       {subTab === 'LEDGER' && (
         <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
           <div className="p-5 border-b border-hairline bg-surface-1 flex flex-wrap items-center justify-between gap-3">
@@ -2594,9 +2686,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               </button>
               <button
                 type="button"
-                title="สุ่มรหัสบาร์โค้ดภายในอัตโนมัติ"
+                title="สุ่มรหัสบาร์โค้ด EAN-13 มาตรฐานสากลพร้อม Check Digit"
                 aria-label="สุ่มรหัสบาร์โค้ดอัตโนมัติ"
-                onClick={() => setProdBarcode(`885999${Date.now().toString().slice(-7)}`)}
+                onClick={() => {
+                  const existingSet = new Set(
+                    bootstrap.catalogDetailed.map((v) => v.barcode).filter((b): b is string => Boolean(b))
+                  );
+                  setProdBarcode(generateValidInternalEan13(existingSet));
+                }}
                 className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-[4px] border border-hairline bg-surface-1 text-ink-muted hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
               >
                 <RefreshCw className="h-4 w-4" />
@@ -2776,22 +2873,39 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         </div>
 
         <div className="border-t border-hairline bg-surface-1 px-6 py-4 flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <div>
+          <div className="flex flex-wrap items-center gap-2">
             {editingVariantId && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  const target = bootstrap.catalogDetailed.find((v) => v.id === editingVariantId);
-                  if (target) {
-                    setConfirmDeleteVariant(target);
-                  }
-                }}
-                className={`inline-flex h-[44px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                <span>ลบสินค้านี้</span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    const target = bootstrap.catalogDetailed.find((v) => v.id === editingVariantId);
+                    if (target) {
+                      setProductModalOpen(false);
+                      setQuickBarcodeTarget(target);
+                    }
+                  }}
+                  className={`inline-flex h-[44px] items-center gap-1.5 rounded-[48px] border border-primary bg-primary-soft px-4 font-google-display text-xs font-medium text-primary-dark hover:bg-primary hover:text-white ${UI_INTERACTION.focusButton}`}
+                >
+                  <Printer className="h-3.5 w-3.5" />
+                  <span>พิมพ์บาร์โค้ด</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    const target = bootstrap.catalogDetailed.find((v) => v.id === editingVariantId);
+                    if (target) {
+                      setConfirmDeleteVariant(target);
+                    }
+                  }}
+                  className={`inline-flex h-[44px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>ลบสินค้านี้</span>
+                </button>
+              </>
             )}
           </div>
           <div className="flex items-center gap-2.5">
@@ -2890,6 +3004,35 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           </>
         )}
       </ModalDialog>
+
+      <QuickBarcodePrintModal
+        open={Boolean(quickBarcodeTarget)}
+        outletId={outletId}
+        variant={
+          quickBarcodeTarget
+            ? bootstrap.catalogDetailed.find((v) => v.id === quickBarcodeTarget.id) ??
+              quickBarcodeTarget
+            : null
+        }
+        bootstrap={bootstrap}
+        currentUser={currentUser}
+        onClose={() => setQuickBarcodeTarget(null)}
+        onAddToBatchQueue={(entry) => {
+          setBarcodeQueue((prev) => {
+            const exists = prev.find((q) => q.variantId === entry.variantId);
+            if (exists) {
+              return prev.map((q) =>
+                q.variantId === entry.variantId
+                  ? { ...entry, copies: Math.min(500, q.copies + entry.copies) }
+                  : q
+              );
+            }
+            return [...prev, entry];
+          });
+        }}
+        onRefreshState={onRefreshState}
+        onToast={onToast}
+      />
 
       <BarcodeCameraScannerModal
         open={Boolean(cameraModal)}

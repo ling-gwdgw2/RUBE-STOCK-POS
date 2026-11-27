@@ -633,9 +633,44 @@ export class LocalIpcBridge {
     return this.engine.listGuestOrders(outletId);
   }
 
-  public getGuestOrderStatusById(outletId: string, guestOrderId: string) {
+  public getGuestOrderStatusById(
+    outletId: string,
+    guestOrderId: string,
+    trackingToken?: string | undefined
+  ) {
     this.totalReadsRouted++;
-    return this.engine.getGuestOrderStatusById(outletId, guestOrderId);
+    return this.engine.getGuestOrderStatusById(outletId, guestOrderId, trackingToken);
+  }
+
+  public computeGuestMenuAvailabilityMap(outletId = 'OUTLET-HQ') {
+    this.totalReadsRouted++;
+    return this.engine.computeGuestMenuAvailabilityMap(outletId);
+  }
+
+  public async settleTableQrOrdersAndSessions(
+    input: Parameters<SqliteReadWritePoolEngine['settleTableQrOrdersAndSessions']>[0]
+  ) {
+    this.totalWritesRouted++;
+    return this.engine.settleTableQrOrdersAndSessions(input);
+  }
+
+  public async submitGuestServiceCall(
+    input: Parameters<SqliteReadWritePoolEngine['submitGuestServiceCall']>[0]
+  ) {
+    this.totalWritesRouted++;
+    return this.engine.submitGuestServiceCall(input);
+  }
+
+  public listGuestServiceCalls(outletId = 'OUTLET-HQ') {
+    this.totalReadsRouted++;
+    return this.engine.listGuestServiceCalls(outletId);
+  }
+
+  public async acknowledgeGuestServiceCall(
+    input: Parameters<SqliteReadWritePoolEngine['acknowledgeGuestServiceCall']>[0]
+  ) {
+    this.totalWritesRouted++;
+    return this.engine.acknowledgeGuestServiceCall(input);
   }
 
   public async acceptGuestOrderToHeldBillAndKds(

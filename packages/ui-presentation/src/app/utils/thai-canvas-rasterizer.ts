@@ -10,7 +10,7 @@
 
 import QRCode from 'qrcode';
 
-const THERMAL_FONT_FAMILY =
+export const THERMAL_FONT_FAMILY =
   '"Noto Sans Lao", "Leelawadee UI", "Phetsarath OT", "Saysettha OT", "Noto Sans Thai", "Tahoma", sans-serif';
 const MAX_CANVAS_TILE_HEIGHT_PX = 16_000;
 
@@ -147,7 +147,7 @@ export interface PackedCanvasRasterResult {
   previewDataUrl: string;
 }
 
-function uint8ArrayToBase64(bytes: Uint8Array): string {
+export function uint8ArrayToBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunkSize = 0x8000;
   for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -387,9 +387,9 @@ function createThermalCanvasDrawer(
   };
 }
 
-function packTileCanvasToMonochrome(
+export function packTileCanvasToMonochrome(
   ctx: CanvasRenderingContext2D,
-  widthPx: 384 | 576,
+  widthPx: number,
   tileHeightPx: number,
   targetPacked: Uint8Array,
   targetRowOffset: number

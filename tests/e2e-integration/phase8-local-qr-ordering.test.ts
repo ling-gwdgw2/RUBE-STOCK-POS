@@ -10,6 +10,7 @@ import {
   computeGuestOrderLineSatang,
   normalizeQrOrderingConfig,
 } from '../../packages/shared-contracts/src/qr-ordering.ts';
+import { checkSlidingWindowBucketLimit } from '../../packages/ui-presentation/src/server/guest-qr-server.ts';
 import { RubePosInteractiveAppServer } from '../../packages/ui-presentation/src/server/pos-desktop-server.ts';
 
 function getFreeTcpPort(): Promise<number> {
@@ -246,6 +247,7 @@ test('Phase 8B: Full E2E Isolated Guest LAN Server, Captive Portal, Signed Table
       order: {
         id: string;
         orderCode: string;
+        trackingToken: string;
         status: string;
         isSignedTableSession: boolean;
         subtotalSatang: number;
@@ -253,9 +255,62 @@ test('Phase 8B: Full E2E Isolated Guest LAN Server, Captive Portal, Signed Table
     };
     assert.equal(submitData.order.status, 'PENDING_CONFIRM');
     assert.equal(submitData.order.isSignedTableSession, true);
+    assert.ok(submitData.order.trackingToken, 'Guest order must include trackingToken');
     const expectedSub =
       (sellableItem.priceSatang + (firstMod?.priceDeltaSatang ?? 0)) * 2;
     assert.equal(submitData.order.subtotalSatang, expectedSub);
+
+    // 7B. Guest Table Service Call (CALL_STAFF -> POS inbox -> Acknowledge, then REQUEST_BILL pending until checkout)
+    const callStaffRes = await fetch(`${guestBase}/api/guest/service-call`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tableLabel: 'T04',
+        signedToken: openT04Data.session.token,
+        callType: 'CALL_STAFF',
+        note: 'ขอน้ำดื่มเพิ่ม',
+      }),
+    });
+    assert.equal(callStaffRes.status, 201);
+    const callStaffData = (await callStaffRes.json()) as {
+      ok: boolean;
+      call: { id: string; status: string; callType: string; tableLabel: string };
+    };
+    assert.equal(callStaffData.ok, true);
+    assert.equal(callStaffData.call.status, 'PENDING');
+
+    const inboxBeforeAck = (await (
+      await fetch(`${posBase}/api/qr-ordering/orders`, { headers: authHeaders })
+    ).json()) as {
+      serviceCalls: Array<{ id: string; status: string }>;
+      pendingServiceCallsCount: number;
+    };
+    assert.equal(inboxBeforeAck.pendingServiceCallsCount, 1);
+    assert.equal(inboxBeforeAck.serviceCalls[0]?.id, callStaffData.call.id);
+
+    const ackCallRes = await fetch(`${posBase}/api/qr-ordering/service-calls/ack`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ callId: callStaffData.call.id }),
+    });
+    assert.equal(ackCallRes.status, 200);
+    const ackCallData = (await ackCallRes.json()) as {
+      ok: boolean;
+      call: { status: string };
+    };
+    assert.equal(ackCallData.call.status, 'ACKNOWLEDGED');
+
+    // Leave a REQUEST_BILL call pending so checkout auto-acknowledges it cleanly
+    const requestBillRes = await fetch(`${guestBase}/api/guest/service-call`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tableLabel: 'T04',
+        signedToken: openT04Data.session.token,
+        callType: 'REQUEST_BILL',
+      }),
+    });
+    assert.equal(requestBillRes.status, 201);
 
     // 8. Cashier accepts order -> Merged Held Bill + Real KDS Ticket (zero financial report pollution!)
     const acceptRes = await fetch(`${posBase}/api/qr-ordering/orders/accept`, {
@@ -303,7 +358,16 @@ test('Phase 8B: Full E2E Isolated Guest LAN Server, Captive Portal, Signed Table
     ).json() as { abbReport: { invoices: unknown[] } };
     assert.equal(reportsBeforePay.abbReport.invoices.length, 0);
 
-    // 9. Kitchen bumps KDS ticket -> Customer mobile order status updates live!
+    // 9. Kitchen bumps KDS ticket -> Customer mobile order status updates live (token-gated!)
+    const missingTokenStatus = await fetch(
+      `${guestBase}/api/guest/order-status?id=${encodeURIComponent(submitData.order.id)}`
+    );
+    assert.equal(missingTokenStatus.status, 404, 'Order status without trackingToken MUST fail closed (404)');
+    const wrongTokenStatus = await fetch(
+      `${guestBase}/api/guest/order-status?id=${encodeURIComponent(submitData.order.id)}&token=invalid-token`
+    );
+    assert.equal(wrongTokenStatus.status, 404, 'Order status with wrong trackingToken MUST fail closed (404)');
+
     await fetch(`${posBase}/api/kds/bump`, {
       method: 'POST',
       headers: authHeaders,
@@ -314,7 +378,9 @@ test('Phase 8B: Full E2E Isolated Guest LAN Server, Captive Portal, Signed Table
       }),
     });
     const statusPrep = (await (
-      await fetch(`${guestBase}/api/guest/order-status?id=${encodeURIComponent(submitData.order.id)}`)
+      await fetch(
+        `${guestBase}/api/guest/order-status?id=${encodeURIComponent(submitData.order.id)}&token=${encodeURIComponent(submitData.order.trackingToken)}`
+      )
     ).json()) as { order: { status: string } };
     assert.equal(statusPrep.order.status, 'PREPARING');
 
@@ -328,7 +394,9 @@ test('Phase 8B: Full E2E Isolated Guest LAN Server, Captive Portal, Signed Table
       }),
     });
     const statusReady = (await (
-      await fetch(`${guestBase}/api/guest/order-status?id=${encodeURIComponent(submitData.order.id)}`)
+      await fetch(
+        `${guestBase}/api/guest/order-status?id=${encodeURIComponent(submitData.order.id)}&token=${encodeURIComponent(submitData.order.trackingToken)}`
+      )
     ).json()) as { order: { status: string } };
     assert.equal(statusReady.order.status, 'READY');
 
@@ -384,6 +452,24 @@ test('Phase 8B: Full E2E Isolated Guest LAN Server, Captive Portal, Signed Table
     });
     assert.equal(staleT04Res.status, 403);
 
+    // Table T04 order MUST now report SETTLED and pending service calls MUST be auto-acknowledged
+    const settledStatus = (await (
+      await fetch(
+        `${guestBase}/api/guest/order-status?id=${encodeURIComponent(submitData.order.id)}&token=${encodeURIComponent(submitData.order.trackingToken)}`
+      )
+    ).json()) as { order: { status: string; settledAtIso: string | null } };
+    assert.equal(settledStatus.order.status, 'SETTLED');
+    assert.ok(settledStatus.order.settledAtIso, 'Settled order must include settledAtIso timestamp');
+
+    const inboxAfterCheckout = (await (
+      await fetch(`${posBase}/api/qr-ordering/orders`, { headers: authHeaders })
+    ).json()) as { pendingServiceCallsCount: number };
+    assert.equal(
+      inboxAfterCheckout.pendingServiceCallsCount,
+      0,
+      'Pending REQUEST_BILL service calls must auto-acknowledge when table checks out'
+    );
+
     // 11. Walk-in Captive order Reject flow & Auto-Accept Signed Table mode
     await fetch(`${posBase}/api/qr-ordering/config`, {
       method: 'POST',
@@ -403,7 +489,9 @@ test('Phase 8B: Full E2E Isolated Guest LAN Server, Captive Portal, Signed Table
       }),
     });
     assert.equal(walkinRes.status, 201);
-    const walkinData = (await walkinRes.json()) as { order: { id: string; status: string } };
+    const walkinData = (await walkinRes.json()) as {
+      order: { id: string; trackingToken: string; status: string };
+    };
     assert.equal(walkinData.order.status, 'PENDING_CONFIRM');
 
     // Reject walk-in order
@@ -417,7 +505,9 @@ test('Phase 8B: Full E2E Isolated Guest LAN Server, Captive Portal, Signed Table
     });
     assert.equal(rejectRes.status, 200);
     const rejectedStatus = (await (
-      await fetch(`${guestBase}/api/guest/order-status?id=${encodeURIComponent(walkinData.order.id)}`)
+      await fetch(
+        `${guestBase}/api/guest/order-status?id=${encodeURIComponent(walkinData.order.id)}&token=${encodeURIComponent(walkinData.order.trackingToken)}`
+      )
     ).json()) as { order: { status: string; rejectionReason: string } };
     assert.equal(rejectedStatus.order.status, 'REJECTED');
     assert.equal(rejectedStatus.order.rejectionReason, 'โต๊ะ T01 ยังไม่ได้เปิดโต๊ะ');
@@ -476,6 +566,411 @@ test('Phase 8B: Full E2E Isolated Guest LAN Server, Captive Portal, Signed Table
     assert.equal(disableRes.status, 200);
     const disableData = (await disableRes.json()) as { status: { running: boolean } };
     assert.equal(disableData.status.running, false);
+  } finally {
+    await server.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Phase 8C: Guest submission idempotency (clientSubmissionKey) & mixed skipKds checkout', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rube-pos-phase8c-qr-'));
+  const dbPath = path.join(tmpDir, 'rube_qr_e2e_8c.db');
+  const guestPort = await getFreeTcpPort();
+
+  const server = new RubePosInteractiveAppServer({
+    dbPath,
+    requireFirstRunWizard: false,
+    enforceApiSessionAuth: true,
+    guestQrRateLimitPerMinute: 20,
+  });
+
+  try {
+    const { url: posBase } = await server.start(0, '127.0.0.1');
+    const loginRes = await fetch(`${posBase}/api/auth/pin-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: '999999', userId: 'USR-OWNER-01' }),
+    });
+    assert.equal(loginRes.status, 200);
+    const loginData = (await loginRes.json()) as { sessionToken: string };
+    const authHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${loginData.sessionToken}`,
+    };
+
+    const cfgRes = await fetch(`${posBase}/api/qr-ordering/config`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        enabled: true,
+        port: guestPort,
+        approvalMode: 'CASHIER_CONFIRM',
+        tableLabels: ['T04'],
+      }),
+    });
+    assert.equal(cfgRes.status, 200);
+    const guestBase = `http://127.0.0.1:${guestPort}`;
+
+    const openT04 = (await (
+      await fetch(`${posBase}/api/qr-ordering/table-session`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ tableLabel: 'T04' }),
+      })
+    ).json()) as { session: { token: string } };
+
+    const menu = (await (
+      await fetch(`${guestBase}/api/guest/menu?t=T04&s=${encodeURIComponent(openT04.session.token)}`)
+    ).json()) as {
+      items: Array<{
+        variantId: string;
+        itemName: string;
+        priceSatang: number;
+        isAvailable: boolean;
+        isComposite: boolean;
+        kitchenStation: string;
+      }>;
+      modifierGroups: Array<{
+        minSelections: number;
+        modifiers: Array<{ id: string }>;
+      }>;
+    };
+    const item = menu.items.find((i) => i.isAvailable && i.kitchenStation !== 'NONE')!;
+    assert.ok(item, 'Expected an available kitchen-routed menu item');
+    const requiredModIds = item.isComposite
+      ? menu.modifierGroups
+          .filter((g) => g.minSelections > 0)
+          .flatMap((g) => g.modifiers.slice(0, g.minSelections).map((m) => m.id))
+      : [];
+
+    // 1. Idempotent guest order submission with clientSubmissionKey
+    const payload = {
+      tableLabel: 'T04',
+      signedToken: openT04.session.token,
+      clientSubmissionKey: 'idem-t04-phase8c-001',
+      lines: [{ variantId: item.variantId, quantityCount: 1, selectedModifierIds: requiredModIds }],
+    };
+    const firstRes = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(firstRes.status, 201);
+    const firstData = (await firstRes.json()) as { order: { id: string; orderCode: string } };
+
+    const retryRes = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(retryRes.status, 201);
+    const retryData = (await retryRes.json()) as { order: { id: string; orderCode: string } };
+    assert.equal(retryData.order.id, firstData.order.id);
+    assert.equal(retryData.order.orderCode, firstData.order.orderCode);
+
+    // 2. Accept QR order -> 1 KDS ticket, then mixed checkout (line 1 skipKds: true, line 2 skipKds: false)
+    const acceptRes = await fetch(`${posBase}/api/qr-ordering/orders/accept`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ guestOrderId: firstData.order.id }),
+    });
+    assert.equal(acceptRes.status, 200);
+    const acceptData = (await acceptRes.json()) as { kdsTickets: unknown[] };
+    const kdsAfterAccept = acceptData.kdsTickets.length;
+
+    const mixedCheckoutRes = await fetch(`${posBase}/api/pos/checkout`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        orderType: 'DINE_IN',
+        tableOrQueueNo: 'T04',
+        paymentMethod: 'CASH',
+        cashTenderedSatang: 500_000,
+        taxMode: 'INCLUSIVE',
+        discountSatang: 0,
+        lines: [
+          {
+            variantId: item.variantId,
+            itemName: item.itemName,
+            unitName: 'แก้ว',
+            quantityMilli: 1_000,
+            unitPriceSatang: item.priceSatang,
+            selectedModifierIds: requiredModIds,
+            skipKds: true,
+          },
+          {
+            variantId: item.variantId,
+            itemName: item.itemName,
+            unitName: 'แก้ว',
+            quantityMilli: 1_000,
+            unitPriceSatang: item.priceSatang,
+            selectedModifierIds: requiredModIds,
+            skipKds: false,
+            notes: 'แยกน้ำแข็ง',
+          },
+        ],
+      }),
+    });
+    assert.equal(mixedCheckoutRes.status, 200);
+    const kdsAfterMixed = (await (
+      await fetch(`${posBase}/api/kds/tickets`, { headers: authHeaders })
+    ).json()) as {
+      tickets: Array<{
+        sequenceId: number;
+        items: Array<{ itemSummaryText: string; modifiersSummaryText: string | null }>;
+      }>;
+    };
+    assert.equal(
+      kdsAfterMixed.tickets.length,
+      kdsAfterAccept + 1,
+      'Mixed checkout must enqueue KDS ONLY for lines without skipKds: true'
+    );
+    const latestTicket = kdsAfterMixed.tickets[kdsAfterMixed.tickets.length - 1]!;
+    assert.equal(
+      latestTicket.items.length,
+      1,
+      'Skipped QR line must not be re-added to checkout KDS ticket'
+    );
+    assert.ok(
+      (latestTicket.items[0]?.modifiersSummaryText ?? '').includes('แยกน้ำแข็ง'),
+      'Counter line note must appear on KDS ticket'
+    );
+  } finally {
+    await server.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Phase 8D: Unit test — Sliding-window rate limiter burst behavior, non-extending rejections, window reset & FIFO eviction', () => {
+  const buckets = new Map<string, number[]>();
+  const ipA = '192.168.1.25';
+  const ipB = '192.168.1.26';
+  const windowMs = 60_000;
+  const maxPerWindow = 4;
+
+  // 1. Burst of 10 calls at the exact same millisecond: first 4 allowed, next 6 blocked
+  const burstResults = Array.from({ length: 10 }, () =>
+    checkSlidingWindowBucketLimit(buckets, ipA, maxPerWindow, {
+      nowMs: 1_000_000,
+      windowMs,
+    })
+  );
+  assert.deepEqual(burstResults, [true, true, true, true, false, false, false, false, false, false]);
+  assert.equal(buckets.get(ipA)?.length, 4);
+
+  // 2. Retry burst mid-window must stay blocked and MUST NOT extend lockout timestamps
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(
+      checkSlidingWindowBucketLimit(buckets, ipA, maxPerWindow, {
+        nowMs: 1_030_000,
+        windowMs,
+      }),
+      false
+    );
+  }
+  assert.deepEqual(buckets.get(ipA), [1_000_000, 1_000_000, 1_000_000, 1_000_000]);
+
+  // 3. Another client IP stays completely independent
+  assert.equal(
+    checkSlidingWindowBucketLimit(buckets, ipB, maxPerWindow, {
+      nowMs: 1_030_000,
+      windowMs,
+    }),
+    true
+  );
+
+  // 4. Boundary: 1ms before reset is still blocked; exact windowMs reset reopens full burst quota
+  assert.equal(
+    checkSlidingWindowBucketLimit(buckets, ipA, maxPerWindow, {
+      nowMs: 1_059_999,
+      windowMs,
+    }),
+    false
+  );
+  const afterResetResults = Array.from({ length: 5 }, () =>
+    checkSlidingWindowBucketLimit(buckets, ipA, maxPerWindow, {
+      nowMs: 1_060_000,
+      windowMs,
+    })
+  );
+  assert.deepEqual(afterResetResults, [true, true, true, true, false]);
+
+  // 5. Staggered sliding-window partial reset
+  const staggered = new Map<string, number[]>();
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 10_000, windowMs }), true);
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 10_000, windowMs }), true);
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 40_000, windowMs }), true);
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 40_000, windowMs }), true);
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 40_000, windowMs }), false);
+
+  // At t=70_000: the 2 entries from t=10_000 expire, opening 2 slots while t=40_000 remain active
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 70_000, windowMs }), true);
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 70_000, windowMs }), true);
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 70_000, windowMs }), false);
+
+  // At t=100_000: the 2 entries from t=40_000 expire, opening 2 more slots
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 100_000, windowMs }), true);
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 100_000, windowMs }), true);
+  assert.equal(checkSlidingWindowBucketLimit(staggered, ipA, 4, { nowMs: 100_000, windowMs }), false);
+
+  // 6. Bounded FIFO key eviction prevents unbounded memory growth under IP flooding
+  const bounded = new Map<string, number[]>();
+  for (let i = 1; i <= 505; i += 1) {
+    assert.equal(
+      checkSlidingWindowBucketLimit(bounded, `10.0.0.${i}`, 2, {
+        nowMs: 2_000_000,
+        windowMs,
+        maxTrackedKeys: 500,
+      }),
+      true
+    );
+  }
+  assert.equal(bounded.size, 500);
+  assert.equal(bounded.has('10.0.0.1'), false);
+  assert.equal(bounded.has('10.0.0.5'), false);
+  assert.equal(bounded.has('10.0.0.6'), true);
+  assert.equal(bounded.has('10.0.0.505'), true);
+});
+
+test('Phase 8E: Concurrent HTTP burst (Promise.all) & clock-driven time-window reset on Guest LAN Server', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rube-pos-phase8e-burst-'));
+  const dbPath = path.join(tmpDir, 'rube_qr_burst_e2e.db');
+  const guestPort = await getFreeTcpPort();
+  let fakeNowMs = 1_700_000_000_000;
+
+  const server = new RubePosInteractiveAppServer({
+    dbPath,
+    requireFirstRunWizard: false,
+    enforceApiSessionAuth: true,
+    guestQrRateLimitPerMinute: 4,
+    guestQrRateLimitWindowMs: 60_000,
+    guestQrNowProvider: () => fakeNowMs,
+  });
+
+  try {
+    const { url: posBase } = await server.start(0, '127.0.0.1');
+    const loginRes = await fetch(`${posBase}/api/auth/pin-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: '999999', userId: 'USR-OWNER-01' }),
+    });
+    assert.equal(loginRes.status, 200);
+    const loginData = (await loginRes.json()) as { sessionToken: string };
+    const authHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${loginData.sessionToken}`,
+    };
+
+    const cfgRes = await fetch(`${posBase}/api/qr-ordering/config`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        enabled: true,
+        port: guestPort,
+        approvalMode: 'CASHIER_CONFIRM',
+        tableLabels: ['T04'],
+      }),
+    });
+    assert.equal(cfgRes.status, 200);
+    const guestBase = `http://127.0.0.1:${guestPort}`;
+
+    const openT04 = (await (
+      await fetch(`${posBase}/api/qr-ordering/table-session`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ tableLabel: 'T04' }),
+      })
+    ).json()) as { session: { token: string } };
+
+    const menu = (await (
+      await fetch(`${guestBase}/api/guest/menu?t=T04&s=${encodeURIComponent(openT04.session.token)}`)
+    ).json()) as {
+      items: Array<{
+        variantId: string;
+        isAvailable: boolean;
+        isComposite: boolean;
+      }>;
+      modifierGroups: Array<{
+        minSelections: number;
+        modifiers: Array<{ id: string }>;
+      }>;
+    };
+    const item = menu.items.find((i) => i.isAvailable)!;
+    assert.ok(item);
+    const requiredModIds = item.isComposite
+      ? menu.modifierGroups
+          .filter((g) => g.minSelections > 0)
+          .flatMap((g) => g.modifiers.slice(0, g.minSelections).map((m) => m.id))
+      : [];
+
+    const submitOrder = (key: string) =>
+      fetch(`${guestBase}/api/guest/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tableLabel: 'T04',
+          signedToken: openT04.session.token,
+          clientSubmissionKey: key,
+          lines: [{ variantId: item.variantId, quantityCount: 1, selectedModifierIds: requiredModIds }],
+        }),
+      });
+
+    // 1. Fire 10 simultaneous guest order requests via Promise.all -> exactly 4 succeed (201) & 6 get 429
+    const burst1 = await Promise.all(
+      Array.from({ length: 10 }, (_, idx) => submitOrder(`burst1-${idx}`))
+    );
+    const burst1Statuses = burst1.map((r) => r.status);
+    assert.equal(burst1Statuses.filter((s) => s === 201).length, 4);
+    assert.equal(burst1Statuses.filter((s) => s === 429).length, 6);
+
+    // 2. Just before 60s expiry (+59_999ms): rejected requests must not extend window, all 3 still 429
+    fakeNowMs += 59_999;
+    const preReset = await Promise.all(
+      Array.from({ length: 3 }, (_, idx) => submitOrder(`prereset-${idx}`))
+    );
+    assert.deepEqual(
+      preReset.map((r) => r.status),
+      [429, 429, 429]
+    );
+
+    // 3. Exact 60s window reset (+1ms -> +60_000ms): full 4-request quota resets; 6 concurrent -> 4x201 + 2x429
+    fakeNowMs += 1;
+    const postReset = await Promise.all(
+      Array.from({ length: 6 }, (_, idx) => submitOrder(`postreset-${idx}`))
+    );
+    const postResetStatuses = postReset.map((r) => r.status);
+    assert.equal(postResetStatuses.filter((s) => s === 201).length, 4);
+    assert.equal(postResetStatuses.filter((s) => s === 429).length, 2);
+
+    // 4. Service-call bucket concurrent burst (Promise.all x6 -> 4x201 + 2x429) & window reset recovery
+    const callBurst = await Promise.all(
+      Array.from({ length: 6 }, (_, idx) =>
+        fetch(`${guestBase}/api/guest/service-call`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tableLabel: 'T04',
+            signedToken: openT04.session.token,
+            callType: idx % 2 === 0 ? 'CALL_STAFF' : 'REQUEST_BILL',
+          }),
+        })
+      )
+    );
+    const callBurstStatuses = callBurst.map((r) => r.status);
+    assert.equal(callBurstStatuses.filter((s) => s === 201).length, 4);
+    assert.equal(callBurstStatuses.filter((s) => s === 429).length, 2);
+
+    fakeNowMs += 60_000;
+    const afterCallReset = await fetch(`${guestBase}/api/guest/service-call`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tableLabel: 'T04',
+        signedToken: openT04.session.token,
+        callType: 'CALL_STAFF',
+      }),
+    });
+    assert.equal(afterCallReset.status, 201);
   } finally {
     await server.stop();
     fs.rmSync(tmpDir, { recursive: true, force: true });

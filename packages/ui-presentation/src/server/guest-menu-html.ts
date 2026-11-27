@@ -11,6 +11,7 @@
 
 export interface GuestHtmlRenderOptions {
   storeName: string;
+  initialOutletId?: string | undefined;
   initialTableLabel: string;
   initialSignedToken: string;
   isCaptiveMode: boolean;
@@ -36,6 +37,7 @@ function safeJsonForInlineScript(obj: unknown): string {
 export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
   const safeTitle = escapeHtmlAttr(options.storeName || 'RUBE-STOCK-POS Menu');
   const bootJson = safeJsonForInlineScript({
+    outletId: options.initialOutletId || 'OUTLET-HQ',
     initialTable: options.initialTableLabel,
     initialToken: options.initialSignedToken,
     isCaptiveMode: options.isCaptiveMode,
@@ -610,6 +612,8 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
       <button type="button" id="tabOrdersBtn" class="tab-btn"></button>
     </div>
 
+    <div id="serviceBar" style="display:none;gap:8px;margin-bottom:12px;"></div>
+
     <section id="menuSection">
       <input type="search" id="searchInput" class="search-box" autocomplete="off" />
       <div id="catStrip" class="cat-strip"></div>
@@ -642,6 +646,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
     (function () {
       const BOOT = ${bootJson};
       const STORAGE_ORDERS_KEY = 'rube_guest_qr_orders_v1';
+      const STORAGE_TOKENS_KEY = 'rube_guest_qr_tokens_v1';
 
       const TEXT = {
         th: {
@@ -679,7 +684,11 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           stepPreparing: 'กำลังทำ',
           stepReady: 'พร้อมเสิร์ฟ',
           statusServed: 'เสิร์ฟเรียบร้อยแล้ว',
+          statusSettled: 'ชำระเงินปิดบิลเรียบร้อยแล้ว',
           statusRejected: 'ร้านไม่สามารถรับออเดอร์ได้',
+          callStaff: 'เรียกพนักงาน',
+          requestBill: 'ขอเช็กบิล',
+          serviceCallSent: 'ส่งคำขอไปยังเคาน์เตอร์เรียบร้อยแล้ว',
           reasonPrefix: 'เหตุผล:',
           loadingMenu: 'กำลังโหลดรายการเมนู...',
           loadError: 'ไม่สามารถเชื่อมต่อระบบร้านค้าในวง Wi-Fi ได้ กรุณาลองใหม่',
@@ -724,7 +733,11 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           stepPreparing: 'ກຳລັງປຸງແຕ່ງ',
           stepReady: 'ພ້ອມເສີບ',
           statusServed: 'ເສີບສຳເລັດແລ້ວ',
+          statusSettled: 'ຊຳລະເງິນປິດບິນສຳເລັດແລ້ວ',
           statusRejected: 'ຮ້ານບໍ່ສາມາດຮັບອໍເດີໄດ້',
+          callStaff: 'ເອີ້ນພະນັກງານ',
+          requestBill: 'ຂໍເຊັກບິນ',
+          serviceCallSent: 'ສົ່ງຄຳຂໍໄປຍັງເຄົາເຕີສຳເລັດແລ້ວ',
           reasonPrefix: 'ເຫດຜົນ:',
           loadingMenu: 'ກຳລັງໂຫຼດລາຍການເມນູ...',
           loadError: 'ບໍ່ສາມາດເຊື່ອມຕໍ່ລະບົບຮ້ານໃນວົງ Wi-Fi ໄດ້',
@@ -769,7 +782,11 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           stepPreparing: 'Preparing',
           stepReady: 'Ready',
           statusServed: 'Served',
+          statusSettled: 'Bill Settled',
           statusRejected: 'Order Declined',
+          callStaff: 'Call Staff',
+          requestBill: 'Request Bill',
+          serviceCallSent: 'Request sent to staff',
           reasonPrefix: 'Reason:',
           loadingMenu: 'Loading menu...',
           loadError: 'Unable to reach the store Wi-Fi ordering server.',
@@ -797,6 +814,8 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
         itemMods: {},
         itemNote: '',
         trackedOrderIds: [],
+        trackedOrderTokens: {},
+        cartSubmissionKey: '',
         trackedOrders: {},
         bannerText: '',
         bannerTone: 'info',
@@ -807,7 +826,16 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
         if (Array.isArray(savedIds)) {
           state.trackedOrderIds = savedIds.slice(0, 15);
         }
+        const savedTokens = JSON.parse(window.localStorage.getItem(STORAGE_TOKENS_KEY) || '{}');
+        if (savedTokens && typeof savedTokens === 'object') {
+          state.trackedOrderTokens = savedTokens;
+        }
       } catch (_e) {}
+
+      function resetCartSubmissionKey() {
+        state.cartSubmissionKey =
+          'GSUB-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+      }
 
       function L() {
         return TEXT[state.lang] || TEXT.th;
@@ -906,6 +934,51 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
         tOrd.classList.toggle('active', state.tab === 'orders');
         document.getElementById('menuSection').style.display = state.tab === 'menu' ? 'block' : 'none';
         document.getElementById('ordersSection').style.display = state.tab === 'orders' ? 'block' : 'none';
+        renderServiceBar();
+      }
+
+      function renderServiceBar() {
+        const bar = document.getElementById('serviceBar');
+        if (!bar) return;
+        const canCall = Boolean(
+          state.menu &&
+          ((state.menu.lockedTableLabel && state.menu.signedTableValid) || state.menu.allowOpenTableSelection)
+        );
+        if (!canCall) {
+          bar.style.display = 'none';
+          bar.innerHTML = '';
+          return;
+        }
+        bar.style.display = 'flex';
+        bar.innerHTML =
+          '<button type="button" id="callStaffBtn" class="btn btn-sm" style="flex:1;">' + esc(L().callStaff) + '</button>' +
+          '<button type="button" id="requestBillBtn" class="btn btn-sm" style="flex:1;">' + esc(L().requestBill) + '</button>';
+        document.getElementById('callStaffBtn').onclick = function () { void sendServiceCall('CALL_STAFF'); };
+        document.getElementById('requestBillBtn').onclick = function () { void sendServiceCall('REQUEST_BILL'); };
+      }
+
+      async function sendServiceCall(callType) {
+        if (!state.menu) return;
+        const tableToSend = (state.menu.lockedTableLabel && state.menu.signedTableValid)
+          ? state.menu.lockedTableLabel
+          : (state.selectedTable || (state.menu.tableLabels && state.menu.tableLabels[0]) || 'T01');
+        try {
+          const res = await fetch('/api/guest/service-call', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              outletId: BOOT.outletId,
+              tableLabel: tableToSend,
+              signedToken: state.menu.signedTableValid ? BOOT.initialToken : '',
+              callType: callType,
+            }),
+          });
+          const data = await res.json().catch(function () { return {}; });
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          setBanner(L().serviceCallSent + ' (' + tableToSend + ')', 'ok');
+        } catch (err) {
+          setBanner(err && err.message ? err.message : L().loadError, 'error');
+        }
       }
 
       function renderCategoriesAndMenu() {
@@ -1130,6 +1203,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
             });
           }
           closeItemSheet();
+          resetCartSubmissionKey();
           renderCartDock();
         };
       }
@@ -1231,6 +1305,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
             } else {
               renderCartSheet();
             }
+            resetCartSubmissionKey();
             renderCartDock();
           };
         });
@@ -1243,6 +1318,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
             } else {
               renderCartSheet();
             }
+            resetCartSubmissionKey();
             renderCartDock();
           };
         });
@@ -1254,15 +1330,20 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
         const tableToSend = (state.menu.lockedTableLabel && state.menu.signedTableValid)
           ? state.menu.lockedTableLabel
           : (state.selectedTable || (state.menu.tableLabels && state.menu.tableLabels[0]) || 'T01');
+        if (!state.cartSubmissionKey) {
+          resetCartSubmissionKey();
+        }
 
         state.submitting = true;
         renderCartSheet();
         try {
           const payload = {
+            outletId: BOOT.outletId,
             tableLabel: tableToSend,
             signedToken: state.menu.signedTableValid ? BOOT.initialToken : '',
             customerName: state.customerName.trim(),
             customerNote: state.customerNote.trim(),
+            clientSubmissionKey: state.cartSubmissionKey,
             lines: state.cart.map(function (l) {
               return {
                 variantId: l.variantId,
@@ -1284,15 +1365,20 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           const created = data.order;
           if (created && created.id) {
             state.trackedOrders[created.id] = created;
+            if (created.trackingToken) {
+              state.trackedOrderTokens[created.id] = created.trackingToken;
+            }
             state.trackedOrderIds = [created.id].concat(
               state.trackedOrderIds.filter(function (x) { return x !== created.id; })
             ).slice(0, 15);
             try {
               window.localStorage.setItem(STORAGE_ORDERS_KEY, JSON.stringify(state.trackedOrderIds));
+              window.localStorage.setItem(STORAGE_TOKENS_KEY, JSON.stringify(state.trackedOrderTokens));
             } catch (_e) {}
             setBanner(L().orderSuccess + ' ' + created.orderCode, 'ok');
           }
           state.cart = [];
+          state.cartSubmissionKey = '';
           state.customerNote = '';
           closeCartSheet();
           state.tab = 'orders';
@@ -1338,6 +1424,11 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
                 '<div><strong>' + esc(L().statusRejected) + '</strong>' +
                 (ord.rejectionReason ? '<div>' + esc(L().reasonPrefix) + ' ' + esc(ord.rejectionReason) + '</div>' : '') +
                 '</div>' +
+              '</div>';
+          } else if (ord.status === 'SETTLED') {
+            statusHtml =
+              '<div class="banner banner-ok" style="margin:10px 0 6px;">' +
+                '<strong>' + esc(L().statusSettled) + '</strong>' +
               '</div>';
           } else {
             statusHtml =
@@ -1385,11 +1476,17 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
         for (let i = 0; i < state.trackedOrderIds.length; i++) {
           const id = state.trackedOrderIds[i];
           const existing = state.trackedOrders[id];
-          if (existing && (existing.status === 'SERVED' || existing.status === 'REJECTED')) {
+          if (existing && (existing.status === 'SERVED' || existing.status === 'SETTLED' || existing.status === 'REJECTED')) {
             continue;
           }
           try {
-            const res = await fetch('/api/guest/order-status?id=' + encodeURIComponent(id));
+            const tok = state.trackedOrderTokens[id] || (existing && existing.trackingToken) || '';
+            let statusUrl = '/api/guest/order-status?id=' + encodeURIComponent(id);
+            if (tok) statusUrl += '&token=' + encodeURIComponent(tok);
+            if (BOOT.outletId && BOOT.outletId !== 'OUTLET-HQ') {
+              statusUrl += '&o=' + encodeURIComponent(BOOT.outletId);
+            }
+            const res = await fetch(statusUrl);
             if (res.ok) {
               const data = await res.json();
               if (data.order) {
@@ -1407,6 +1504,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
       async function loadMenu() {
         try {
           const qs = new URLSearchParams();
+          if (BOOT.outletId && BOOT.outletId !== 'OUTLET-HQ') qs.set('o', BOOT.outletId);
           if (BOOT.initialTable) qs.set('t', BOOT.initialTable);
           if (BOOT.initialToken) qs.set('s', BOOT.initialToken);
           const res = await fetch('/api/guest/menu' + (qs.toString() ? '?' + qs.toString() : ''));

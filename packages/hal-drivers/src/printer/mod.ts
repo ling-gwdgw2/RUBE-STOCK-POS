@@ -505,6 +505,7 @@ export class ThermalPrinterSpoolerQueue {
 }
 
 export * from './transport.ts';
+export * from './barcode-label.ts';
 
 
 

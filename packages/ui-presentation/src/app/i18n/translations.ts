@@ -113,6 +113,7 @@ export const UI_STRINGS = {
   'wms.tab.po': { th: 'รับของ PO & ค่าขนส่ง', lo: 'ຮັບສິນຄ້າ PO & ຄ່າຂົນສົ່ງ', en: 'PO & Landed Cost' },
   'wms.tab.prep': { th: 'ผลิตเตรียมขาย (Prep)', lo: 'ຜະລິດກຽມຂາຍ (Prep)', en: 'Prep Production' },
   'wms.tab.stocktake': { th: 'ตรวจนับ & โอนสาขา', lo: 'ກວດນັບ & ໂອນສາຂາ', en: 'Stocktake & Transfer' },
+  'wms.tab.barcodes': { th: 'พิมพ์บาร์โค้ดสินค้า', lo: 'ພິມບາໂຄດສິນຄ້າ', en: 'Barcode Labels' },
   'wms.tab.ledger': { th: 'สมุดบัญชีสต็อก', lo: 'ປຶ້ມບັນຊີສະຕັອກ', en: 'Stock Ledger' },
   'wms.addProduct': { th: 'เพิ่มสินค้า / วัตถุดิบใหม่', lo: 'ເພີ່ມສິນຄ້າ / ວັດຖຸດິບໃໝ່', en: 'Add Product / Material' },
 

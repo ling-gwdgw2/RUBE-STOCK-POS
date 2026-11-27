@@ -136,6 +136,31 @@ export function verifyEan13CheckDigit(barcode13: string): boolean {
 }
 
 /**
+ * Extracts the 5-digit PLU key encoded into Scale EAN-13 barcodes (`PP IIIII VVVVV C`)
+ * from an arbitrary SKU string (e.g., `'SKU-45'` -> `'00045'`, `'SKU-1234'` -> `'01234'`).
+ */
+export function extractScalePlu5FromSku(skuOrPlu: string): string {
+  const digits = skuOrPlu.replace(/\D/g, '');
+  if (!digits) return '';
+  return digits.slice(-5).padStart(5, '0');
+}
+
+/**
+ * Matches a catalog variant against the 5-digit PLU parsed from a Scale EAN-13 barcode,
+ * supporting exact 5-digit SKUs, suffix matches, barcode substrings, and zero-padded numeric SKUs.
+ */
+export function matchesScaleBarcodePlu(
+  candidate: { sku: string; barcode?: string | null | undefined },
+  parsedPlu5: string
+): boolean {
+  if (!/^\d{5}$/.test(parsedPlu5)) return false;
+  if (candidate.sku === parsedPlu5 || candidate.sku.endsWith(parsedPlu5)) return true;
+  if ((candidate.barcode ?? '').includes(parsedPlu5)) return true;
+  const derivedPlu = extractScalePlu5FromSku(candidate.sku);
+  return derivedPlu !== '' && derivedPlu === parsedPlu5;
+}
+
+/**
  * Parses 13-digit EAN-13 Supermarket Scale Barcodes (`PP IIIII VVVVV C`):
  * - Prefix `20`–`24`: `VVVVV` is Weight in Grams (`Milli-Kilograms`, e.g., `01250` = 1.250 kg)
  * - Prefix `25`–`29`: `VVVVV` is Total Sticker Price scaled by `priceEmbeddedMultiplier` minor units

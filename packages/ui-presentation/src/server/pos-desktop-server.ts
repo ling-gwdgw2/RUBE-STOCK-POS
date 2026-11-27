@@ -43,12 +43,18 @@ import {
   validateLaoQrStaticTemplate,
 } from '../../../hal-drivers/src/payment/mod.ts';
 import {
+  buildEscPosLabelBatchWirePayload,
   buildEscPosWireJobFrom1BitBitmap,
+  buildTsplLabelBatchWirePayload,
+  buildZplLabelBatchWirePayload,
   dispatchEscPosPayloadToHardware,
   ESC_POS_KICK_DRAWER_BYTES,
   listWindowsInstalledPrinters,
   renderThaiReceiptAbbEscPosJob,
+  sendEscPosOverTcp9100,
+  sendEscPosOverWindowsRawSpooler,
   ThermalPrinterSpoolerQueue,
+  type BitmapLabelFrameInput,
   type PrinterHardwareConfig,
 } from '../../../hal-drivers/src/printer/mod.ts';
 import { UpsPowerHidMonitor } from '../../../hal-drivers/src/ups/mod.ts';
@@ -83,6 +89,11 @@ import type {
   UserRole,
 } from '../../../shared-contracts/src/ipc-commands.ts';
 import { resolveProfileFeatureFlags } from '../profiles/profile-config.ts';
+import {
+  normalizeBarcodeLabelConfig,
+  type BarcodeLabelPrinterConfigDto,
+  type BarcodeLabelTargetMode,
+} from '../../../shared-contracts/src/barcode-printing.ts';
 import type { QrOrderingConfigDto } from '../../../shared-contracts/src/qr-ordering.ts';
 import { GuestQrOrderingServer } from './guest-qr-server.ts';
 import { PosTerminalViewController } from '../views/pos-terminal/PosTerminalView.ts';
@@ -157,6 +168,14 @@ export interface RubePosInteractiveServerOptions {
    * Optional per-IP rate limit (orders/minute) for the isolated Guest LAN Server (default 10).
    */
   guestQrRateLimitPerMinute?: number | undefined;
+  /**
+   * Optional sliding-window duration (ms) for Guest LAN rate limiting (default 60,000 ms).
+   */
+  guestQrRateLimitWindowMs?: number | undefined;
+  /**
+   * Optional clock provider for deterministic rate-limiter tests.
+   */
+  guestQrNowProvider?: (() => number) | undefined;
 }
 
 export class RubePosInteractiveAppServer {
@@ -234,8 +253,15 @@ export class RubePosInteractiveAppServer {
       outletId: 'OUTLET-HQ',
       productImagesDir: this.productImagesDir,
       getProductImagesMap: () => this.getProductImagesMap(),
+      isWriteLockedByLowBattery: () => this.upsMonitor.isWriteLockedByLowBattery(),
       ...(options.guestQrRateLimitPerMinute !== undefined
         ? { rateLimitMaxOrdersPerMinute: options.guestQrRateLimitPerMinute }
+        : {}),
+      ...(options.guestQrRateLimitWindowMs !== undefined
+        ? { rateLimitWindowMs: options.guestQrRateLimitWindowMs }
+        : {}),
+      ...(options.guestQrNowProvider !== undefined
+        ? { nowProvider: options.guestQrNowProvider }
         : {}),
     });
     this.posController = new PosTerminalViewController(this.ipc, 'OUTLET-HQ', 'POS-TERM-01');
@@ -632,6 +658,60 @@ export class RubePosInteractiveAppServer {
       ).run(JSON.stringify(clean));
     });
     return clean;
+  }
+
+  private getBarcodeLabelConfig(): BarcodeLabelPrinterConfigDto {
+    try {
+      const row = this.engine.executeRead((db) => {
+        return db
+          .prepare(`SELECT value FROM store_config WHERE key = 'barcode_label_config'`)
+          .get() as { value?: string } | undefined;
+      });
+      if (row?.value) {
+        const parsed = JSON.parse(row.value) as Partial<BarcodeLabelPrinterConfigDto>;
+        return normalizeBarcodeLabelConfig(parsed);
+      }
+    } catch {
+      // ignore fallback
+    }
+    return normalizeBarcodeLabelConfig(null);
+  }
+
+  private async saveBarcodeLabelConfig(
+    cfg: Partial<BarcodeLabelPrinterConfigDto>,
+    actorUserId = 'USR-OWNER-01'
+  ): Promise<BarcodeLabelPrinterConfigDto> {
+    const clean = normalizeBarcodeLabelConfig(cfg);
+    await this.engine.executeWriteImmediate((db) => {
+      db.prepare(
+        `INSERT INTO store_config (key, value, is_protected, updated_by)
+         VALUES ('barcode_label_config', ?, 0, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      ).run(JSON.stringify(clean), actorUserId);
+    });
+    return clean;
+  }
+
+  private validatePrinterTcpTarget(host: string, port: number): void {
+    const cleanHost = host.trim().toLowerCase();
+    if (
+      !cleanHost ||
+      cleanHost === 'localhost' ||
+      cleanHost === '::1' ||
+      cleanHost === '0.0.0.0' ||
+      cleanHost.startsWith('127.') ||
+      cleanHost.startsWith('169.254.')
+    ) {
+      throw new Error(
+        `HTTP 400 Invalid printer TCP target host '${host}': loopback and link-local hosts are not allowed`
+      );
+    }
+    const guestPort = this.guestQrServer.getRuntimeStatus().port;
+    if (port === 4173 || port === 4174 || (guestPort > 0 && port === guestPort)) {
+      throw new Error(
+        `HTTP 400 Invalid printer TCP target port ${port}: reserved internal POS/Guest port`
+      );
+    }
   }
 
   private getHeldBillsForOutlet(outletId = 'OUTLET-HQ'): Array<Record<string, unknown>> {
@@ -1686,6 +1766,7 @@ export class RubePosInteractiveAppServer {
             staffUsers: isCurrentlyOnboarded ? this.ipc.listStaffUsers() : [],
             storeSettings: previewStoreSettings,
             printerConfig: this.getPrinterConfig(),
+            barcodeLabelConfig: this.getBarcodeLabelConfig(),
             usbBackupConfig: this.getUsbBackupConfigStatus(),
             usbBackups: this.listUsbBackupFiles(),
             ledgerInvariant: { valid: true, mismatches: [] },
@@ -1744,6 +1825,7 @@ export class RubePosInteractiveAppServer {
               promptPayId: '',
             },
             printerConfig: this.getPrinterConfig(),
+            barcodeLabelConfig: this.getBarcodeLabelConfig(),
             usbBackupConfig: this.getUsbBackupConfigStatus(),
             usbBackups: [],
             ledgerInvariant: { valid: true, mismatches: [] },
@@ -1801,6 +1883,7 @@ export class RubePosInteractiveAppServer {
         const qrOrderingStatus = this.guestQrServer.getRuntimeStatus(qrOrderingConfig);
         const qrGuestOrders = this.ipc.listGuestOrders(outletId);
         const qrTableSessions = this.ipc.listTableQrSessions(outletId, qrOrderingStatus.baseUrl);
+        const qrServiceCalls = this.ipc.listGuestServiceCalls(outletId);
         const ledgerInvariant = this.ipc.verifyLedgerConservationInvariant(outletId);
         const upsBanner = this.upsMonitor.getActiveUiAlertBanner();
 
@@ -1827,10 +1910,12 @@ export class RubePosInteractiveAppServer {
           staffUsers,
           storeSettings,
           printerConfig: this.getPrinterConfig(),
+          barcodeLabelConfig: this.getBarcodeLabelConfig(),
           qrOrderingConfig,
           qrOrderingStatus,
           qrGuestOrders,
           qrTableSessions,
+          qrServiceCalls,
           usbBackupConfig: this.getUsbBackupConfigStatus(),
           usbBackups: this.listUsbBackupFiles(),
           ledgerInvariant,
@@ -1873,7 +1958,7 @@ export class RubePosInteractiveAppServer {
 
       if (method === 'GET' && url.pathname === '/api/printer/windows-list') {
         if (this.ipc.isSystemOnboarded()) {
-          this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+          this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER', 'WAREHOUSE']);
         }
         const printers = await listWindowsInstalledPrinters();
         this.sendJson(res, 200, { printers });
@@ -2379,6 +2464,8 @@ export class RubePosInteractiveAppServer {
             unitPriceSatang: number;
             overrideLineTotalSatang?: number;
             selectedModifierIds?: string[];
+            skipKds?: boolean;
+            notes?: string;
           }>;
         }>(req);
 
@@ -2405,6 +2492,8 @@ export class RubePosInteractiveAppServer {
             ? { overrideLineTotalSatang: l.overrideLineTotalSatang }
             : {}),
           selectedModifierIds: l.selectedModifierIds ?? [],
+          ...(l.skipKds ? { skipKds: true } : {}),
+          ...(typeof l.notes === 'string' && l.notes.trim() ? { notes: l.notes.trim() } : {}),
         }));
 
         const idempotencyKey =
@@ -2448,10 +2537,10 @@ export class RubePosInteractiveAppServer {
           commitVerifiedBotSlipHash(order.slipTransRefHash, this.usedSlipHashes);
         }
 
-        // Automatically expire/revoke any active Signed Table QR session when that table settles its bill
+        // Automatically settle table QR orders/service calls and revoke active Table QR session when that table settles its bill
         if (body.tableOrQueueNo && body.tableOrQueueNo.trim()) {
           await this.ipc
-            .revokeTableQrSession({
+            .settleTableQrOrdersAndSessions({
               outletId,
               tableLabel: body.tableOrQueueNo.trim(),
               actorUserId: sessionUser?.id ?? body.cashierId ?? 'USR-CASHIER-01',
@@ -3278,6 +3367,167 @@ export class RubePosInteractiveAppServer {
         return;
       }
 
+      if (method === 'GET' && url.pathname === '/api/warehouse/barcode-label-config') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'WAREHOUSE']);
+        this.sendJson(res, 200, { barcodeLabelConfig: this.getBarcodeLabelConfig() });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/warehouse/barcode-label-config') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'WAREHOUSE']);
+        const body = await this.readJsonBody<Partial<BarcodeLabelPrinterConfigDto>>(req);
+        const saved = await this.saveBarcodeLabelConfig(
+          body,
+          sessionUser?.id ?? 'USR-OWNER-01'
+        );
+        this.sendJson(res, 200, { barcodeLabelConfig: saved });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/warehouse/print-barcode-labels') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'WAREHOUSE']);
+        const body = await this.readJsonBody<{
+          targetMode?: BarcodeLabelTargetMode;
+          tcpHost?: string;
+          tcpPort?: number;
+          windowsPrinterName?: string;
+          gapMm?: number;
+          dryRun?: boolean;
+          frames: Array<{
+            variantId?: string;
+            sku?: string;
+            barcodeValue?: string;
+            packedBitmapBase64: string;
+            widthPx: number;
+            heightPx: number;
+            labelWidthMm: number;
+            labelHeightMm: number;
+            copies: number;
+          }>;
+        }>(req);
+
+        const storedCfg = this.getBarcodeLabelConfig();
+        const targetMode: BarcodeLabelTargetMode = body.targetMode ?? storedCfg.mode;
+        const tcpHost = (body.tcpHost ?? storedCfg.tcpHost).trim();
+        const tcpPort = Math.max(
+          1,
+          Math.min(65535, Math.trunc(Number(body.tcpPort ?? storedCfg.tcpPort) || 9100))
+        );
+        const windowsPrinterName = (
+          body.windowsPrinterName ?? storedCfg.windowsPrinterName
+        ).trim();
+        const gapMm = Math.max(
+          0,
+          Math.min(15, Math.trunc(Number(body.gapMm ?? storedCfg.gapMm) || 2))
+        );
+        if (targetMode === 'TSPL_LAN_9100' || targetMode === 'ZPL_LAN_9100') {
+          this.validatePrinterTcpTarget(tcpHost, tcpPort);
+        }
+
+        const rawFrames = Array.isArray(body.frames) ? body.frames : [];
+        if (rawFrames.length === 0) {
+          throw new Error('กรุณาเลือกสินค้าอย่างน้อย 1 รายการก่อนสั่งพิมพ์บาร์โค้ด');
+        }
+        if (rawFrames.length > 500) {
+          throw new Error('จำกัดจำนวนรายการต่อชุดพิมพ์ไม่เกิน 500 รายการต่อครั้ง');
+        }
+
+        const bitmapFrames: BitmapLabelFrameInput[] = rawFrames.map((f) => ({
+          packedMonochromeBitmap: new Uint8Array(Buffer.from(String(f.packedBitmapBase64 ?? ''), 'base64')),
+          widthPx: Math.trunc(Number(f.widthPx ?? 0)),
+          heightPx: Math.trunc(Number(f.heightPx ?? 0)),
+          labelWidthMm: Math.trunc(Number(f.labelWidthMm ?? 50)),
+          labelHeightMm: Math.trunc(Number(f.labelHeightMm ?? 30)),
+          gapMm,
+          copies: Math.max(1, Math.min(999, Math.trunc(Number(f.copies ?? 1)))),
+        }));
+
+        const totalLabelsCount = bitmapFrames.reduce((sum, f) => sum + f.copies, 0);
+        let protocol: 'TSPL' | 'ZPL' | 'ESC_POS' = 'TSPL';
+        let wirePayloadBytes: Uint8Array;
+        let packetsCount = bitmapFrames.length;
+        let maxPacketByteLength = 0;
+
+        if (targetMode === 'ZPL_RAW_USB' || targetMode === 'ZPL_LAN_9100') {
+          protocol = 'ZPL';
+          wirePayloadBytes = buildZplLabelBatchWirePayload(bitmapFrames);
+          maxPacketByteLength = wirePayloadBytes.byteLength;
+        } else if (targetMode === 'ESCPOS_RECEIPT_PRINTER') {
+          protocol = 'ESC_POS';
+          const escRes = buildEscPosLabelBatchWirePayload(bitmapFrames);
+          wirePayloadBytes = escRes.wirePayloadBytes;
+          packetsCount = escRes.packetsCount;
+          maxPacketByteLength = escRes.maxPacketByteLength;
+        } else if (targetMode === 'TSPL_RAW_USB' || targetMode === 'TSPL_LAN_9100') {
+          protocol = 'TSPL';
+          wirePayloadBytes = buildTsplLabelBatchWirePayload(bitmapFrames);
+          maxPacketByteLength = wirePayloadBytes.byteLength;
+        } else {
+          throw new Error(
+            `โหมด "${targetMode}" พิมพ์ผ่านหน้าต่างเบราว์เซอร์โดยตรง ไม่ต้องส่งคำสั่ง RAW มายังเซิร์ฟเวอร์`
+          );
+        }
+
+        let dispatchedToHardware = false;
+        let bytesWritten = wirePayloadBytes.byteLength;
+        let transportMode: string = targetMode;
+
+        if (!body.dryRun) {
+          if (targetMode === 'ESCPOS_RECEIPT_PRINTER') {
+            const receiptCfg = this.getPrinterConfig();
+            transportMode = receiptCfg.mode;
+            if (
+              receiptCfg.mode !== 'SIMULATED_MEMORY' &&
+              receiptCfg.mode !== 'BROWSER_PRINT_DIALOG'
+            ) {
+              const outcome = await this.enqueueHardwarePrint(() =>
+                dispatchEscPosPayloadToHardware(
+                  receiptCfg,
+                  wirePayloadBytes,
+                  `RUBE-POS Barcode Labels (${totalLabelsCount})`
+                )
+              );
+              dispatchedToHardware = outcome.dispatchedToHardware;
+              bytesWritten = outcome.bytesWritten;
+            }
+          } else if (targetMode === 'TSPL_LAN_9100' || targetMode === 'ZPL_LAN_9100') {
+            const tcpRes = await this.enqueueHardwarePrint(() =>
+              sendEscPosOverTcp9100(tcpHost, tcpPort, wirePayloadBytes)
+            );
+            dispatchedToHardware = true;
+            bytesWritten = tcpRes.bytesWritten;
+          } else {
+            const usbRes = await this.enqueueHardwarePrint(() =>
+              sendEscPosOverWindowsRawSpooler(
+                windowsPrinterName,
+                wirePayloadBytes,
+                `RUBE-POS ${protocol} Labels (${totalLabelsCount})`
+              )
+            );
+            dispatchedToHardware = true;
+            bytesWritten = usbRes.bytesWritten;
+          }
+        }
+
+        this.sendJson(res, 200, {
+          ok: true,
+          protocol,
+          targetMode,
+          transportMode,
+          totalItemsCount: bitmapFrames.length,
+          totalLabelsCount,
+          packetsCount,
+          maxPacketByteLength,
+          wireByteLength: wirePayloadBytes.byteLength,
+          bytesWritten,
+          dispatchedToHardware,
+        });
+        return;
+      }
+
       // ----------------------------------------------------------------------
       // 8. Shift Management, Cash Drawer & Resilient External USB Ring-Buffer Backup
       // ----------------------------------------------------------------------
@@ -3739,7 +3989,38 @@ export class RubePosInteractiveAppServer {
         const pendingCount = orders.filter((o) => o.status === 'PENDING_CONFIRM').length;
         const status = this.guestQrServer.getRuntimeStatus();
         const tableSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
-        this.sendJson(res, 200, { orders, pendingCount, tableSessions, status });
+        const serviceCalls = this.ipc.listGuestServiceCalls(outletId);
+        const pendingServiceCallsCount = serviceCalls.filter((c) => c.status === 'PENDING').length;
+        this.sendJson(res, 200, {
+          orders,
+          pendingCount,
+          tableSessions,
+          status,
+          serviceCalls,
+          pendingServiceCallsCount,
+        });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/qr-ordering/service-calls/ack') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER', 'KITCHEN']);
+        const body = await this.readJsonBody<{
+          outletId?: string;
+          callId: string;
+        }>(req);
+        const outletId = body.outletId ?? 'OUTLET-HQ';
+        const call = await this.ipc.acknowledgeGuestServiceCall({
+          outletId,
+          callId: String(body.callId ?? ''),
+          actorUserId: sessionUser?.id ?? 'USR-CASHIER-01',
+          actorDisplayName: sessionUser?.displayName ?? 'Cashier',
+        });
+        this.sendJson(res, 200, {
+          ok: true,
+          call,
+          serviceCalls: this.ipc.listGuestServiceCalls(outletId),
+        });
         return;
       }
 

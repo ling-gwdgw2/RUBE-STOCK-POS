@@ -115,6 +115,8 @@ export interface CheckoutOrderRequest {
     unitPriceSatang: Satang;
     overrideLineTotalSatang?: Satang | undefined;
     selectedModifierIds: readonly string[];
+    skipKds?: boolean | undefined;
+    notes?: string | undefined;
   }>;
 }
 

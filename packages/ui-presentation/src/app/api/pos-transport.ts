@@ -1,4 +1,6 @@
 import type {
+  BarcodeLabelPrinterConfigDto,
+  BarcodeLabelTargetMode,
   BomEdgeDto,
   BootstrapPayload,
   BusinessProfile,
@@ -14,6 +16,7 @@ import type {
   FxCashTenderDetailDto,
   FxRatesConfigDto,
   GuestOrderRecordDto,
+  GuestServiceCallDto,
   HeldBillRecordDto,
   KdsTicketDto,
   LaoQrVerificationPolicy,
@@ -535,6 +538,8 @@ export const posTransport = {
       unitPriceSatang: number;
       overrideLineTotalSatang?: number | undefined;
       selectedModifierIds: string[];
+      skipKds?: boolean | undefined;
+      notes?: string | undefined;
     }>;
   }): Promise<{
     order: {
@@ -1351,6 +1356,8 @@ export const posTransport = {
     pendingCount: number;
     tableSessions: TableQrSessionDto[];
     status: QrOrderingRuntimeStatusDto;
+    serviceCalls?: GuestServiceCallDto[];
+    pendingServiceCallsCount?: number;
   }> {
     return requestJson(`/api/qr-ordering/orders?outletId=${encodeURIComponent(outletId)}`);
   },
@@ -1383,6 +1390,70 @@ export const posTransport = {
     orders: GuestOrderRecordDto[];
   }> {
     return requestJson('/api/qr-ordering/orders/reject', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  acknowledgeQrServiceCall(input: {
+    outletId?: string;
+    callId: string;
+  }): Promise<{
+    ok: boolean;
+    call: GuestServiceCallDto;
+    serviceCalls: GuestServiceCallDto[];
+  }> {
+    return requestJson('/api/qr-ordering/service-calls/ack', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  getBarcodeLabelConfig(): Promise<{ barcodeLabelConfig: BarcodeLabelPrinterConfigDto }> {
+    return requestJson('/api/warehouse/barcode-label-config');
+  },
+
+  saveBarcodeLabelConfig(
+    config: Partial<BarcodeLabelPrinterConfigDto>
+  ): Promise<{ barcodeLabelConfig: BarcodeLabelPrinterConfigDto }> {
+    return requestJson('/api/warehouse/barcode-label-config', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    });
+  },
+
+  printBarcodeLabels(input: {
+    targetMode?: BarcodeLabelTargetMode | undefined;
+    tcpHost?: string | undefined;
+    tcpPort?: number | undefined;
+    windowsPrinterName?: string | undefined;
+    gapMm?: number | undefined;
+    dryRun?: boolean | undefined;
+    frames: Array<{
+      variantId?: string | undefined;
+      sku?: string | undefined;
+      barcodeValue?: string | undefined;
+      packedBitmapBase64: string;
+      widthPx: number;
+      heightPx: number;
+      labelWidthMm: number;
+      labelHeightMm: number;
+      copies: number;
+    }>;
+  }): Promise<{
+    ok: boolean;
+    protocol: 'TSPL' | 'ZPL' | 'ESC_POS';
+    targetMode: BarcodeLabelTargetMode;
+    transportMode: string;
+    totalItemsCount: number;
+    totalLabelsCount: number;
+    packetsCount: number;
+    maxPacketByteLength: number;
+    wireByteLength: number;
+    bytesWritten: number;
+    dispatchedToHardware: boolean;
+  }> {
+    return requestJson('/api/warehouse/print-barcode-labels', {
       method: 'POST',
       body: JSON.stringify(input),
     });

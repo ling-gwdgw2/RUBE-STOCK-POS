@@ -24,6 +24,8 @@ import type {
 } from '../../../shared-contracts/src/currency.ts';
 import type {
   GuestOrderRecordDto,
+  GuestServiceCallDto,
+  GuestServiceCallType,
   QrGuestOrderStatus,
   QrOrderApprovalMode,
   QrOrderingConfigDto,
@@ -31,6 +33,14 @@ import type {
   QrWifiSecurityType,
   TableQrSessionDto,
 } from '../../../shared-contracts/src/qr-ordering.ts';
+import type {
+  BarcodeLabelPrintItemDto,
+  BarcodeLabelPrinterConfigDto,
+  BarcodeLabelSizePresetId,
+  BarcodeLabelTargetMode,
+  BarcodeLabelTemplateOptions,
+  BarcodeSymbology,
+} from '../../../shared-contracts/src/barcode-printing.ts';
 
 export type PrinterTransportMode =
   | 'SIMULATED_MEMORY'
@@ -275,10 +285,12 @@ export interface BootstrapPayload {
   staffUsers: StaffUserDto[];
   storeSettings: StoreIdentitySettingsDto;
   printerConfig: PrinterHardwareConfigDto;
+  barcodeLabelConfig?: BarcodeLabelPrinterConfigDto | undefined;
   qrOrderingConfig?: QrOrderingConfigDto | undefined;
   qrOrderingStatus?: QrOrderingRuntimeStatusDto | undefined;
   qrGuestOrders?: GuestOrderRecordDto[] | undefined;
   qrTableSessions?: TableQrSessionDto[] | undefined;
+  qrServiceCalls?: GuestServiceCallDto[] | undefined;
   usbBackupConfig?: UsbBackupConfigStatusDto | undefined;
   usbBackups: UsbBackupFileDto[];
   ledgerInvariant: {
@@ -354,6 +366,12 @@ export interface PrintedReceiptPreview {
 }
 
 export type {
+  BarcodeLabelPrintItemDto,
+  BarcodeLabelPrinterConfigDto,
+  BarcodeLabelSizePresetId,
+  BarcodeLabelTargetMode,
+  BarcodeLabelTemplateOptions,
+  BarcodeSymbology,
   BomEdgeDto,
   BusinessProfile,
   CashRoundingStepMajor,
@@ -367,6 +385,8 @@ export type {
   FxCashTenderDetailDto,
   FxRatesConfigDto,
   GuestOrderRecordDto,
+  GuestServiceCallDto,
+  GuestServiceCallType,
   ItemVariantDto,
   LaoQrVerificationPolicy,
   LocaleCode,

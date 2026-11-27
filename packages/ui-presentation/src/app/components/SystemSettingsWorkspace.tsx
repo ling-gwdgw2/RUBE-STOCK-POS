@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useState } from 'react';
 import {
+  Barcode,
   Building2,
   CheckCircle2,
   Cpu,
@@ -25,6 +26,13 @@ import {
   type LaoQrVerificationPolicy,
   type LocaleCode,
 } from '../../../../shared-contracts/src/currency.ts';
+import {
+  BARCODE_LABEL_SIZE_PRESETS,
+  normalizeBarcodeLabelConfig,
+  type BarcodeLabelPrinterConfigDto,
+  type BarcodeLabelSizePresetId,
+  type BarcodeLabelTargetMode,
+} from '../../../../shared-contracts/src/barcode-printing.ts';
 import { posTransport } from '../api/pos-transport.ts';
 import { useI18n } from '../i18n/index.tsx';
 import type {
@@ -125,6 +133,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
     Array<{ name: string; portName: string; isDefault: boolean }>
   >([]);
 
+  // Product Barcode Label Printer Config
+  const [lblCfg, setLblCfg] = useState<BarcodeLabelPrinterConfigDto>(() =>
+    normalizeBarcodeLabelConfig(bootstrap.barcodeLabelConfig)
+  );
+
   // Off-Disk External USB Drive Backup Config
   const [usbDrives, setUsbDrives] = useState<DiscoveredStorageDriveDto[]>([]);
   const [usbBackupCfg, setUsbBackupCfg] = useState<UsbBackupConfigStatusDto | null>(
@@ -163,12 +176,13 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
     setPrnWinName(bootstrap.printerConfig.windowsPrinterName);
     setPrnWidthMm(bootstrap.printerConfig.paperWidthMm);
     setPrnAutoDrawer(bootstrap.printerConfig.autoKickDrawerOnCash);
+    setLblCfg(normalizeBarcodeLabelConfig(bootstrap.barcodeLabelConfig));
     if (bootstrap.usbBackupConfig) {
       setUsbBackupCfg(bootstrap.usbBackupConfig);
       setUsbDirInput(bootstrap.usbBackupConfig.customBackupDir);
       setMirrorLocalFallback(bootstrap.usbBackupConfig.mirrorToLocalFallback);
     }
-  }, [bootstrap.printerConfig, bootstrap.storeSettings, bootstrap.usbBackupConfig, fiscal]);
+  }, [bootstrap.barcodeLabelConfig, bootstrap.printerConfig, bootstrap.storeSettings, bootstrap.usbBackupConfig, fiscal]);
 
   const handleScanUsbDrives = async () => {
     setScanningDrives(true);
@@ -211,6 +225,19 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
       });
       await onRefreshState();
       onToast('บันทึกพอร์ตเครื่องพิมพ์ใบเสร็จและขนาดกระดาษสำเร็จ', 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveBarcodeLabelConfig = async () => {
+    setBusy(true);
+    try {
+      await posTransport.saveBarcodeLabelConfig(lblCfg);
+      await onRefreshState();
+      onToast('บันทึกตั้งค่าเครื่องพิมพ์สติกเกอร์บาร์โค้ดสำเร็จ', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -689,6 +716,161 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               บันทึกตั้งค่าเครื่องพิมพ์
             </button>
           </div>
+        </div>
+      </section>
+
+      {/* 1.6 Product Barcode Label Printer Settings */}
+      <section className="rounded-[4px] border border-hairline bg-canvas p-6 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary-dark">
+              <Barcode className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="font-google-display text-[20px] font-normal leading-[28px] text-ink">
+                เครื่องพิมพ์บาร์โค้ดสติกเกอร์สินค้า (A4 Sticker / TSPL / ZPL / ESC-POS)
+              </h2>
+              <p className="text-xs text-ink-muted mt-1">
+                กำหนดค่าเริ่มต้นสำหรับแท็บ &ldquo;พิมพ์บาร์โค้ดสินค้า&rdquo; ในคลังสินค้า รองรับทั้งสติกเกอร์ A4, Xprinter/TSC (TSPL2), Zebra (ZPL II) และเครื่องพิมพ์ใบเสร็จ 80/58mm
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+          <div className="md:col-span-2">
+            <label htmlFor={`${uid}-set-lbl-mode`} className="block text-ink-muted mb-1">
+              โหมดเครื่องพิมพ์บาร์โค้ดเริ่มต้น
+            </label>
+            <select
+              id={`${uid}-set-lbl-mode`}
+              value={lblCfg.mode}
+              onChange={(e) => {
+                const nextMode = e.target.value as BarcodeLabelTargetMode;
+                const nextPreset: BarcodeLabelSizePresetId =
+                  nextMode === 'A4_SHEET'
+                    ? 'A4_30UP'
+                    : nextMode === 'ESCPOS_RECEIPT_PRINTER'
+                      ? prnWidthMm === 58
+                        ? 'RECEIPT_58MM'
+                        : 'RECEIPT_80MM'
+                      : '50x30mm';
+                setLblCfg((prev) => ({
+                  ...prev,
+                  mode: nextMode,
+                  defaultPresetId: nextPreset,
+                }));
+              }}
+              className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
+            >
+              <option value="A4_SHEET">กระดาษสติกเกอร์ A4 (Laser / Inkjet)</option>
+              <option value="THERMAL_LABEL_DIALOG">สติกเกอร์ความร้อน (Windows Print Dialog)</option>
+              <option value="TSPL_RAW_USB">TSPL USB Raw Spooler (Xprinter / TSC / Gprinter)</option>
+              <option value="TSPL_LAN_9100">TSPL LAN (TCP Port 9100)</option>
+              <option value="ZPL_RAW_USB">ZPL USB Raw Spooler (Zebra)</option>
+              <option value="ZPL_LAN_9100">ZPL LAN (TCP Port 9100)</option>
+              <option value="ESCPOS_RECEIPT_PRINTER">พิมพ์ผ่านเครื่องพิมพ์ใบเสร็จ 80mm / 58mm</option>
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor={`${uid}-set-lbl-preset`} className="block text-ink-muted mb-1">
+              ขนาดป้ายเริ่มต้น
+            </label>
+            <select
+              id={`${uid}-set-lbl-preset`}
+              value={lblCfg.defaultPresetId}
+              onChange={(e) =>
+                setLblCfg((prev) => ({
+                  ...prev,
+                  defaultPresetId: e.target.value as BarcodeLabelSizePresetId,
+                }))
+              }
+              className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
+            >
+              {BARCODE_LABEL_SIZE_PRESETS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.id} ({p.widthMm}×{p.heightMm}mm)
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {(lblCfg.mode === 'TSPL_RAW_USB' || lblCfg.mode === 'ZPL_RAW_USB') && (
+            <div>
+              <label htmlFor={`${uid}-set-lbl-win`} className="block text-ink-muted mb-1">
+                เครื่องพิมพ์สติกเกอร์ USB
+              </label>
+              {winPrinters.length > 0 ? (
+                <select
+                  id={`${uid}-set-lbl-win`}
+                  value={lblCfg.windowsPrinterName}
+                  onChange={(e) =>
+                    setLblCfg((prev) => ({ ...prev, windowsPrinterName: e.target.value }))
+                  }
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
+                >
+                  <option value="">-- เลือกเครื่องพิมพ์ --</option>
+                  {winPrinters.map((p) => (
+                    <option key={p.name} value={p.name}>
+                      {p.name} ({p.portName})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id={`${uid}-set-lbl-win`}
+                  type="text"
+                  placeholder="เช่น Xprinter XP-365B"
+                  value={lblCfg.windowsPrinterName}
+                  onChange={(e) =>
+                    setLblCfg((prev) => ({ ...prev, windowsPrinterName: e.target.value }))
+                  }
+                  className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusControl}`}
+                />
+              )}
+            </div>
+          )}
+
+          {(lblCfg.mode === 'TSPL_LAN_9100' || lblCfg.mode === 'ZPL_LAN_9100') && (
+            <div>
+              <label htmlFor={`${uid}-set-lbl-host`} className="block text-ink-muted mb-1">
+                IP:Port เครื่องพิมพ์บาร์โค้ด LAN
+              </label>
+              <div className="flex gap-1.5">
+                <input
+                  id={`${uid}-set-lbl-host`}
+                  type="text"
+                  value={lblCfg.tcpHost}
+                  onChange={(e) => setLblCfg((prev) => ({ ...prev, tcpHost: e.target.value }))}
+                  className={`h-11 flex-1 min-w-0 rounded-[4px] border border-hairline bg-canvas px-3 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                />
+                <input
+                  type="number"
+                  aria-label="พอร์ต TCP เครื่องพิมพ์บาร์โค้ด"
+                  value={lblCfg.tcpPort}
+                  onChange={(e) =>
+                    setLblCfg((prev) => ({
+                      ...prev,
+                      tcpPort: Math.max(1, Math.min(65535, Number(e.target.value) || 9100)),
+                    }))
+                  }
+                  className={`h-11 w-20 rounded-[4px] border border-hairline bg-canvas px-2 text-center text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end pt-2 border-t border-hairline">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void handleSaveBarcodeLabelConfig()}
+            className={`h-[44px] rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+          >
+            บันทึกตั้งค่าเครื่องพิมพ์บาร์โค้ด
+          </button>
         </div>
       </section>
 
