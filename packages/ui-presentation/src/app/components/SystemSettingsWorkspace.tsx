@@ -3,29 +3,43 @@ import {
   Building2,
   CheckCircle2,
   Cpu,
+  Globe,
   HardDrive,
   KeyRound,
   Lock,
   Network,
   Printer,
+  QrCode,
   RefreshCw,
   RotateCcw,
   Shield,
   Sliders,
   UserPlus,
 } from 'lucide-react';
+import QRCode from 'qrcode';
+import {
+  DEFAULT_LA_FISCAL_CONFIG,
+  DEFAULT_TH_FISCAL_CONFIG,
+  type CashRoundingStepMajor,
+  type CountryCode,
+  type LaoQrVerificationPolicy,
+  type LocaleCode,
+} from '../../../../shared-contracts/src/currency.ts';
 import { posTransport } from '../api/pos-transport.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type {
   BootstrapPayload,
   BusinessProfile,
   DiscoveredStorageDriveDto,
   PrinterTransportMode,
   StaffUserDto,
+  TaxMode,
   UsbBackupConfigStatusDto,
   UserRole,
 } from '../types.ts';
 import { sanitizePinInput } from '../utils/keyboard-digits.ts';
 import { canManageCriticalStoreSettings } from '../utils/rbac.ts';
+import { QrOrderingSettingsCard } from './QrOrderingSettingsCard.tsx';
 import { UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface SystemSettingsWorkspaceProps {
@@ -47,13 +61,39 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
   onRefreshState,
   onToast,
 }) => {
+  const { fiscal, t, pick } = useI18n();
   const uid = useId();
   const isOwner = canManageCriticalStoreSettings(currentUser.role);
   const [storeName, setStoreName] = useState(bootstrap.storeSettings.storeName);
+  const [storeAddress, setStoreAddress] = useState(
+    bootstrap.storeSettings.storeAddress ?? fiscal.storeAddress
+  );
   const [taxId, setTaxId] = useState(bootstrap.storeSettings.taxId);
   const [branchCode, setBranchCode] = useState(bootstrap.storeSettings.branchCode);
   const [rdPosRegNo, setRdPosRegNo] = useState(bootstrap.storeSettings.rdPosRegNo);
   const [promptPayId, setPromptPayId] = useState(bootstrap.storeSettings.promptPayId);
+  const [countryCode, setCountryCode] = useState<CountryCode>(fiscal.countryCode);
+  const [uiLocale, setUiLocale] = useState<LocaleCode>(fiscal.uiLocale);
+  const [receiptLocale, setReceiptLocale] = useState<LocaleCode>(fiscal.receiptLocale);
+  const [vatRateBps, setVatRateBps] = useState<number>(fiscal.vatRateBps);
+  const [defaultTaxMode, setDefaultTaxMode] = useState<TaxMode>(fiscal.defaultTaxMode);
+  const [cashRoundingStepMajor, setCashRoundingStepMajor] = useState<CashRoundingStepMajor>(
+    fiscal.cashRoundingStepMajor
+  );
+  const [scalePriceEmbeddedMultiplier, setScalePriceEmbeddedMultiplier] = useState<number>(
+    fiscal.scalePriceEmbeddedMultiplier
+  );
+  const [laoQrStaticTemplate, setLaoQrStaticTemplate] = useState<string>(
+    fiscal.laoQrStaticTemplate
+  );
+  const [laoQrVerificationPolicy, setLaoQrVerificationPolicy] = useState<LaoQrVerificationPolicy>(
+    fiscal.laoQrVerificationPolicy
+  );
+  const [fxEnabled, setFxEnabled] = useState<boolean>(fiscal.fxRates.enabled);
+  const [fxThbRateInput, setFxThbRateInput] = useState<string>(String(fiscal.fxRates.thbToLakRate));
+  const [fxUsdRateInput, setFxUsdRateInput] = useState<string>(String(fiscal.fxRates.usdToLakRate));
+  const [laoQrPreviewUrl, setLaoQrPreviewUrl] = useState<string | null>(null);
+  const [laoQrPreviewInfo, setLaoQrPreviewInfo] = useState<string | null>(null);
 
   // Staff User Creation / Edit Form
   const [editingStaffId, setEditingStaffId] = useState<string | null>(null);
@@ -100,10 +140,23 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
 
   useEffect(() => {
     setStoreName(bootstrap.storeSettings.storeName);
+    setStoreAddress(bootstrap.storeSettings.storeAddress ?? fiscal.storeAddress);
     setTaxId(bootstrap.storeSettings.taxId);
     setBranchCode(bootstrap.storeSettings.branchCode);
     setRdPosRegNo(bootstrap.storeSettings.rdPosRegNo);
     setPromptPayId(bootstrap.storeSettings.promptPayId);
+    setCountryCode(fiscal.countryCode);
+    setUiLocale(fiscal.uiLocale);
+    setReceiptLocale(fiscal.receiptLocale);
+    setVatRateBps(fiscal.vatRateBps);
+    setDefaultTaxMode(fiscal.defaultTaxMode);
+    setCashRoundingStepMajor(fiscal.cashRoundingStepMajor);
+    setScalePriceEmbeddedMultiplier(fiscal.scalePriceEmbeddedMultiplier);
+    setLaoQrStaticTemplate(fiscal.laoQrStaticTemplate);
+    setLaoQrVerificationPolicy(fiscal.laoQrVerificationPolicy);
+    setFxEnabled(fiscal.fxRates.enabled);
+    setFxThbRateInput(String(fiscal.fxRates.thbToLakRate));
+    setFxUsdRateInput(String(fiscal.fxRates.usdToLakRate));
     setPrnMode(bootstrap.printerConfig.mode);
     setPrnHost(bootstrap.printerConfig.tcpHost);
     setPrnPort(String(bootstrap.printerConfig.tcpPort));
@@ -115,7 +168,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
       setUsbDirInput(bootstrap.usbBackupConfig.customBackupDir);
       setMirrorLocalFallback(bootstrap.usbBackupConfig.mirrorToLocalFallback);
     }
-  }, [bootstrap.printerConfig, bootstrap.storeSettings, bootstrap.usbBackupConfig]);
+  }, [bootstrap.printerConfig, bootstrap.storeSettings, bootstrap.usbBackupConfig, fiscal]);
 
   const handleScanUsbDrives = async () => {
     setScanningDrives(true);
@@ -207,23 +260,109 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
     }
   };
 
+  const handleCountryToggleInSettings = (nextCountry: CountryCode) => {
+    setCountryCode(nextCountry);
+    if (nextCountry === 'LA') {
+      setUiLocale(DEFAULT_LA_FISCAL_CONFIG.uiLocale);
+      setReceiptLocale(DEFAULT_LA_FISCAL_CONFIG.receiptLocale);
+      setVatRateBps(DEFAULT_LA_FISCAL_CONFIG.vatRateBps);
+      setDefaultTaxMode('INCLUSIVE');
+      setCashRoundingStepMajor(500);
+      setScalePriceEmbeddedMultiplier(10_000);
+    } else {
+      setUiLocale(DEFAULT_TH_FISCAL_CONFIG.uiLocale);
+      setReceiptLocale(DEFAULT_TH_FISCAL_CONFIG.receiptLocale);
+      setVatRateBps(DEFAULT_TH_FISCAL_CONFIG.vatRateBps);
+      setDefaultTaxMode('INCLUSIVE');
+      setCashRoundingStepMajor(0);
+      setScalePriceEmbeddedMultiplier(1);
+      setFxEnabled(false);
+    }
+  };
+
+  const handleValidateOrSampleLaoQr = async (generateSample: boolean) => {
+    setBusy(true);
+    try {
+      const res = await posTransport.validateLaoQrTemplate(
+        generateSample
+          ? {
+              generateSample: true,
+              merchantName: storeName || 'RUBE LAO SHOP',
+              merchantCity: 'VIENTIANE',
+              previewAmountSatang: 3_500_000,
+            }
+          : {
+              rawTemplate: laoQrStaticTemplate,
+              previewAmountSatang: 3_500_000,
+            }
+      );
+      if (!res.valid || !res.normalizedTemplate || !res.previewPayload) {
+        setLaoQrPreviewUrl(null);
+        setLaoQrPreviewInfo(null);
+        onToast(res.errorReason || 'LAOQR template is invalid', 'error');
+        return;
+      }
+      setLaoQrStaticTemplate(res.normalizedTemplate);
+      const url = await QRCode.toDataURL(res.previewPayload, {
+        width: 168,
+        margin: 1,
+        color: { dark: '#202124', light: '#ffffff' },
+      });
+      setLaoQrPreviewUrl(url);
+      setLaoQrPreviewInfo(
+        `Tag ${res.merchantAccountTag} · ${res.merchantName || 'LAOQR'} · Dynamic 35,000 ₭ (CRC ${res.previewCrcHex})`
+      );
+      onToast(
+        pick(
+          'ตรวจสอบแม่แบบ LAOQR สำเร็จ — กด "บันทึก" เพื่อลงลายเซ็น HMAC-SHA256',
+          'ກວດສອບແມ່ແບບ LAOQR ສຳເລັດ — ກົດ "ບັນທຶກ" ເພື່ອລົງລາຍເຊັນ HMAC-SHA256',
+          'LAOQR template validated — click Save to HMAC-sign it'
+        ),
+        'success'
+      );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleSaveStoreSettings = async () => {
     setBusy(true);
     try {
       await posTransport.updateStoreSettings({
         outletId,
         storeName,
+        storeAddress,
         taxId,
         branchCode,
         rdPosRegNo,
         promptPayId,
+        countryCode,
+        uiLocale,
+        receiptLocale,
+        vatRateBps: defaultTaxMode === 'NONE' ? 0 : vatRateBps,
+        defaultTaxMode,
+        cashRoundingStepMajor: countryCode === 'LA' ? cashRoundingStepMajor : 0,
+        scalePriceEmbeddedMultiplier,
+        laoQrStaticTemplate: countryCode === 'LA' ? laoQrStaticTemplate.trim() : '',
+        laoQrVerificationPolicy,
+        fxRates: {
+          enabled: countryCode === 'LA' && fxEnabled,
+          thbToLakRate: Math.max(1, Math.round(Number(fxThbRateInput.replace(/\D/g, '') || 640))),
+          usdToLakRate: Math.max(1, Math.round(Number(fxUsdRateInput.replace(/\D/g, '') || 21500))),
+        },
         updatedByUserId: currentUser.id,
       });
       await onRefreshState();
       const logs = await posTransport.listSecurityAuditLogs(40);
       setAuditLogs(logs.auditLogs);
       onToast(
-        'บันทึกข้อมูลร้านค้า ใบกำกับภาษี และเลขบัญชี PromptPay (HMAC Guarded) สำเร็จ',
+        pick(
+          'บันทึกข้อมูลร้านค้า ประเทศ สกุลเงิน ภาษี VAT และ QR (HMAC Guarded) สำเร็จ',
+          'ບັນທຶກຂໍ້ມູນຮ້ານ, ປະເທດ, ສະກຸນເງິນ, ອາກອນ ອມພ ແລະ QR (HMAC Guarded) ສຳເລັດ',
+          'Store identity, country, VAT and QR settings saved & HMAC-signed'
+        ),
         'success'
       );
     } catch (err) {
@@ -710,24 +849,83 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
       </section>
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-        {/* 2. Store Identity & PromptPay Settings */}
+        {/* 2. Store Identity, Country/Currency, VAT, Cash Rounding & QR Settings */}
         <section className="xl:col-span-6 rounded-[4px] border border-hairline bg-canvas p-6 space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
-              <Building2 className="h-5 w-5 text-primary" />
-              <span>ข้อมูลกิจการ ใบกำกับภาษี ABB &amp; บัญชี PromptPay</span>
+              <Building2 className="h-5 w-5 text-primary shrink-0" />
+              <span>{t('set.countrySectionTitle')}</span>
             </h3>
             {!isOwner && (
               <span className="inline-flex items-center gap-1 rounded-[48px] border border-hairline bg-surface-1 px-2.5 py-0.5 text-[11px] font-medium text-ink-muted">
-                <Lock className="h-3 w-3" /> แก้ไขได้เฉพาะ OWNER
+                <Lock className="h-3 w-3" /> OWNER
               </span>
             )}
+          </div>
+
+          {/* Country & Language Selector Row */}
+          <div className="rounded-[4px] border border-hairline bg-surface-1 p-4 space-y-3 text-xs">
+            <div className="flex items-center gap-2 font-medium text-ink">
+              <Globe className="h-4 w-4 text-primary shrink-0" />
+              <span>{pick('ประเทศและระบบสกุลเงินหลักของร้าน', 'ປະເທດ ແລະ ສະກຸນເງິນຫຼັກຂອງຮ້ານ', 'Store Country & Primary Currency')}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {(['TH', 'LA'] as const).map((code) => (
+                <button
+                  key={code}
+                  type="button"
+                  disabled={!isOwner}
+                  onClick={() => handleCountryToggleInSettings(code)}
+                  className={`h-11 rounded-[4px] border px-3 text-left font-google-display text-xs font-medium disabled:opacity-60 ${UI_INTERACTION.focusButton} ${
+                    countryCode === code
+                      ? 'border-primary bg-primary-soft text-primary-dark'
+                      : 'border-hairline bg-canvas text-ink-soft hover:border-primary'
+                  }`}
+                >
+                  {code === 'TH' ? 'TH · ประเทศไทย (THB ฿)' : 'LA · ສປປ.ລາວ (LAK ₭)'}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label htmlFor={`${uid}-ui-locale`} className="block text-ink-muted mb-1">
+                  {pick('ภาษาหน้าจอ POS (UI Language)', 'ພາສາໜ້າຈໍ POS (UI Language)', 'POS UI Language')}
+                </label>
+                <select
+                  id={`${uid}-ui-locale`}
+                  disabled={!isOwner}
+                  value={uiLocale}
+                  onChange={(e) => setUiLocale(e.target.value as LocaleCode)}
+                  className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
+                >
+                  <option value="lo">ພາສາລາວ (Lao)</option>
+                  <option value="th">ภาษาไทย (Thai)</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
+              <div>
+                <label htmlFor={`${uid}-receipt-locale`} className="block text-ink-muted mb-1">
+                  {pick('ภาษาบนใบเสร็จความร้อน 203-DPI', 'ພາສາເທິງໃບບິນຄວາມຮ້ອນ 203-DPI', 'Thermal Receipt Language')}
+                </label>
+                <select
+                  id={`${uid}-receipt-locale`}
+                  disabled={!isOwner}
+                  value={receiptLocale}
+                  onChange={(e) => setReceiptLocale(e.target.value as LocaleCode)}
+                  className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
+                >
+                  <option value="lo">ພາສາລາວ (Lao · ອມພ)</option>
+                  <option value="th">ภาษาไทย (Thai)</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
             <div className="sm:col-span-2">
               <label htmlFor={`${uid}-store-name`} className="block text-ink-muted mb-1">
-                ชื่อร้านค้าบนหัวใบเสร็จ
+                {pick('ชื่อร้านค้าบนหัวใบเสร็จ', 'ຊື່ຮ້ານຄ້າເທິງຫົວໃບບິນ', 'Store Name (Receipt Header)')}
               </label>
               <input
                 id={`${uid}-store-name`}
@@ -738,9 +936,25 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                 className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
             </div>
+            <div className="sm:col-span-2">
+              <label htmlFor={`${uid}-store-address`} className="block text-ink-muted mb-1">
+                {pick('ที่อยู่ร้านค้า (พิมพ์บนใบเสร็จ สปป.ลาว / ใบกำกับภาษี)', 'ທີ່ຢູ່ຮ້ານຄ້າ (ພິມເທິງໃບບິນ)', 'Store Address (Printed on Receipt)')}
+              </label>
+              <input
+                id={`${uid}-store-address`}
+                type="text"
+                disabled={!isOwner}
+                placeholder={countryCode === 'LA' ? 'ບ້ານ / ເມືອງ / ແຂວງ' : 'ที่อยู่ร้าน (ไม่บังคับ)'}
+                value={storeAddress}
+                onChange={(e) => setStoreAddress(e.target.value)}
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink placeholder:text-ink-muted disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
+              />
+            </div>
             <div>
               <label htmlFor={`${uid}-tax-id`} className="block text-ink-muted mb-1">
-                เลขประจำตัวผู้เสียภาษี 13 หลัก
+                {countryCode === 'LA'
+                  ? pick('เลขผู้เสียภาษี สปป.ลาว (TIN 12 หลัก)', 'ເລກປະຈຳຕົວຜູ້ເສຍອາກອນ (TIN)', 'Lao TIN')
+                  : 'เลขประจำตัวผู้เสียภาษี 13 หลัก'}
               </label>
               <input
                 id={`${uid}-tax-id`}
@@ -752,21 +966,10 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               />
             </div>
             <div>
-              <label htmlFor={`${uid}-branch-code`} className="block text-ink-muted mb-1">
-                รหัสสาขา (00000 = สำนักงานใหญ่)
-              </label>
-              <input
-                id={`${uid}-branch-code`}
-                type="text"
-                disabled={!isOwner}
-                value={branchCode}
-                onChange={(e) => setBranchCode(e.target.value)}
-                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
-              />
-            </div>
-            <div>
               <label htmlFor={`${uid}-rd-reg`} className="block text-ink-muted mb-1">
-                เลขทะเบียนเครื่องเก็บเงินกรมสรรพากร
+                {countryCode === 'LA'
+                  ? pick('เลขทะเบียนเครื่อง POS / TaxRIS', 'ເລກທະບຽນເຄື່ອງ POS / TaxRIS', 'POS / TaxRIS Reg No.')
+                  : 'เลขทะเบียนเครื่องเก็บเงินกรมสรรพากร'}
               </label>
               <input
                 id={`${uid}-rd-reg`}
@@ -778,18 +981,223 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               />
             </div>
             <div>
-              <label htmlFor={`${uid}-promptpay`} className="block text-primary-dark font-medium mb-1">
-                เบอร์ / เลขนิติบุคคล PromptPay (ล็อก HMAC)
+              <label htmlFor={`${uid}-vat-preset`} className="block text-ink-muted mb-1">
+                {pick('อัตราภาษี VAT & รูปแบบเริ่มต้น', 'ອັດຕາອາກອນ ອມພ (VAT) & ຮູບແບບເລີ່ມຕົ້ນ', 'VAT Rate & Default Mode')}
               </label>
-              <input
-                id={`${uid}-promptpay`}
-                type="text"
+              <select
+                id={`${uid}-vat-preset`}
                 disabled={!isOwner}
-                value={promptPayId}
-                onChange={(e) => setPromptPayId(e.target.value)}
-                className={`h-11 w-full rounded-[4px] border border-primary bg-canvas px-3.5 font-medium text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
-              />
+                value={defaultTaxMode === 'NONE' ? 'NONE' : `${vatRateBps}:${defaultTaxMode}`}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === 'NONE') {
+                    setDefaultTaxMode('NONE');
+                    setVatRateBps(0);
+                  } else {
+                    const [bpsStr, modeStr] = v.split(':');
+                    setVatRateBps(Number(bpsStr) || (countryCode === 'LA' ? 1000 : 700));
+                    setDefaultTaxMode((modeStr as TaxMode) || 'INCLUSIVE');
+                  }
+                }}
+                className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink disabled:bg-surface-1 ${UI_INTERACTION.focusSelect}`}
+              >
+                <option value="1000:INCLUSIVE">VAT 10% Inclusive ({pick('มาตรฐาน สปป.ลาว', 'ມາດຕະຖານ ສປປ.ລາວ', 'Laos Standard')})</option>
+                <option value="1000:EXCLUSIVE">VAT 10% Exclusive (+10%)</option>
+                <option value="700:INCLUSIVE">VAT 7% Inclusive ({pick('มาตรฐานไทย', 'ມາດຕະຖານໄທ', 'Thailand Standard')})</option>
+                <option value="700:EXCLUSIVE">VAT 7% Exclusive (+7%)</option>
+                <option value="NONE">0% {pick('ยกเว้น VAT (ร้านเล็ก)', 'ຍົກເວັ້ນ ອມພ (ຮ້ານຂະໜາດນ້ອຍ)', 'VAT Exempt')}</option>
+              </select>
             </div>
+            {countryCode === 'TH' ? (
+              <>
+                <div>
+                  <label htmlFor={`${uid}-branch-code`} className="block text-ink-muted mb-1">
+                    รหัสสาขา (00000 = สำนักงานใหญ่)
+                  </label>
+                  <input
+                    id={`${uid}-branch-code`}
+                    type="text"
+                    disabled={!isOwner}
+                    value={branchCode}
+                    onChange={(e) => setBranchCode(e.target.value)}
+                    className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor={`${uid}-promptpay`} className="block text-primary-dark font-medium mb-1">
+                    เบอร์ / เลขนิติบุคคล PromptPay (ล็อก HMAC)
+                  </label>
+                  <input
+                    id={`${uid}-promptpay`}
+                    type="text"
+                    disabled={!isOwner}
+                    value={promptPayId}
+                    onChange={(e) => setPromptPayId(e.target.value)}
+                    className={`h-11 w-full rounded-[4px] border border-primary bg-canvas px-3.5 font-medium text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <label htmlFor={`${uid}-cash-rounding`} className="block text-ink-muted mb-1">
+                    {t('set.cashRoundingLabel')}
+                  </label>
+                  <select
+                    id={`${uid}-cash-rounding`}
+                    disabled={!isOwner}
+                    value={cashRoundingStepMajor}
+                    onChange={(e) =>
+                      setCashRoundingStepMajor(Number(e.target.value) as CashRoundingStepMajor)
+                    }
+                    className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink disabled:bg-surface-1 ${UI_INTERACTION.focusSelect}`}
+                  >
+                    <option value={0}>{t('set.cashRounding.0')}</option>
+                    <option value={500}>{t('set.cashRounding.500')}</option>
+                    <option value={1000}>{t('set.cashRounding.1000')}</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor={`${uid}-scale-mult`} className="block text-ink-muted mb-1">
+                    {t('set.scaleMultLabel')}
+                  </label>
+                  <select
+                    id={`${uid}-scale-mult`}
+                    disabled={!isOwner}
+                    value={scalePriceEmbeddedMultiplier}
+                    onChange={(e) => setScalePriceEmbeddedMultiplier(Number(e.target.value))}
+                    className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink disabled:bg-surface-1 ${UI_INTERACTION.focusSelect}`}
+                  >
+                    <option value={10_000}>×100 ₭ (01500 = 150,000 ₭ — แนะนำ)</option>
+                    <option value={100_000}>×1,000 ₭ (00150 = 150,000 ₭)</option>
+                    <option value={100}>×1 ₭ (สูงสุด 99,999 ₭)</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor={`${uid}-laoqr-policy`} className="block text-ink-muted mb-1">
+                    {t('set.laoQrVerifyPolicy')}
+                  </label>
+                  <select
+                    id={`${uid}-laoqr-policy`}
+                    disabled={!isOwner}
+                    value={laoQrVerificationPolicy}
+                    onChange={(e) =>
+                      setLaoQrVerificationPolicy(e.target.value as LaoQrVerificationPolicy)
+                    }
+                    className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink disabled:bg-surface-1 ${UI_INTERACTION.focusSelect}`}
+                  >
+                    <option value="STRICT_REF">{t('set.laoQrPolicy.STRICT_REF')}</option>
+                    <option value="VISUAL_CONFIRM_ALLOWED">{t('set.laoQrPolicy.VISUAL_CONFIRM_ALLOWED')}</option>
+                  </select>
+                </div>
+                <div className="sm:col-span-2 rounded-[4px] border border-primary/50 bg-surface-1 p-3.5 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label htmlFor={`${uid}-laoqr-static`} className="flex items-center gap-1.5 font-medium text-primary-dark">
+                      <QrCode className="h-4 w-4 shrink-0" />
+                      <span>{t('set.laoQrTitle')}</span>
+                    </label>
+                    <button
+                      type="button"
+                      disabled={busy || !isOwner}
+                      onClick={() => void handleValidateOrSampleLaoQr(true)}
+                      className={`h-8 rounded-[48px] border border-hairline bg-canvas px-3 text-[11px] font-medium text-primary hover:border-primary ${UI_INTERACTION.focusButton}`}
+                    >
+                      {pick('สร้าง LAOQR ตัวอย่าง', 'ສ້າງ LAOQR ຕົວຢ່າງ', 'Sample LAOQR')}
+                    </button>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      id={`${uid}-laoqr-static`}
+                      type="text"
+                      disabled={!isOwner}
+                      placeholder="00020101021138...53034185802LA...6304XXXX"
+                      value={laoQrStaticTemplate}
+                      onChange={(e) => setLaoQrStaticTemplate(e.target.value)}
+                      className={`h-10 flex-1 rounded-[4px] border border-hairline bg-canvas px-3 text-xs text-ink font-mono-num disabled:bg-surface-1 ${UI_INTERACTION.focusControl}`}
+                    />
+                    <button
+                      type="button"
+                      disabled={busy || !isOwner || !laoQrStaticTemplate.trim()}
+                      onClick={() => void handleValidateOrSampleLaoQr(false)}
+                      className={`h-10 rounded-[48px] border border-primary bg-primary-soft px-4 text-xs font-medium text-primary-dark hover:bg-primary hover:text-white disabled:opacity-45 ${UI_INTERACTION.focusButton}`}
+                    >
+                      {pick('ทดสอบ Dynamic QR', 'ທົດສອບ Dynamic QR', 'Test QR')}
+                    </button>
+                  </div>
+                  {laoQrPreviewUrl && (
+                    <div className="flex items-center gap-3 rounded-[4px] border border-hairline bg-canvas p-2.5">
+                      <img
+                        src={laoQrPreviewUrl}
+                        alt="LAOQR Preview"
+                        className="h-16 w-16 rounded-[4px] border border-hairline bg-white p-1 shrink-0"
+                      />
+                      <div className="text-[11px] text-ink-soft leading-relaxed">
+                        <div className="font-medium text-ink">{laoQrPreviewInfo}</div>
+                        <div className="text-ink-muted">
+                          {pick('สแกนทดสอบได้จากแอปธนาคารในเครือ LAPNet / BCEL One', 'ສະແກນທົດສອບໄດ້ຈາກແອັບທະນາຄານ LAPNet / BCEL One', 'Scannable with LAPNet / BCEL One apps')}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Phase 5: Multi-Currency Cash Tender FX Rates (THB / USD -> LAK) */}
+                <div className="sm:col-span-2 rounded-[4px] border border-hairline bg-surface-1 p-3.5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-ink">{t('fx.sectionTitle')}</span>
+                    <label className="inline-flex items-center gap-2 text-xs text-ink cursor-pointer">
+                      <input
+                        type="checkbox"
+                        disabled={!isOwner}
+                        checked={fxEnabled}
+                        onChange={(e) => setFxEnabled(e.target.checked)}
+                        className="accent-primary"
+                      />
+                      <span>{t('fx.enableToggle')}</span>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor={`${uid}-fx-thb`} className="block text-ink-muted mb-1">
+                        {t('fx.thbRateLabel')}
+                      </label>
+                      <input
+                        id={`${uid}-fx-thb`}
+                        type="text"
+                        inputMode="numeric"
+                        disabled={!isOwner || !fxEnabled}
+                        value={fxThbRateInput}
+                        onChange={(e) => setFxThbRateInput(e.target.value.replace(/\D/g, '').slice(0, 7))}
+                        placeholder="640"
+                        className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor={`${uid}-fx-usd`} className="block text-ink-muted mb-1">
+                        {t('fx.usdRateLabel')}
+                      </label>
+                      <input
+                        id={`${uid}-fx-usd`}
+                        type="text"
+                        inputMode="numeric"
+                        disabled={!isOwner || !fxEnabled}
+                        value={fxUsdRateInput}
+                        onChange={(e) => setFxUsdRateInput(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                        placeholder="21500"
+                        className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink tabular-nums-google disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
+                      />
+                    </div>
+                  </div>
+                  {fxEnabled && (
+                    <div className="text-[11px] text-ink-muted tabular-nums-google">
+                      {pick('ตัวอย่าง:', 'ຕົວຢ່າງ:', 'Preview:')} ฿100 ={' '}
+                      {(Math.max(1, Number(fxThbRateInput || 640)) * 100).toLocaleString('en-US')} ₭ · $20 ={' '}
+                      {(Math.max(1, Number(fxUsdRateInput || 21500)) * 20).toLocaleString('en-US')} ₭ (HMAC-SHA256)
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
           </div>
 
           <button
@@ -798,7 +1206,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             onClick={() => void handleSaveStoreSettings()}
             className={`h-[46px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
           >
-            บันทึกข้อมูลกิจการ &amp; ลงลายมือชื่อ HMAC-SHA256
+            {t('set.saveFiscal')}
           </button>
         </section>
 
@@ -919,6 +1327,15 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           </div>
         </section>
       </div>
+
+      {/* 3B. Local LAN QR Table Ordering & Captive Portal */}
+      <QrOrderingSettingsCard
+        outletId={outletId}
+        bootstrap={bootstrap}
+        canManage={isOwner || currentUser.role === 'MANAGER'}
+        onRefreshState={onRefreshState}
+        onToast={onToast}
+      />
 
       {/* 4. LAN Cluster & Security Audit Logs */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">

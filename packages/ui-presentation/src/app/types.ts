@@ -10,6 +10,27 @@ import type {
   UserRole,
 } from '@rube-pos/shared-contracts';
 import type { TaxMode } from '../../../shared-contracts/src/fixed-point.ts';
+import type {
+  CashRoundingStepMajor,
+  CashTenderCurrencyCode,
+  CountryCode,
+  CurrencyCode,
+  FiscalConfigDto,
+  ForeignTenderCurrencyCode,
+  FxCashTenderDetailDto,
+  FxRatesConfigDto,
+  LaoQrVerificationPolicy,
+  LocaleCode,
+} from '../../../shared-contracts/src/currency.ts';
+import type {
+  GuestOrderRecordDto,
+  QrGuestOrderStatus,
+  QrOrderApprovalMode,
+  QrOrderingConfigDto,
+  QrOrderingRuntimeStatusDto,
+  QrWifiSecurityType,
+  TableQrSessionDto,
+} from '../../../shared-contracts/src/qr-ordering.ts';
 
 export type PrinterTransportMode =
   | 'SIMULATED_MEMORY'
@@ -142,6 +163,7 @@ export interface SalesOrderHistoryDto {
   }> | undefined;
   cashTenderedSatang: number | null;
   changeGivenSatang: number | null;
+  fxTender?: FxCashTenderDetailDto | null | undefined;
   senderBankCode: string | null;
   slipTransRefLast4: string | null;
   voidReason: string | null;
@@ -187,11 +209,13 @@ export interface StoreIdentitySettingsDto {
   outletId: string;
   outletCode: string;
   storeName: string;
+  storeAddress?: string | undefined;
   taxId: string;
   branchCode: string;
   rdPosRegNo: string;
   promptPayId: string;
   businessProfile: BusinessProfile;
+  fiscalConfig?: FiscalConfigDto | undefined;
 }
 
 export interface UsbBackupFileDto {
@@ -232,6 +256,7 @@ export interface BootstrapPayload {
   isSessionAuthenticated?: boolean | undefined;
   isPreviewWizard?: boolean | undefined;
   profile: BusinessProfile;
+  fiscalConfig?: FiscalConfigDto | undefined;
   featureFlags: ProfileFeatureFlagsDto;
   activeShift: PosShiftDto | null;
   catalog: ItemVariantDto[];
@@ -250,6 +275,10 @@ export interface BootstrapPayload {
   staffUsers: StaffUserDto[];
   storeSettings: StoreIdentitySettingsDto;
   printerConfig: PrinterHardwareConfigDto;
+  qrOrderingConfig?: QrOrderingConfigDto | undefined;
+  qrOrderingStatus?: QrOrderingRuntimeStatusDto | undefined;
+  qrGuestOrders?: GuestOrderRecordDto[] | undefined;
+  qrTableSessions?: TableQrSessionDto[] | undefined;
   usbBackupConfig?: UsbBackupConfigStatusDto | undefined;
   usbBackups: UsbBackupFileDto[];
   ledgerInvariant: {
@@ -291,6 +320,8 @@ export interface CartItem {
   selectedModifierIds: string[];
   isWeightedScale: boolean;
   scaleBadgeText?: string | undefined;
+  kdsDispatched?: boolean | undefined;
+  guestNote?: string | undefined;
 }
 
 export interface HeldBillRecordDto {
@@ -325,12 +356,29 @@ export interface PrintedReceiptPreview {
 export type {
   BomEdgeDto,
   BusinessProfile,
+  CashRoundingStepMajor,
+  CashTenderCurrencyCode,
   CheckoutOrderRequest,
   ComponentRole,
+  CountryCode,
+  CurrencyCode,
+  FiscalConfigDto,
+  ForeignTenderCurrencyCode,
+  FxCashTenderDetailDto,
+  FxRatesConfigDto,
+  GuestOrderRecordDto,
   ItemVariantDto,
+  LaoQrVerificationPolicy,
+  LocaleCode,
   ModifierDto,
   PosShiftDto,
+  QrGuestOrderStatus,
+  QrOrderApprovalMode,
+  QrOrderingConfigDto,
+  QrOrderingRuntimeStatusDto,
+  QrWifiSecurityType,
   SplitPaymentLegInput,
+  TableQrSessionDto,
   TaxMode,
   UserRole,
 };

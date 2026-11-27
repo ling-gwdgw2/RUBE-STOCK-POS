@@ -42,7 +42,6 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   allocateLandedCostExact,
   computeNewMovingAverageCost,
-  computeVatSatang,
   type BasisPoints,
   type MicroBaht,
   type MilliUnit,
@@ -52,6 +51,44 @@ import {
   SCALE_BASIS_POINTS,
   SCALE_MILLI,
 } from '../../../shared-contracts/src/fixed-point.ts';
+import {
+  type CashRoundingStepMajor,
+  type CountryCode,
+  type CurrencyCode,
+  type FiscalConfigDto,
+  type FxCashTenderDetailDto,
+  type FxRatesConfigDto,
+  type LaoQrVerificationPolicy,
+  type LocaleCode,
+  type ShiftFxCashSummaryDto,
+  computeOrderFinancialTotals,
+  foreignMinorToBaseLakMinor,
+  getCurrencyDecimals,
+  getCurrencySymbol,
+  getDefaultFiscalConfigForCountry,
+  getFxRateForCurrency,
+  normalizeCashRoundingStepMajor,
+  normalizeCountryCode,
+  normalizeCurrencyCode,
+  normalizeForeignTenderCurrency,
+  normalizeFxRatesConfig,
+  normalizeLaoQrVerificationPolicy,
+  normalizeLocaleCode,
+  normalizeScalePriceEmbeddedMultiplier,
+} from '../../../shared-contracts/src/currency.ts';
+import {
+  type GuestOrderLineInputDto,
+  type GuestOrderLineSnapshotDto,
+  type GuestOrderRecordDto,
+  type QrGuestOrderStatus,
+  type QrOrderingConfigDto,
+  type TableQrSessionDto,
+  buildTableMenuUrl,
+  buildWifiQrPayload,
+  computeGuestOrderLineSatang,
+  normalizeQrOrderingConfig,
+  sanitizeGuestText,
+} from '../../../shared-contracts/src/qr-ordering.ts';
 import {
   calculateOrderLineDeductions,
   validateBomDagAcyclic,
@@ -192,6 +229,7 @@ export interface CheckoutOrderResult {
   taxMode: TaxMode;
   subtotalSatang: Satang;
   discountSatang: Satang;
+  cashRoundingDiscountSatang?: Satang | undefined;
   netBeforeTaxSatang: Satang;
   taxSatang: Satang;
   totalSatang: Satang;
@@ -208,6 +246,7 @@ export interface CheckoutOrderResult {
   }>;
   cashTenderedSatang: Satang | null;
   changeGivenSatang: Satang | null;
+  fxTender?: FxCashTenderDetailDto | null | undefined;
   senderBankCode: string | null;
   slipTransRefLast4: string | null;
   slipTransRefHash: string | null;
@@ -369,6 +408,7 @@ export interface ShiftZReportDto {
   expectedCashSatang: Satang;
   countedCashSatang: Satang | null;
   cashVarianceSatang: Satang | null;
+  fxCashSummary?: ShiftFxCashSummaryDto | undefined;
 }
 
 export interface AbbSalesTaxReportDto {
@@ -2102,18 +2142,54 @@ export class SqliteReadWritePoolEngine {
         });
       }
 
-      const discountSatang = Math.max(0, request.discountSatang);
-      const afterDiscountSatang = Math.max(0, subtotalSatang - discountSatang);
-      const taxSatang = computeVatSatang(afterDiscountSatang, 700, request.taxMode);
-      const netBeforeTaxSatang =
-        request.taxMode === 'INCLUSIVE' ? afterDiscountSatang - taxSatang : afterDiscountSatang;
-      const totalSatang =
-        request.taxMode === 'EXCLUSIVE'
-          ? afterDiscountSatang + taxSatang
-          : afterDiscountSatang;
+      const fiscal = this.getFiscalConfigOnDb(db);
+      const isPureCashOrder =
+        (!request.splitPayments || request.splitPayments.length === 0) &&
+        request.paymentMethod === 'CASH';
+      const financials = computeOrderFinancialTotals({
+        subtotalSatang,
+        discountSatang: Math.max(0, request.discountSatang),
+        vatRateBps: fiscal.vatRateBps,
+        taxMode: request.taxMode,
+        currencyCode: fiscal.currencyCode,
+        applyCashRounding: isPureCashOrder,
+        cashRoundingStepMajor: fiscal.cashRoundingStepMajor,
+      });
+      const discountSatang = financials.effectiveDiscountSatang;
+      const cashRoundingDiscountSatang = financials.cashRoundingDiscountSatang;
+      const taxSatang = financials.taxSatang;
+      const netBeforeTaxSatang = financials.netBeforeTaxSatang;
+      const totalSatang = financials.totalSatang;
 
-      // 5. Validate Payment Method (Single Tender or Multi-Leg Split Tender + BOT Slip Anti-Fraud)
-      const parseAndVerifyBotSlip = (rawSlip: string) => {
+      // 5. Validate Payment Method (Single Tender or Multi-Leg Split Tender + Country-Aware Slip Anti-Fraud)
+      const parseAndVerifySlip = (rawSlip: string, explicitBankCode?: string) => {
+        if (fiscal.countryCode === 'LA') {
+          const bankCode =
+            (explicitBankCode || 'BCEL')
+              .trim()
+              .toUpperCase()
+              .replace(/[^A-Z0-9_]/g, '') || 'BCEL';
+          const cleanedRef = rawSlip.trim().replace(/\s+/g, '').toUpperCase();
+          if (cleanedRef.length < 4 || cleanedRef.length > 160) {
+            throw new Error('HTTP 422 Invalid Lao bank transfer slip reference');
+          }
+          const last4 = cleanedRef.slice(-4);
+          const hash = createHash('sha256')
+            .update(`LA:${bankCode}:${cleanedRef}`)
+            .digest('hex');
+
+          const dupRow = db
+            .prepare(`SELECT id FROM payment_transactions WHERE slip_trans_ref_hash = ? LIMIT 1`)
+            .get(hash) as { id?: string } | undefined;
+
+          if (dupRow?.id) {
+            throw new Error(
+              `HTTP 409 Duplicate Slip TransRef detected (hash=${hash.slice(0, 12)}...)`
+            );
+          }
+          return { bankCode, last4, hash };
+        }
+
         const botMatch = /^00(\d{2})00060000010103(\d{3})02(\d{2})([A-Za-z0-9_-]+)$/.exec(
           rawSlip.trim()
         );
@@ -2165,6 +2241,7 @@ export class SqliteReadWritePoolEngine {
       let slipTransRefLast4: string | null = null;
       let slipTransRefHash: string | null = null;
       let netCashAddedToDrawerSatang = 0;
+      let fxTender: FxCashTenderDetailDto | null = null;
 
       if (request.splitPayments && request.splitPayments.length > 0) {
         const sumLegs = request.splitPayments.reduce((s, l) => s + Number(l.amountSatang), 0);
@@ -2197,7 +2274,7 @@ export class SqliteReadWritePoolEngine {
             changeGivenSatang = (changeGivenSatang ?? 0) + legChange;
             netCashAddedToDrawerSatang += leg.amountSatang;
           } else if (leg.paymentMethod === 'PROMPTPAY_QR' && leg.slipTransRefRaw) {
-            const slip = parseAndVerifyBotSlip(leg.slipTransRefRaw);
+            const slip = parseAndVerifySlip(leg.slipTransRefRaw, leg.slipSenderBankCode);
             if (seenInOrderHashes.has(slip.hash)) {
               throw new Error('HTTP 409 Duplicate Slip TransRef within split payment legs');
             }
@@ -2208,6 +2285,13 @@ export class SqliteReadWritePoolEngine {
             senderBankCode = legBank;
             slipTransRefLast4 = legLast4;
             slipTransRefHash = legHash;
+          } else if (
+            leg.paymentMethod === 'PROMPTPAY_QR' &&
+            fiscal.countryCode === 'LA' &&
+            leg.slipSenderBankCode
+          ) {
+            legBank = leg.slipSenderBankCode.trim().toUpperCase().slice(0, 16) || null;
+            senderBankCode = legBank;
           }
 
           validatedPaymentRows.push({
@@ -2222,20 +2306,66 @@ export class SqliteReadWritePoolEngine {
         }
       } else {
         if (request.paymentMethod === 'CASH') {
-          const tendered = request.cashTenderedSatang ?? totalSatang;
-          if (tendered < totalSatang) {
-            throw new Error(
-              `Insufficient cash tendered: tendered=${tendered}, total=${totalSatang}`
+          const requestedForeignCurr = normalizeForeignTenderCurrency(
+            request.foreignTenderCurrency
+          );
+          if (requestedForeignCurr) {
+            if (fiscal.countryCode !== 'LA' || !fiscal.fxRates.enabled) {
+              throw new Error(
+                'HTTP 400 Multi-Currency FX cash tender is disabled for this store'
+              );
+            }
+            const foreignAmt = Number(request.foreignTenderAmountSatang ?? 0);
+            if (!Number.isSafeInteger(foreignAmt) || foreignAmt <= 0) {
+              throw new Error(
+                `HTTP 400 Invalid foreignTenderAmountSatang for ${requestedForeignCurr}: ${foreignAmt}`
+              );
+            }
+            const exchangeRateWholeLak = getFxRateForCurrency(
+              fiscal.fxRates,
+              requestedForeignCurr
             );
+            const equivalentBaseSatang = foreignMinorToBaseLakMinor(
+              foreignAmt,
+              exchangeRateWholeLak
+            );
+            if (equivalentBaseSatang < totalSatang) {
+              throw new Error(
+                `HTTP 400 Insufficient foreign cash tendered (${requestedForeignCurr}): converted=${equivalentBaseSatang}, required=${totalSatang}`
+              );
+            }
+            cashTenderedSatang = equivalentBaseSatang;
+            changeGivenSatang = equivalentBaseSatang - totalSatang;
+            netCashAddedToDrawerSatang = totalSatang;
+            fxTender = {
+              currency: requestedForeignCurr,
+              foreignAmountSatang: foreignAmt,
+              exchangeRateWholeLak,
+              equivalentBaseSatang,
+              changeGivenBaseSatang: changeGivenSatang,
+            };
+          } else {
+            const tendered = request.cashTenderedSatang ?? totalSatang;
+            if (tendered < totalSatang) {
+              throw new Error(
+                `Insufficient cash tendered: tendered=${tendered}, total=${totalSatang}`
+              );
+            }
+            cashTenderedSatang = tendered;
+            changeGivenSatang = tendered - totalSatang;
+            netCashAddedToDrawerSatang = totalSatang;
           }
-          cashTenderedSatang = tendered;
-          changeGivenSatang = tendered - totalSatang;
-          netCashAddedToDrawerSatang = totalSatang;
         } else if (request.paymentMethod === 'PROMPTPAY_QR' && request.slipTransRefRaw) {
-          const slip = parseAndVerifyBotSlip(request.slipTransRefRaw);
+          const slip = parseAndVerifySlip(request.slipTransRefRaw, request.slipSenderBankCode);
           senderBankCode = slip.bankCode;
           slipTransRefLast4 = slip.last4;
           slipTransRefHash = slip.hash;
+        } else if (
+          request.paymentMethod === 'PROMPTPAY_QR' &&
+          fiscal.countryCode === 'LA' &&
+          request.slipSenderBankCode
+        ) {
+          senderBankCode = request.slipSenderBankCode.trim().toUpperCase().slice(0, 16) || null;
         }
 
         validatedPaymentRows.push({
@@ -2249,9 +2379,9 @@ export class SqliteReadWritePoolEngine {
         });
       }
 
-      // 6. Generate sequential Receipt Number & Thai ABB Tax Invoice Number (branch-prefixed for non-HQ outlets + collision guard)
+      // 6. Generate sequential Receipt Number & Country Tax Invoice Number (`ABB-` for TH, `INV-LA-` for LA)
       const orderCountRow = db
-        .prepare(`SELECT COUNT(*) AS cnt FROM sales_orders WHERE outlet_id = ?`)
+        .prepare(`SELECT COUNT(*) AS cnt FROM sales_orders WHERE outlet_id = ? AND status != 'OPEN'`)
         .get(request.outletId) as { cnt: number };
       let branchPrefix = '';
       if (request.outletId !== 'OUTLET-HQ') {
@@ -2265,6 +2395,7 @@ export class SqliteReadWritePoolEngine {
       }
 
       const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const invoiceSeriesPrefix = fiscal.countryCode === 'LA' ? 'INV-LA' : 'ABB';
       const checkDupReceipt = db.prepare(
         `SELECT 1 FROM sales_orders WHERE receipt_number = ? OR abb_tax_invoice_no = ? LIMIT 1`
       );
@@ -2277,8 +2408,8 @@ export class SqliteReadWritePoolEngine {
           ? `RCP-${branchPrefix}-${dateStr}-${seqPadded}`
           : `RCP-${dateStr}-${seqPadded}`;
         abbTaxInvoiceNo = branchPrefix
-          ? `ABB-${branchPrefix}-${dateStr}-${seqPadded}`
-          : `ABB-${dateStr}-${seqPadded}`;
+          ? `${invoiceSeriesPrefix}-${branchPrefix}-${dateStr}-${seqPadded}`
+          : `${invoiceSeriesPrefix}-${dateStr}-${seqPadded}`;
         if (!checkDupReceipt.get(receiptNumber, abbTaxInvoiceNo)) {
           break;
         }
@@ -2382,6 +2513,20 @@ export class SqliteReadWritePoolEngine {
         ).run(netCashAddedToDrawerSatang, request.shiftId);
       }
 
+      if (fxTender) {
+        db.prepare(
+          `INSERT INTO security_audit_logs (
+             event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+           ) VALUES ('FX_CASH_TENDER', ?, ?, ?, ?, ?)`
+        ).run(
+          request.cashierId,
+          request.terminalId,
+          salesOrderId,
+          request.shiftId,
+          JSON.stringify(fxTender)
+        );
+      }
+
       // 8. Deduct Stock in inventory_levels and record immutable inventory_transactions
       const getLevel = db.prepare(
         `SELECT in_stock_milli, average_cost_micro_baht
@@ -2440,7 +2585,7 @@ export class SqliteReadWritePoolEngine {
         return v && v.kitchenStation !== 'NONE';
       });
 
-      if (kitchenLines.length > 0) {
+      if (kitchenLines.length > 0 && !request.skipKdsEnqueue) {
         const queueNumber = cleanTableOrQueue || `Q-${String(nextSeq).padStart(3, '0')}`;
         const linesByStation = new Map<string, typeof kitchenLines>();
         for (const kl of kitchenLines) {
@@ -2507,6 +2652,7 @@ export class SqliteReadWritePoolEngine {
         taxMode: request.taxMode,
         subtotalSatang,
         discountSatang,
+        cashRoundingDiscountSatang,
         netBeforeTaxSatang,
         taxSatang,
         totalSatang,
@@ -2526,6 +2672,7 @@ export class SqliteReadWritePoolEngine {
         })),
         cashTenderedSatang,
         changeGivenSatang,
+        fxTender,
         senderBankCode,
         slipTransRefLast4,
         slipTransRefHash,
@@ -3823,6 +3970,52 @@ export class SqliteReadWritePoolEngine {
 
       const netSalesTotalSatang = Number(orderSummary.netSalesTotalSatang ?? 0);
       const vatTotalSatang = Number(orderSummary.vatTotalSatang ?? 0);
+      const expectedCashSatang = Number(shiftRow.expected_cash_satang);
+
+      // Phase 5: Multi-Currency FX Drawer Summary (joins sales_orders so VOIDED bills are excluded atomically)
+      const fxRows = db
+        .prepare(
+          `SELECT sal.new_value_redacted AS fxJson
+           FROM security_audit_logs sal
+           JOIN sales_orders so ON so.id = sal.target_key
+           WHERE sal.event_type = 'FX_CASH_TENDER'
+             AND sal.old_value_redacted = ?
+             AND so.status = 'COMPLETED'`
+        )
+        .all(shiftId) as Array<{ fxJson?: string }>;
+
+      let fxTransactionsCount = 0;
+      let thbCollectedSatang = 0;
+      let thbEquivalentBaseSatang = 0;
+      let usdCollectedSatang = 0;
+      let usdEquivalentBaseSatang = 0;
+      for (const row of fxRows) {
+        if (!row.fxJson) continue;
+        try {
+          const parsed = JSON.parse(row.fxJson) as Partial<FxCashTenderDetailDto>;
+          if (parsed.currency === 'THB') {
+            fxTransactionsCount += 1;
+            thbCollectedSatang += Number(parsed.foreignAmountSatang ?? 0);
+            thbEquivalentBaseSatang += Number(parsed.equivalentBaseSatang ?? 0);
+          } else if (parsed.currency === 'USD') {
+            fxTransactionsCount += 1;
+            usdCollectedSatang += Number(parsed.foreignAmountSatang ?? 0);
+            usdEquivalentBaseSatang += Number(parsed.equivalentBaseSatang ?? 0);
+          }
+        } catch {
+          // ignore malformed historical row
+        }
+      }
+      const totalForeignEquivalentBaseSatang = thbEquivalentBaseSatang + usdEquivalentBaseSatang;
+      const fxCashSummary: ShiftFxCashSummaryDto = {
+        fxTransactionsCount,
+        thbCollectedSatang,
+        thbEquivalentBaseSatang,
+        usdCollectedSatang,
+        usdEquivalentBaseSatang,
+        totalForeignEquivalentBaseSatang,
+        expectedNativeBaseCashInDrawerSatang: expectedCashSatang - totalForeignEquivalentBaseSatang,
+      };
 
       return {
         shiftId: String(shiftRow.id),
@@ -3848,11 +4041,12 @@ export class SqliteReadWritePoolEngine {
         netBeforeTaxSatang: netSalesTotalSatang - vatTotalSatang,
         vatTotalSatang,
         netSalesTotalSatang,
-        expectedCashSatang: Number(shiftRow.expected_cash_satang),
+        expectedCashSatang,
         countedCashSatang:
           shiftRow.counted_cash_satang === null ? null : Number(shiftRow.counted_cash_satang),
         cashVarianceSatang:
           shiftRow.cash_variance_satang === null ? null : Number(shiftRow.cash_variance_satang),
+        fxCashSummary,
       };
     });
   }
@@ -3889,6 +4083,7 @@ export class SqliteReadWritePoolEngine {
              created_at AS createdAt
            FROM sales_orders
            WHERE outlet_id = ?
+             AND status != 'OPEN'
              AND (? IS NULL OR substr(created_at, 1, 10) >= ?)
              AND (? IS NULL OR substr(created_at, 1, 10) <= ?)
            ORDER BY created_at ASC, id ASC`
@@ -4374,6 +4569,289 @@ export class SqliteReadWritePoolEngine {
     return found;
   }
 
+  private readRawStoreConfigOnDb(db: DatabaseSync, key: string): string | null {
+    const row = db
+      .prepare(`SELECT value, is_protected, hmac_signature_hex FROM store_config WHERE key = ?`)
+      .get(key) as
+      | { value: string; is_protected: number; hmac_signature_hex: string | null }
+      | undefined;
+    if (!row) return null;
+    if (Number(row.is_protected) === 1) {
+      const expected = this.computeProtectedConfigHmacHex(key, row.value);
+      if (!row.hmac_signature_hex) return null;
+      const a = Buffer.from(row.hmac_signature_hex, 'utf8');
+      const b = Buffer.from(expected, 'utf8');
+      if (a.length !== b.length || !timingSafeEqual(a, b)) {
+        return null;
+      }
+    }
+    return row.value;
+  }
+
+  private getFiscalConfigOnDb(db: DatabaseSync): FiscalConfigDto {
+    const countryCode = normalizeCountryCode(this.readRawStoreConfigOnDb(db, 'country_code'));
+    const defaults = getDefaultFiscalConfigForCountry(countryCode);
+    const currencyCode = normalizeCurrencyCode(
+      this.readRawStoreConfigOnDb(db, 'currency_code'),
+      countryCode
+    );
+    const uiLocale = normalizeLocaleCode(
+      this.readRawStoreConfigOnDb(db, 'ui_locale'),
+      defaults.uiLocale
+    );
+    const receiptLocale = normalizeLocaleCode(
+      this.readRawStoreConfigOnDb(db, 'receipt_locale'),
+      defaults.receiptLocale
+    );
+    const rawVat = this.readRawStoreConfigOnDb(db, 'vat_rate_bps');
+    const parsedVat = rawVat !== null && rawVat !== '' ? Number(rawVat) : defaults.vatRateBps;
+    const vatRateBps =
+      Number.isSafeInteger(parsedVat) && parsedVat >= 0 && parsedVat <= 5000
+        ? parsedVat
+        : defaults.vatRateBps;
+    const rawTaxMode = this.readRawStoreConfigOnDb(db, 'default_tax_mode');
+    const defaultTaxMode: TaxMode =
+      rawTaxMode === 'NONE' || rawTaxMode === 'INCLUSIVE' || rawTaxMode === 'EXCLUSIVE'
+        ? rawTaxMode
+        : defaults.defaultTaxMode;
+    const cashRoundingStepMajor = normalizeCashRoundingStepMajor(
+      this.readRawStoreConfigOnDb(db, 'cash_rounding_step_major')
+    );
+    const scalePriceEmbeddedMultiplier = normalizeScalePriceEmbeddedMultiplier(
+      this.readRawStoreConfigOnDb(db, 'scale_price_embedded_multiplier'),
+      countryCode
+    );
+    const storeAddress = this.readRawStoreConfigOnDb(db, 'store_address') ?? '';
+    const laoQrStaticTemplate = this.readRawStoreConfigOnDb(db, 'lao_qr_static_template') ?? '';
+    const laoQrVerificationPolicy = normalizeLaoQrVerificationPolicy(
+      this.readRawStoreConfigOnDb(db, 'lao_qr_verification_policy')
+    );
+    let parsedFxRaw: unknown = null;
+    const rawFxJson = this.readRawStoreConfigOnDb(db, 'fx_rates_json');
+    if (rawFxJson) {
+      try {
+        parsedFxRaw = JSON.parse(rawFxJson);
+      } catch {
+        parsedFxRaw = null;
+      }
+    }
+    const fxRates = normalizeFxRatesConfig(parsedFxRaw, countryCode);
+
+    return {
+      countryCode,
+      currencyCode,
+      currencySymbol: getCurrencySymbol(currencyCode),
+      currencyDecimals: getCurrencyDecimals(currencyCode),
+      uiLocale,
+      receiptLocale,
+      vatRateBps,
+      defaultTaxMode,
+      cashRoundingStepMajor: currencyCode === 'LAK' ? cashRoundingStepMajor : 0,
+      scalePriceEmbeddedMultiplier,
+      storeAddress,
+      laoQrStaticTemplate,
+      laoQrVerificationPolicy,
+      fxRates,
+    };
+  }
+
+  public getFiscalConfig(): FiscalConfigDto {
+    return this.executeRead((db) => this.getFiscalConfigOnDb(db));
+  }
+
+  private assertValidLaoQrStaticTemplateIfNonEmpty(rawTemplate: string): string {
+    const trimmed = rawTemplate.trim();
+    if (!trimmed) return '';
+    if (!trimmed.startsWith('000201') || trimmed.length < 24) {
+      throw new Error('HTTP 422 Invalid LAOQR static template: missing EMVCo header 000201');
+    }
+    const crcHeaderIdx = trimmed.length - 8;
+    if (trimmed.slice(crcHeaderIdx, crcHeaderIdx + 4) !== '6304') {
+      throw new Error('HTTP 422 Invalid LAOQR static template: missing CRC16 tag 6304');
+    }
+    const bodyForCrc = trimmed.slice(0, trimmed.length - 4);
+    let crc = 0xffff;
+    for (let i = 0; i < bodyForCrc.length; i++) {
+      crc ^= bodyForCrc.charCodeAt(i) << 8;
+      for (let bit = 0; bit < 8; bit++) {
+        crc = (crc & 0x8000) !== 0 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+      }
+    }
+    const expectedHex = crc.toString(16).toUpperCase().padStart(4, '0');
+    const actualHex = trimmed.slice(trimmed.length - 4).toUpperCase();
+    if (expectedHex !== actualHex) {
+      throw new Error(
+        `HTTP 422 Invalid LAOQR static template CRC16 (expected ${expectedHex}, got ${actualHex})`
+      );
+    }
+    if (!trimmed.includes('5802LA')) {
+      throw new Error('HTTP 422 Invalid LAOQR static template: country tag 58 must be LA');
+    }
+    return trimmed;
+  }
+
+  public async updateUiLocale(input: {
+    uiLocale: LocaleCode;
+    receiptLocale?: LocaleCode | undefined;
+    updatedByUserId?: string | undefined;
+  }): Promise<FiscalConfigDto> {
+    const actor = input.updatedByUserId ?? 'USR-OWNER-01';
+    const cleanUi = normalizeLocaleCode(input.uiLocale, 'th');
+    const cleanReceipt = input.receiptLocale
+      ? normalizeLocaleCode(input.receiptLocale, cleanUi)
+      : undefined;
+
+    await this.executeWriteImmediate((db) => {
+      db.prepare(
+        `INSERT INTO store_config (key, value, is_protected, updated_by, updated_at)
+         VALUES ('ui_locale', ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET
+           value = excluded.value,
+           updated_by = excluded.updated_by,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      ).run(cleanUi, actor);
+      if (cleanReceipt) {
+        db.prepare(
+          `INSERT INTO store_config (key, value, is_protected, updated_by, updated_at)
+           VALUES ('receipt_locale', ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+           ON CONFLICT(key) DO UPDATE SET
+             value = excluded.value,
+             updated_by = excluded.updated_by,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+        ).run(cleanReceipt, actor);
+      }
+    });
+    return this.getFiscalConfig();
+  }
+
+  public async updateFiscalConfig(input: {
+    countryCode?: CountryCode | undefined;
+    currencyCode?: CurrencyCode | undefined;
+    uiLocale?: LocaleCode | undefined;
+    receiptLocale?: LocaleCode | undefined;
+    vatRateBps?: BasisPoints | undefined;
+    defaultTaxMode?: TaxMode | undefined;
+    cashRoundingStepMajor?: CashRoundingStepMajor | undefined;
+    scalePriceEmbeddedMultiplier?: number | undefined;
+    storeAddress?: string | undefined;
+    laoQrStaticTemplate?: string | undefined;
+    laoQrVerificationPolicy?: LaoQrVerificationPolicy | undefined;
+    fxRates?: Partial<FxRatesConfigDto> | undefined;
+    updatedByUserId?: string | undefined;
+  }): Promise<FiscalConfigDto> {
+    const actor = input.updatedByUserId ?? 'USR-OWNER-01';
+    const current = this.getFiscalConfig();
+    const countryCode = input.countryCode
+      ? normalizeCountryCode(input.countryCode)
+      : current.countryCode;
+    const countryChanged = countryCode !== current.countryCode;
+    const defaultsForCountry = getDefaultFiscalConfigForCountry(countryCode);
+    const currencyCode = input.currencyCode
+      ? normalizeCurrencyCode(input.currencyCode, countryCode)
+      : countryChanged
+        ? defaultsForCountry.currencyCode
+        : current.currencyCode;
+    const uiLocale = input.uiLocale
+      ? normalizeLocaleCode(input.uiLocale, defaultsForCountry.uiLocale)
+      : countryChanged
+        ? defaultsForCountry.uiLocale
+        : current.uiLocale;
+    const receiptLocale = input.receiptLocale
+      ? normalizeLocaleCode(input.receiptLocale, defaultsForCountry.receiptLocale)
+      : countryChanged
+        ? defaultsForCountry.receiptLocale
+        : current.receiptLocale;
+    const vatRateBps =
+      input.vatRateBps !== undefined
+        ? Math.max(0, Math.min(5000, Math.round(Number(input.vatRateBps))))
+        : countryChanged
+          ? defaultsForCountry.vatRateBps
+          : current.vatRateBps;
+    const defaultTaxMode: TaxMode =
+      input.defaultTaxMode === 'NONE' ||
+      input.defaultTaxMode === 'INCLUSIVE' ||
+      input.defaultTaxMode === 'EXCLUSIVE'
+        ? input.defaultTaxMode
+        : current.defaultTaxMode;
+    const cashRoundingStepMajor =
+      currencyCode === 'LAK'
+        ? input.cashRoundingStepMajor !== undefined
+          ? normalizeCashRoundingStepMajor(input.cashRoundingStepMajor)
+          : current.cashRoundingStepMajor
+        : 0;
+    const scalePriceEmbeddedMultiplier =
+      input.scalePriceEmbeddedMultiplier !== undefined
+        ? normalizeScalePriceEmbeddedMultiplier(input.scalePriceEmbeddedMultiplier, countryCode)
+        : countryChanged
+          ? defaultsForCountry.scalePriceEmbeddedMultiplier
+          : current.scalePriceEmbeddedMultiplier;
+    const storeAddress =
+      input.storeAddress !== undefined ? input.storeAddress.trim() : current.storeAddress;
+    const laoQrStaticTemplate =
+      input.laoQrStaticTemplate !== undefined
+        ? this.assertValidLaoQrStaticTemplateIfNonEmpty(input.laoQrStaticTemplate)
+        : current.laoQrStaticTemplate;
+    const laoQrVerificationPolicy =
+      input.laoQrVerificationPolicy !== undefined
+        ? normalizeLaoQrVerificationPolicy(input.laoQrVerificationPolicy)
+        : current.laoQrVerificationPolicy;
+    const fxRates = normalizeFxRatesConfig(
+      input.fxRates ? { ...current.fxRates, ...input.fxRates } : current.fxRates,
+      countryCode
+    );
+
+    const protectedPairs: Array<[string, string]> = [
+      ['country_code', countryCode],
+      ['currency_code', currencyCode],
+      ['vat_rate_bps', String(vatRateBps)],
+      ['default_tax_mode', defaultTaxMode],
+      ['cash_rounding_step_major', String(cashRoundingStepMajor)],
+      ['scale_price_embedded_multiplier', String(scalePriceEmbeddedMultiplier)],
+      ['lao_qr_static_template', laoQrStaticTemplate],
+      ['lao_qr_verification_policy', laoQrVerificationPolicy],
+      ['fx_rates_json', JSON.stringify(fxRates)],
+    ];
+    const signedPairs = protectedPairs.map(([key, value]) => ({
+      key,
+      value,
+      hmac: this.computeProtectedConfigHmacHex(key, value),
+    }));
+
+    await this.executeWriteImmediate((db) => {
+      for (const pair of signedPairs) {
+        this.upsertProtectedStoreConfigOnDb(db, {
+          key: pair.key,
+          value: pair.value,
+          hmacSignatureHex: pair.hmac,
+          updatedByUserId: actor,
+        });
+      }
+      const upsertPlain = db.prepare(
+        `INSERT INTO store_config (key, value, is_protected, updated_by, updated_at)
+         VALUES (?, ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET
+           value = excluded.value,
+           updated_by = excluded.updated_by,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      );
+      upsertPlain.run('ui_locale', uiLocale, actor);
+      upsertPlain.run('receipt_locale', receiptLocale, actor);
+      upsertPlain.run('store_address', storeAddress, actor);
+
+      db.prepare(
+        `INSERT INTO security_audit_logs (
+           event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+         ) VALUES ('FISCAL_CONFIG_UPDATED', ?, 'POS-TERM-01', 'country_fiscal_config', ?, ?)`
+      ).run(
+        actor,
+        `${current.countryCode}/${current.currencyCode}/VAT:${current.vatRateBps}/ROUND:${current.cashRoundingStepMajor}`,
+        `${countryCode}/${currencyCode}/VAT:${vatRateBps}/ROUND:${cashRoundingStepMajor}`
+      );
+    });
+
+    return this.getFiscalConfig();
+  }
+
   public getStoreIdentitySettings(outletId = 'OUTLET-HQ'): StoreIdentitySettingsDto {
     const outletRow = this.executeRead((db) => {
       return db
@@ -4384,12 +4862,13 @@ export class SqliteReadWritePoolEngine {
         .get(outletId) as Record<string, unknown> | undefined;
     });
 
-    let promptPayId = '0105566001234';
+    const fiscal = this.getFiscalConfig();
+    let promptPayId = fiscal.countryCode === 'LA' ? '' : '0105566001234';
     try {
       const configuredPromptPay = this.getVerifiedProtectedStoreConfig('promptpay_merchant_id');
       if (configuredPromptPay) {
         promptPayId = configuredPromptPay;
-      } else if (outletRow?.taxId) {
+      } else if (fiscal.countryCode === 'TH' && outletRow?.taxId) {
         promptPayId = String(outletRow.taxId);
       }
     } catch {
@@ -4400,28 +4879,90 @@ export class SqliteReadWritePoolEngine {
       outletId,
       outletCode: String(outletRow?.code ?? 'HQ-01'),
       storeName: String(outletRow?.name ?? 'RUBE Flagship Store & Warehouse'),
-      taxId: String(outletRow?.taxId ?? '0105566001234'),
+      storeAddress: fiscal.storeAddress,
+      taxId: String(outletRow?.taxId ?? (fiscal.countryCode === 'LA' ? '' : '0105566001234')),
       branchCode: String(outletRow?.branchCode ?? '00000'),
-      rdPosRegNo: String(outletRow?.rdPosRegNo ?? 'RD-POS-2026-001'),
+      rdPosRegNo: String(outletRow?.rdPosRegNo ?? (fiscal.countryCode === 'LA' ? 'LA-POS-0001' : 'RD-POS-2026-001')),
       promptPayId,
       businessProfile: this.getVerifiedBusinessProfileMode(),
+      fiscalConfig: fiscal,
     };
   }
 
   public async updateStoreIdentitySettings(input: {
     outletId?: string | undefined;
     storeName: string;
+    storeAddress?: string | undefined;
     taxId: string;
     branchCode: string;
     rdPosRegNo: string;
     promptPayId: string;
+    countryCode?: CountryCode | undefined;
+    uiLocale?: LocaleCode | undefined;
+    receiptLocale?: LocaleCode | undefined;
+    vatRateBps?: BasisPoints | undefined;
+    defaultTaxMode?: TaxMode | undefined;
+    cashRoundingStepMajor?: CashRoundingStepMajor | undefined;
+    scalePriceEmbeddedMultiplier?: number | undefined;
+    laoQrStaticTemplate?: string | undefined;
+    laoQrVerificationPolicy?: LaoQrVerificationPolicy | undefined;
+    fxRates?: Partial<FxRatesConfigDto> | undefined;
     updatedByUserId?: string | undefined;
   }): Promise<StoreIdentitySettingsDto> {
     const outletId = input.outletId ?? 'OUTLET-HQ';
     const actor = input.updatedByUserId ?? 'USR-OWNER-01';
-    const cleanPromptPay = input.promptPayId.replace(/\D/g, '');
-    if (cleanPromptPay.length !== 10 && cleanPromptPay.length !== 13 && cleanPromptPay.length !== 15) {
-      throw new Error('PromptPay ID must be 10 digits (Mobile), 13 digits (Tax/Citizen ID), or 15 digits (e-Wallet)');
+    const currentFiscal = this.getFiscalConfig();
+    const targetCountry = input.countryCode
+      ? normalizeCountryCode(input.countryCode)
+      : currentFiscal.countryCode;
+
+    const cleanPromptPay = (input.promptPayId ?? '').replace(/\D/g, '');
+    if (
+      targetCountry === 'TH' &&
+      cleanPromptPay.length !== 10 &&
+      cleanPromptPay.length !== 13 &&
+      cleanPromptPay.length !== 15
+    ) {
+      throw new Error(
+        'PromptPay ID must be 10 digits (Mobile), 13 digits (Tax/Citizen ID), or 15 digits (e-Wallet)'
+      );
+    }
+
+    if (
+      input.countryCode !== undefined ||
+      input.uiLocale !== undefined ||
+      input.receiptLocale !== undefined ||
+      input.vatRateBps !== undefined ||
+      input.defaultTaxMode !== undefined ||
+      input.cashRoundingStepMajor !== undefined ||
+      input.scalePriceEmbeddedMultiplier !== undefined ||
+      input.storeAddress !== undefined ||
+      input.laoQrStaticTemplate !== undefined ||
+      input.laoQrVerificationPolicy !== undefined ||
+      input.fxRates !== undefined
+    ) {
+      await this.updateFiscalConfig({
+        ...(input.countryCode !== undefined ? { countryCode: input.countryCode } : {}),
+        ...(input.uiLocale !== undefined ? { uiLocale: input.uiLocale } : {}),
+        ...(input.receiptLocale !== undefined ? { receiptLocale: input.receiptLocale } : {}),
+        ...(input.vatRateBps !== undefined ? { vatRateBps: input.vatRateBps } : {}),
+        ...(input.defaultTaxMode !== undefined ? { defaultTaxMode: input.defaultTaxMode } : {}),
+        ...(input.cashRoundingStepMajor !== undefined
+          ? { cashRoundingStepMajor: input.cashRoundingStepMajor }
+          : {}),
+        ...(input.scalePriceEmbeddedMultiplier !== undefined
+          ? { scalePriceEmbeddedMultiplier: input.scalePriceEmbeddedMultiplier }
+          : {}),
+        ...(input.storeAddress !== undefined ? { storeAddress: input.storeAddress } : {}),
+        ...(input.laoQrStaticTemplate !== undefined
+          ? { laoQrStaticTemplate: input.laoQrStaticTemplate }
+          : {}),
+        ...(input.laoQrVerificationPolicy !== undefined
+          ? { laoQrVerificationPolicy: input.laoQrVerificationPolicy }
+          : {}),
+        ...(input.fxRates !== undefined ? { fxRates: input.fxRates } : {}),
+        updatedByUserId: actor,
+      });
     }
 
     await this.executeWriteImmediate((db) => {
@@ -4436,11 +4977,13 @@ export class SqliteReadWritePoolEngine {
       );
     });
 
-    await this.setProtectedStoreConfig({
-      key: 'promptpay_merchant_id',
-      value: cleanPromptPay,
-      updatedByUserId: actor,
-    });
+    if (cleanPromptPay) {
+      await this.setProtectedStoreConfig({
+        key: 'promptpay_merchant_id',
+        value: cleanPromptPay,
+        updatedByUserId: actor,
+      });
+    }
 
     return this.getStoreIdentitySettings(outletId);
   }
@@ -5144,7 +5687,7 @@ export class SqliteReadWritePoolEngine {
              so.created_at AS createdAt
            FROM sales_orders so
            LEFT JOIN users u ON u.id = so.cashier_id
-           WHERE so.outlet_id = ?
+           WHERE so.outlet_id = ? AND so.status != 'OPEN'
            ORDER BY so.created_at DESC, so.rowid DESC
            LIMIT ?`
         )
@@ -5184,6 +5727,12 @@ export class SqliteReadWritePoolEngine {
         `SELECT modifier_name_snapshot AS name, price_delta_satang AS priceDeltaSatang
          FROM sales_order_item_modifiers
          WHERE sales_order_item_id = ?`
+      );
+      const fxAuditStmt = db.prepare(
+        `SELECT new_value_redacted AS fxJson
+         FROM security_audit_logs
+         WHERE event_type = 'FX_CASH_TENDER' AND target_key = ?
+         ORDER BY id DESC LIMIT 1`
       );
 
       return orders.map((o) => {
@@ -5234,6 +5783,16 @@ export class SqliteReadWritePoolEngine {
           };
         });
 
+        const fxRow = fxAuditStmt.get(orderId) as { fxJson?: string } | undefined;
+        let fxTender: FxCashTenderDetailDto | null = null;
+        if (fxRow?.fxJson) {
+          try {
+            fxTender = JSON.parse(fxRow.fxJson) as FxCashTenderDetailDto;
+          } catch {
+            fxTender = null;
+          }
+        }
+
         return {
           salesOrderId: orderId,
           receiptNumber: String(o.receiptNumber),
@@ -5256,6 +5815,7 @@ export class SqliteReadWritePoolEngine {
           payments,
           cashTenderedSatang: primaryPay?.cashTenderedSatang ?? null,
           changeGivenSatang: primaryPay?.changeGivenSatang ?? null,
+          fxTender,
           senderBankCode:
             payments.find((p) => p.senderBankCode)?.senderBankCode ?? null,
           slipTransRefLast4:
@@ -5561,10 +6121,141 @@ export class SqliteReadWritePoolEngine {
     });
   }
 
+  private seedLaoDemoCatalogOnDb(db: DatabaseSync, outletId: string): void {
+    db.prepare(
+      `INSERT OR IGNORE INTO categories (id, name, display_color, kitchen_station, sort_order)
+       VALUES
+         ('CAT-RETAIL', 'ສິນຄ້າຂາຍຍ່ອຍ & ອາຫານສົດ', '#1a73e8', 'NONE', 1),
+         ('CAT-CAFE', 'ກາເຟ & ເຄື່ອງດື່ມຄາເຟ່', '#1a73e8', 'BAR', 2),
+         ('CAT-RAW', 'ວັດຖຸດິບຫຼັງຮ້ານ', '#5f6368', 'PREP', 3)`
+    ).run();
+
+    db.prepare(
+      `INSERT OR IGNORE INTO suppliers (id, code, name, tax_id, phone)
+       VALUES ('SUP-001', 'SUP-LAO-GEN', 'ຜູ້ສະໜອງສິນຄ້າທົ່ວໄປ (Vientiane Wholesale)', '123456789012', '020-5555-8888')`
+    ).run();
+
+    const insertItem = db.prepare(
+      `INSERT OR IGNORE INTO items (id, name, category_id, unit_name, track_stock, is_composite, use_production, is_weighted_scale)
+       VALUES (?, ?, ?, ?, 1, ?, 0, ?)`
+    );
+    const insertVar = db.prepare(
+      `INSERT OR IGNORE INTO item_variants (id, item_id, sku, barcode, variant_name, price_satang, default_purchase_cost_micro_baht)
+       VALUES (?, ?, ?, ?, 'Standard', ?, ?)`
+    );
+    const insertLvl = db.prepare(
+      `INSERT OR IGNORE INTO inventory_levels (id, outlet_id, variant_id, in_stock_milli, average_cost_micro_baht, optimal_stock_milli, low_stock_threshold_milli)
+       VALUES (?, ?, ?, ?, ?, 50000, 10000)`
+    );
+    const insertTx = db.prepare(
+      `INSERT OR IGNORE INTO inventory_transactions (
+         id, outlet_id, variant_id, transaction_type, quantity_change_milli,
+         stock_before_milli, stock_after_milli, unit_cost_micro_baht,
+         reference_type, reference_id, performed_by
+       ) VALUES (?, ?, ?, 'ADJUSTMENT', ?, 0, ?, ?, 'DEMO_SEED', 'LAO-SEED-INIT', 'USR-OWNER-01')`
+    );
+
+    const demoProducts: Array<{
+      itemId: string;
+      varId: string;
+      name: string;
+      catId: string;
+      unit: string;
+      sku: string;
+      barcode: string | null;
+      priceLak: number;
+      costLak: number;
+      stockMilli: number;
+      isWeighted: number;
+    }> = [
+      {
+        itemId: 'ITM-LA-WATER',
+        varId: 'VAR-LA-WATER',
+        name: 'ນ້ຳດື່ມ 600ml (Water 600ml)',
+        catId: 'CAT-RETAIL',
+        unit: 'ຂວດ',
+        sku: 'LA-RET-001',
+        barcode: '8850123456789',
+        priceLak: 8_000,
+        costLak: 4_500,
+        stockMilli: 100_000,
+        isWeighted: 0,
+      },
+      {
+        itemId: 'ITM-LA-BEER',
+        varId: 'VAR-LA-BEER',
+        name: 'ເບຍລາວ 640ml (Beerlao Lager)',
+        catId: 'CAT-RETAIL',
+        unit: 'ຂວດ',
+        sku: 'LA-RET-002',
+        barcode: '8851234000012',
+        priceLak: 25_000,
+        costLak: 18_000,
+        stockMilli: 60_000,
+        isWeighted: 0,
+      },
+      {
+        itemId: 'ITM-LA-PORK',
+        varId: 'VAR-LA-PORK',
+        name: 'ຊີ້ນໝູສາມຊັ້ນສົດ (Fresh Pork Belly)',
+        catId: 'CAT-RETAIL',
+        unit: 'ກກ.',
+        sku: '00123',
+        barcode: null,
+        priceLak: 120_000,
+        costLak: 95_000,
+        stockMilli: 25_000,
+        isWeighted: 1,
+      },
+      {
+        itemId: 'ITM-LA-COFFEE',
+        varId: 'VAR-LA-COFFEE',
+        name: 'ກາເຟເຢັນລາວ (Iced Lao Coffee)',
+        catId: 'CAT-CAFE',
+        unit: 'ຈອກ',
+        sku: 'LA-CAF-001',
+        barcode: null,
+        priceLak: 35_000,
+        costLak: 12_000,
+        stockMilli: 80_000,
+        isWeighted: 0,
+      },
+      {
+        itemId: 'ITM-LA-MILKTEA',
+        varId: 'VAR-LA-MILKTEA',
+        name: 'ຊານົມໄຂ່ມຸກ (Brown Sugar Milk Tea)',
+        catId: 'CAT-CAFE',
+        unit: 'ຈອກ',
+        sku: 'LA-CAF-002',
+        barcode: null,
+        priceLak: 40_000,
+        costLak: 15_000,
+        stockMilli: 80_000,
+        isWeighted: 0,
+      },
+    ];
+
+    for (const p of demoProducts) {
+      const priceMinor = p.priceLak * 100;
+      const costMicro = p.costLak * 1_000_000;
+      insertItem.run(p.itemId, p.name, p.catId, p.unit, 0, p.isWeighted);
+      insertVar.run(p.varId, p.itemId, p.sku, p.barcode, priceMinor, costMicro);
+      insertLvl.run(`INV-${outletId}-${p.varId}`, outletId, p.varId, p.stockMilli, costMicro);
+      insertTx.run(
+        `TX-SEED-${p.varId}`,
+        outletId,
+        p.varId,
+        p.stockMilli,
+        p.stockMilli,
+        costMicro
+      );
+    }
+  }
+
   /**
    * Production Clean-Start First-Run Onboarding:
    * Sets up a customer terminal from an empty database WITHOUT demo clutter (unless `loadDemoSampleCatalog` is explicitly opted in),
-   * hashes the Owner's real master PIN, signs `business_profile` + `promptpay_merchant_id` with HMAC-SHA256,
+   * hashes the Owner's real master PIN, signs `business_profile` + country fiscal settings + QR payment ID with HMAC-SHA256,
    * and opens the initial cashier shift.
    */
   public async initializeFirstRunOnboarding(input: FirstRunOnboardingInput): Promise<{
@@ -5573,8 +6264,46 @@ export class SqliteReadWritePoolEngine {
     storeSettings: StoreIdentitySettingsDto;
   }> {
     const outletId = 'OUTLET-HQ';
-    const cleanPromptPay = input.promptPayId.replace(/\D/g, '');
-    if (cleanPromptPay.length !== 10 && cleanPromptPay.length !== 13 && cleanPromptPay.length !== 15) {
+    const countryCode = normalizeCountryCode(input.countryCode);
+    const countryDefaults = getDefaultFiscalConfigForCountry(countryCode);
+    const currencyCode = countryDefaults.currencyCode;
+    const uiLocale = normalizeLocaleCode(input.uiLocale, countryDefaults.uiLocale);
+    const receiptLocale = normalizeLocaleCode(input.receiptLocale, countryDefaults.receiptLocale);
+    const vatRateBps =
+      input.vatRateBps !== undefined
+        ? Math.max(0, Math.min(5000, Math.round(Number(input.vatRateBps))))
+        : countryDefaults.vatRateBps;
+    const defaultTaxMode: TaxMode =
+      input.defaultTaxMode === 'NONE' ||
+      input.defaultTaxMode === 'INCLUSIVE' ||
+      input.defaultTaxMode === 'EXCLUSIVE'
+        ? input.defaultTaxMode
+        : vatRateBps === 0
+          ? 'NONE'
+          : countryDefaults.defaultTaxMode;
+    const cashRoundingStepMajor =
+      currencyCode === 'LAK'
+        ? normalizeCashRoundingStepMajor(input.cashRoundingStepMajor)
+        : 0;
+    const scalePriceEmbeddedMultiplier = normalizeScalePriceEmbeddedMultiplier(
+      input.scalePriceEmbeddedMultiplier,
+      countryCode
+    );
+    const storeAddress = (input.storeAddress ?? '').trim();
+    const laoQrStaticTemplate =
+      countryCode === 'LA'
+        ? this.assertValidLaoQrStaticTemplateIfNonEmpty(input.laoQrStaticTemplate ?? '')
+        : '';
+    const laoQrVerificationPolicy = normalizeLaoQrVerificationPolicy(input.laoQrVerificationPolicy);
+    const fxRates = normalizeFxRatesConfig(input.fxRates, countryCode);
+
+    const cleanPromptPay = (input.promptPayId ?? '').replace(/\D/g, '');
+    if (
+      countryCode === 'TH' &&
+      cleanPromptPay.length !== 10 &&
+      cleanPromptPay.length !== 13 &&
+      cleanPromptPay.length !== 15
+    ) {
       throw new Error('PromptPay ID must be 10, 13, or 15 digits');
     }
     if (
@@ -5587,18 +6316,28 @@ export class SqliteReadWritePoolEngine {
 
     // Precompute scrypt PIN hash and HMAC signatures outside the writer transaction
     const ownerPinHash = this.hashStaffPin(input.ownerPin);
-    const businessProfileHmac = this.computeProtectedConfigHmacHex(
-      'business_profile',
-      input.businessProfile
-    );
-    const promptPayHmac = this.computeProtectedConfigHmacHex(
-      'promptpay_merchant_id',
-      cleanPromptPay
-    );
+    const protectedEntries: Array<[string, string]> = [
+      ['business_profile', input.businessProfile],
+      ['country_code', countryCode],
+      ['currency_code', currencyCode],
+      ['vat_rate_bps', String(vatRateBps)],
+      ['default_tax_mode', defaultTaxMode],
+      ['cash_rounding_step_major', String(cashRoundingStepMajor)],
+      ['scale_price_embedded_multiplier', String(scalePriceEmbeddedMultiplier)],
+      ['lao_qr_static_template', laoQrStaticTemplate],
+      ['lao_qr_verification_policy', laoQrVerificationPolicy],
+      ['fx_rates_json', JSON.stringify(fxRates)],
+      ...(cleanPromptPay ? ([['promptpay_merchant_id', cleanPromptPay]] as Array<[string, string]>) : []),
+    ];
+    const signedEntries = protectedEntries.map(([key, value]) => ({
+      key,
+      value,
+      hmac: this.computeProtectedConfigHmacHex(key, value),
+    }));
     const openingCashSatang = Math.max(0, input.openingCashSatang);
 
     const activeShift = await this.executeWriteImmediate((db) => {
-      if (input.loadDemoSampleCatalog) {
+      if (input.loadDemoSampleCatalog && countryCode === 'TH') {
         this.seedDefaultWarehouseAndCatalogOnDb(db, outletId);
       }
 
@@ -5615,7 +6354,7 @@ export class SqliteReadWritePoolEngine {
         input.storeName.trim(),
         input.taxId.trim(),
         input.branchCode.trim() || '00000',
-        input.rdPosRegNo.trim() || 'RD-POS-0001'
+        input.rdPosRegNo.trim() || (countryCode === 'LA' ? 'LA-POS-0001' : 'RD-POS-0001')
       );
 
       db.prepare(
@@ -5634,23 +6373,42 @@ export class SqliteReadWritePoolEngine {
            active = 1`
       ).run(
         input.ownerUsername?.trim() || 'owner',
-        input.ownerDisplayName.trim() || 'เจ้าของร้าน',
+        input.ownerDisplayName.trim() || (countryCode === 'LA' ? 'ເຈົ້າຂອງຮ້ານ (Owner)' : 'เจ้าของร้าน'),
         ownerPinHash
       );
 
-      // Ensure baseline categories & default general supplier exist even on Clean Production Start
-      db.prepare(
-        `INSERT OR IGNORE INTO categories (id, name, display_color, kitchen_station, sort_order)
-         VALUES
-           ('CAT-RETAIL', 'สินค้าทั่วไป & ค้าปลีก', '#1a73e8', 'NONE', 1),
-           ('CAT-CAFE', 'เครื่องดื่ม & อาหาร', '#1a73e8', 'BAR', 2),
-           ('CAT-RAW', 'วัตถุดิบหลังร้าน', '#5f6368', 'PREP', 3)`
-      ).run();
+      if (input.loadDemoSampleCatalog && countryCode === 'LA') {
+        this.seedLaoDemoCatalogOnDb(db, outletId);
+      } else {
+        // Ensure baseline categories & default general supplier exist even on Clean Production Start
+        if (countryCode === 'LA') {
+          db.prepare(
+            `INSERT OR IGNORE INTO categories (id, name, display_color, kitchen_station, sort_order)
+             VALUES
+               ('CAT-RETAIL', 'ສິນຄ້າທົ່ວໄປ & ຂາຍຍ່ອຍ', '#1a73e8', 'NONE', 1),
+               ('CAT-CAFE', 'ເຄື່ອງດື່ມ & ອາຫານ', '#1a73e8', 'BAR', 2),
+               ('CAT-RAW', 'ວັດຖຸດິບຫຼັງຮ້ານ', '#5f6368', 'PREP', 3)`
+          ).run();
 
-      db.prepare(
-        `INSERT OR IGNORE INTO suppliers (id, code, name)
-         VALUES ('SUP-001', 'SUP-GENERAL', 'ผู้จำหน่ายทั่วไป (General Supplier)')`
-      ).run();
+          db.prepare(
+            `INSERT OR IGNORE INTO suppliers (id, code, name)
+             VALUES ('SUP-001', 'SUP-GENERAL', 'ຜູ້ສະໜອງສິນຄ້າທົ່ວໄປ (General Supplier)')`
+          ).run();
+        } else {
+          db.prepare(
+            `INSERT OR IGNORE INTO categories (id, name, display_color, kitchen_station, sort_order)
+             VALUES
+               ('CAT-RETAIL', 'สินค้าทั่วไป & ค้าปลีก', '#1a73e8', 'NONE', 1),
+               ('CAT-CAFE', 'เครื่องดื่ม & อาหาร', '#1a73e8', 'BAR', 2),
+               ('CAT-RAW', 'วัตถุดิบหลังร้าน', '#5f6368', 'PREP', 3)`
+          ).run();
+
+          db.prepare(
+            `INSERT OR IGNORE INTO suppliers (id, code, name)
+             VALUES ('SUP-001', 'SUP-GENERAL', 'ผู้จำหน่ายทั่วไป (General Supplier)')`
+          ).run();
+        }
+      }
 
       db.prepare(
         `INSERT INTO store_config (key, value, is_protected, updated_by)
@@ -5658,25 +6416,33 @@ export class SqliteReadWritePoolEngine {
          ON CONFLICT(key) DO UPDATE SET value = '1', updated_by = 'USR-OWNER-01'`
       ).run();
 
-      this.upsertProtectedStoreConfigOnDb(db, {
-        key: 'business_profile',
-        value: input.businessProfile,
-        hmacSignatureHex: businessProfileHmac,
-        updatedByUserId: 'USR-OWNER-01',
-      });
-      this.upsertProtectedStoreConfigOnDb(db, {
-        key: 'promptpay_merchant_id',
-        value: cleanPromptPay,
-        hmacSignatureHex: promptPayHmac,
-        updatedByUserId: 'USR-OWNER-01',
-      });
+      const upsertPlain = db.prepare(
+        `INSERT INTO store_config (key, value, is_protected, updated_by, updated_at)
+         VALUES (?, ?, 0, 'USR-OWNER-01', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET
+           value = excluded.value,
+           updated_by = excluded.updated_by,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      );
+      upsertPlain.run('ui_locale', uiLocale);
+      upsertPlain.run('receipt_locale', receiptLocale);
+      upsertPlain.run('store_address', storeAddress);
+
+      for (const entry of signedEntries) {
+        this.upsertProtectedStoreConfigOnDb(db, {
+          key: entry.key,
+          value: entry.value,
+          hmacSignatureHex: entry.hmac,
+          updatedByUserId: 'USR-OWNER-01',
+        });
+      }
 
       db.prepare(
         `INSERT INTO security_audit_logs (
            event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
          ) VALUES ('FIRST_RUN_ONBOARDING_COMPLETED', 'USR-OWNER-01', 'POS-TERM-01', 'SYSTEM_BOOTSTRAP', NULL, ?)`
       ).run(
-        `profile=${input.businessProfile}:cleanStart=${!input.loadDemoSampleCatalog}`
+        `country=${countryCode}:currency=${currencyCode}:vat=${vatRateBps}:profile=${input.businessProfile}:cleanStart=${!input.loadDemoSampleCatalog}`
       );
 
       const existingOpenShift = db
@@ -5743,15 +6509,978 @@ export class SqliteReadWritePoolEngine {
       storeSettings: this.getStoreIdentitySettings(outletId),
     };
   }
+
+  // ============================================================================
+  // Local QR Table Ordering & Captive Portal Engine (Zero-Schema, HMAC-Protected)
+  // ============================================================================
+
+  private getQrOrderingConfigOnDb(db: DatabaseSync): QrOrderingConfigDto {
+    const rawJson = this.readRawStoreConfigOnDb(db, 'qr_ordering_config');
+    if (!rawJson) {
+      return normalizeQrOrderingConfig(null);
+    }
+    try {
+      const parsed = JSON.parse(rawJson) as Record<string, unknown>;
+      return normalizeQrOrderingConfig(parsed);
+    } catch {
+      return normalizeQrOrderingConfig(null);
+    }
+  }
+
+  public getQrOrderingConfig(): QrOrderingConfigDto {
+    return this.executeRead((db) => this.getQrOrderingConfigOnDb(db));
+  }
+
+  public async updateQrOrderingConfig(
+    input: Partial<QrOrderingConfigDto> & { updatedByUserId?: string | undefined }
+  ): Promise<QrOrderingConfigDto> {
+    const actor = input.updatedByUserId ?? 'USR-OWNER-01';
+    const current = this.getQrOrderingConfig();
+    const merged = normalizeQrOrderingConfig({
+      ...current,
+      ...input,
+    });
+    const serialized = JSON.stringify(merged);
+    const hmacSignatureHex = this.computeProtectedConfigHmacHex('qr_ordering_config', serialized);
+
+    await this.executeWriteImmediate((db) => {
+      this.upsertProtectedStoreConfigOnDb(db, {
+        key: 'qr_ordering_config',
+        value: serialized,
+        hmacSignatureHex,
+        updatedByUserId: actor,
+      });
+      db.prepare(
+        `INSERT INTO security_audit_logs (
+           event_type, actor_user_id, terminal_id, target_key, old_value_redacted, new_value_redacted
+         ) VALUES ('QR_ORDERING_CONFIG_UPDATED', ?, 'POS-TERM-01', 'qr_ordering_config', ?, ?)`
+      ).run(
+        actor,
+        `enabled=${current.enabled}:port=${current.port}:mode=${current.approvalMode}`,
+        `enabled=${merged.enabled}:port=${merged.port}:mode=${merged.approvalMode}:ssid=${merged.wifiSsid || '-'}:tables=${merged.tableLabels.length}`
+      );
+    });
+
+    return merged;
+  }
+
+  private computeTableQrToken(outletId: string, tableLabel: string, sessionNonce: string): string {
+    const sig = createHmac('sha256', Buffer.from(this.rawHexKey64, 'utf8'))
+      .update(
+        `RUBE-QR-TABLE-V1:${outletId}:${tableLabel.trim().toUpperCase()}:${sessionNonce}`,
+        'utf8'
+      )
+      .digest('hex')
+      .slice(0, 24);
+    return `${sessionNonce}.${sig}`;
+  }
+
+  private readTableSessionsMapOnDb(
+    db: DatabaseSync,
+    outletId: string
+  ): Record<
+    string,
+    { tableLabel: string; sessionNonce: string; openedByName: string; openedAtIso: string }
+  > {
+    const key = `qr_table_sessions_${outletId}`;
+    const row = db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(key) as
+      | { value?: string }
+      | undefined;
+    if (!row?.value) return {};
+    try {
+      const parsed = JSON.parse(row.value) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<
+          string,
+          { tableLabel: string; sessionNonce: string; openedByName: string; openedAtIso: string }
+        >;
+      }
+    } catch {
+      // ignore corrupted fallback
+    }
+    return {};
+  }
+
+  private writeTableSessionsMapOnDb(
+    db: DatabaseSync,
+    outletId: string,
+    map: Record<
+      string,
+      { tableLabel: string; sessionNonce: string; openedByName: string; openedAtIso: string }
+    >,
+    actorUserId: string
+  ): void {
+    const key = `qr_table_sessions_${outletId}`;
+    db.prepare(
+      `INSERT INTO store_config (key, value, is_protected, updated_by, updated_at)
+       VALUES (?, ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_by = excluded.updated_by,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+    ).run(key, JSON.stringify(map), actorUserId);
+  }
+
+  public async openTableQrSession(input: {
+    outletId?: string | undefined;
+    tableLabel: string;
+    openedByName?: string | undefined;
+    baseUrl?: string | undefined;
+    actorUserId?: string | undefined;
+  }): Promise<TableQrSessionDto> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const cleanTable = sanitizeGuestText(input.tableLabel, 24);
+    if (!cleanTable) {
+      throw new Error('HTTP 400 กรุณาระบุหมายเลขโต๊ะสำหรับสร้าง QR Session');
+    }
+    const actor = input.actorUserId ?? 'USR-CASHIER-01';
+    const openedByName = sanitizeGuestText(input.openedByName ?? 'Staff', 60) || 'Staff';
+    const sessionNonce = randomBytes(8).toString('hex');
+    const openedAtIso = new Date().toISOString();
+
+    const cfg = await this.executeWriteImmediate((db) => {
+      const qrCfg = this.getQrOrderingConfigOnDb(db);
+      const map = this.readTableSessionsMapOnDb(db, outletId);
+      const mapKey = cleanTable.toUpperCase();
+      map[mapKey] = {
+        tableLabel: cleanTable,
+        sessionNonce,
+        openedByName,
+        openedAtIso,
+      };
+      this.writeTableSessionsMapOnDb(db, outletId, map, actor);
+      return qrCfg;
+    });
+
+    const token = this.computeTableQrToken(outletId, cleanTable, sessionNonce);
+    const effectiveBase = (input.baseUrl ?? `http://127.0.0.1:${cfg.port}`).replace(/\/+$/, '');
+    return {
+      outletId,
+      tableLabel: cleanTable,
+      sessionNonce,
+      token,
+      menuUrl: buildTableMenuUrl(effectiveBase, cleanTable, token),
+      wifiQrPayload: buildWifiQrPayload(cfg.wifiSsid, cfg.wifiPassword, cfg.wifiSecurity),
+      openedByName,
+      openedAtIso,
+    };
+  }
+
+  public listTableQrSessions(
+    outletId = 'OUTLET-HQ',
+    baseUrl?: string | undefined
+  ): TableQrSessionDto[] {
+    return this.executeRead((db) => {
+      const cfg = this.getQrOrderingConfigOnDb(db);
+      const map = this.readTableSessionsMapOnDb(db, outletId);
+      const effectiveBase = (baseUrl ?? `http://127.0.0.1:${cfg.port}`).replace(/\/+$/, '');
+      const wifiQrPayload = buildWifiQrPayload(cfg.wifiSsid, cfg.wifiPassword, cfg.wifiSecurity);
+      return Object.values(map)
+        .map((entry) => {
+          const token = this.computeTableQrToken(outletId, entry.tableLabel, entry.sessionNonce);
+          return {
+            outletId,
+            tableLabel: entry.tableLabel,
+            sessionNonce: entry.sessionNonce,
+            token,
+            menuUrl: buildTableMenuUrl(effectiveBase, entry.tableLabel, token),
+            wifiQrPayload,
+            openedByName: entry.openedByName,
+            openedAtIso: entry.openedAtIso,
+          } satisfies TableQrSessionDto;
+        })
+        .sort((a, b) => a.tableLabel.localeCompare(b.tableLabel));
+    });
+  }
+
+  public async revokeTableQrSession(input: {
+    outletId?: string | undefined;
+    tableLabel: string;
+    actorUserId?: string | undefined;
+  }): Promise<{ revoked: boolean; tableLabel: string }> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const cleanTable = sanitizeGuestText(input.tableLabel, 24);
+    if (!cleanTable) {
+      return { revoked: false, tableLabel: '' };
+    }
+    const actor = input.actorUserId ?? 'USR-CASHIER-01';
+    const revoked = await this.executeWriteImmediate((db) => {
+      const map = this.readTableSessionsMapOnDb(db, outletId);
+      const mapKey = cleanTable.toUpperCase();
+      if (!(mapKey in map)) {
+        return false;
+      }
+      delete map[mapKey];
+      this.writeTableSessionsMapOnDb(db, outletId, map, actor);
+      return true;
+    });
+    return { revoked, tableLabel: cleanTable };
+  }
+
+  private verifyTableQrTokenOnDb(
+    db: DatabaseSync,
+    outletId: string,
+    tableLabel: string,
+    rawToken: string
+  ): { valid: boolean; expired: boolean; sessionNonce: string | null } {
+    const cleanTable = sanitizeGuestText(tableLabel, 24);
+    const cleanToken = rawToken.trim();
+    if (!cleanTable || !cleanToken) {
+      return { valid: false, expired: false, sessionNonce: null };
+    }
+    const parts = cleanToken.split('.');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      return { valid: false, expired: true, sessionNonce: null };
+    }
+    const [nonce] = parts;
+    const expectedToken = this.computeTableQrToken(outletId, cleanTable, nonce);
+    const a = Buffer.from(cleanToken, 'utf8');
+    const b = Buffer.from(expectedToken, 'utf8');
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      return { valid: false, expired: true, sessionNonce: null };
+    }
+    const map = this.readTableSessionsMapOnDb(db, outletId);
+    const activeSession = map[cleanTable.toUpperCase()];
+    if (!activeSession || activeSession.sessionNonce !== nonce) {
+      return { valid: false, expired: true, sessionNonce: null };
+    }
+    return { valid: true, expired: false, sessionNonce: nonce };
+  }
+
+  public verifyTableQrToken(
+    outletId: string,
+    tableLabel: string,
+    rawToken: string
+  ): { valid: boolean; expired: boolean; sessionNonce: string | null } {
+    return this.executeRead((db) =>
+      this.verifyTableQrTokenOnDb(db, outletId, tableLabel, rawToken)
+    );
+  }
+
+  private readGuestOrdersOnDb(db: DatabaseSync, outletId: string): GuestOrderRecordDto[] {
+    const key = `qr_guest_orders_${outletId}`;
+    const row = db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(key) as
+      | { value?: string }
+      | undefined;
+    if (!row?.value) return [];
+    try {
+      const parsed = JSON.parse(row.value) as unknown;
+      return Array.isArray(parsed) ? (parsed as GuestOrderRecordDto[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private writeGuestOrdersOnDb(
+    db: DatabaseSync,
+    outletId: string,
+    orders: GuestOrderRecordDto[],
+    actorUserId: string
+  ): void {
+    const key = `qr_guest_orders_${outletId}`;
+    const trimmed = orders.slice(0, 200);
+    db.prepare(
+      `INSERT INTO store_config (key, value, is_protected, updated_by, updated_at)
+       VALUES (?, ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_by = excluded.updated_by,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+    ).run(key, JSON.stringify(trimmed), actorUserId);
+  }
+
+  private hydrateGuestOrderKdsStatusOnDb(
+    db: DatabaseSync,
+    order: GuestOrderRecordDto
+  ): GuestOrderRecordDto {
+    if (
+      !order.kdsSalesOrderId ||
+      order.status === 'PENDING_CONFIRM' ||
+      order.status === 'REJECTED'
+    ) {
+      return order;
+    }
+    const rows = db
+      .prepare(
+        `SELECT status FROM kitchen_orders WHERE sales_order_id = ? AND status != 'CANCELLED'`
+      )
+      .all(order.kdsSalesOrderId) as Array<{ status?: unknown }>;
+    if (rows.length === 0) {
+      return order;
+    }
+    const statuses = rows.map((r) => String(r.status ?? 'QUEUED'));
+    let derived: QrGuestOrderStatus = 'ACCEPTED';
+    if (statuses.every((s) => s === 'SERVED')) {
+      derived = 'SERVED';
+    } else if (statuses.every((s) => s === 'READY' || s === 'SERVED')) {
+      derived = 'READY';
+    } else if (statuses.some((s) => s === 'PREPARING' || s === 'READY' || s === 'SERVED')) {
+      derived = 'PREPARING';
+    } else {
+      derived = 'ACCEPTED';
+    }
+    return derived === order.status ? order : { ...order, status: derived };
+  }
+
+  private mergeGuestOrderIntoHeldBillOnDb(
+    db: DatabaseSync,
+    outletId: string,
+    guestOrder: GuestOrderRecordDto,
+    fiscal: FiscalConfigDto,
+    actorUserId: string,
+    actorDisplayName: string
+  ): string {
+    const cfgKey = `held_bills_${outletId}`;
+    const existingRow = db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(cfgKey) as
+      | { value?: string }
+      | undefined;
+    let heldBills: Array<Record<string, unknown>> = [];
+    if (existingRow?.value) {
+      try {
+        const parsed = JSON.parse(existingRow.value) as unknown;
+        if (Array.isArray(parsed)) {
+          heldBills = parsed as Array<Record<string, unknown>>;
+        }
+      } catch {
+        heldBills = [];
+      }
+    }
+
+    const modRows = db
+      .prepare(`SELECT id, price_delta_satang AS priceDeltaSatang FROM modifiers`)
+      .all() as Array<{ id: string; priceDeltaSatang: number }>;
+    const modPriceMap = new Map<string, number>(
+      modRows.map((m) => [String(m.id), Number(m.priceDeltaSatang)])
+    );
+
+    const targetLabelUpper = guestOrder.tableLabel.trim().toUpperCase();
+    const existingIdx = heldBills.findIndex(
+      (b) => String(b.referenceLabel ?? '').trim().toUpperCase() === targetLabelUpper
+    );
+
+    const existingBill = existingIdx >= 0 ? heldBills[existingIdx]! : null;
+    const heldBillId = existingBill
+      ? String(existingBill.id)
+      : `HOLD-QR-${Date.now()}-${randomBytes(3).toString('hex')}`;
+    const existingCart: Array<Record<string, unknown>> =
+      existingBill && Array.isArray(existingBill.cart)
+        ? [...(existingBill.cart as Array<Record<string, unknown>>)]
+        : [];
+
+    for (const line of guestOrder.lines) {
+      const sortedMods = [...line.selectedModifierIds].sort();
+      const noteTag = line.note ? `::note:${line.note}` : '';
+      const cartKey = `${line.variantId}::${sortedMods.join(',')}${noteTag}::kds`;
+      const existingLineIdx = existingCart.findIndex((c) => String(c.cartKey ?? '') === cartKey);
+      if (existingLineIdx >= 0) {
+        const prev = existingCart[existingLineIdx]!;
+        existingCart[existingLineIdx] = {
+          ...prev,
+          quantityMilli: Number(prev.quantityMilli ?? 0) + line.quantityMilli,
+          kdsDispatched: true,
+        };
+      } else {
+        existingCart.push({
+          cartKey,
+          variantId: line.variantId,
+          itemName: line.itemName,
+          variantName: line.variantName,
+          sku: line.sku,
+          unitName: line.unitName,
+          quantityMilli: line.quantityMilli,
+          unitPriceSatang: line.unitPriceSatang,
+          selectedModifierIds: sortedMods,
+          isWeightedScale: false,
+          kdsDispatched: true,
+          ...(line.note ? { guestNote: line.note } : {}),
+        });
+      }
+    }
+
+    let mergedSubtotalSatang = 0;
+    for (const item of existingCart) {
+      const qMilli = Math.max(1, Number(item.quantityMilli ?? 1000));
+      const unitSatang = Math.max(0, Number(item.unitPriceSatang ?? 0));
+      const modIds = Array.isArray(item.selectedModifierIds)
+        ? (item.selectedModifierIds as unknown[]).map((x) => String(x))
+        : [];
+      const modDeltas = modIds.map((id) => modPriceMap.get(id) ?? 0);
+      const override = item.overrideLineTotalSatang;
+      if (typeof override === 'number' && Number.isSafeInteger(override) && override >= 0) {
+        mergedSubtotalSatang += override;
+      } else {
+        const calc = computeGuestOrderLineSatang({
+          quantityMilli: qMilli,
+          unitPriceSatang: unitSatang,
+          modifierPriceDeltasSatang: modDeltas,
+        });
+        mergedSubtotalSatang += calc.lineTotalSatang;
+      }
+    }
+
+    const billTaxMode: TaxMode =
+      existingBill &&
+      (existingBill.taxMode === 'NONE' ||
+        existingBill.taxMode === 'INCLUSIVE' ||
+        existingBill.taxMode === 'EXCLUSIVE')
+        ? existingBill.taxMode
+        : fiscal.defaultTaxMode;
+
+    const totals = computeOrderFinancialTotals({
+      subtotalSatang: mergedSubtotalSatang,
+      discountSatang: 0,
+      vatRateBps: fiscal.vatRateBps,
+      taxMode: billTaxMode,
+      currencyCode: fiscal.currencyCode,
+      applyCashRounding: false,
+      cashRoundingStepMajor: 0,
+    });
+
+    const updatedBill: Record<string, unknown> = {
+      ...(existingBill ?? {}),
+      id: heldBillId,
+      outletId,
+      referenceLabel: guestOrder.tableLabel,
+      orderType: guestOrder.orderType,
+      taxMode: billTaxMode,
+      cart: existingCart,
+      totalSatang: totals.totalSatang,
+      heldByName: existingBill
+        ? String(existingBill.heldByName ?? actorDisplayName)
+        : `QR · ${actorDisplayName}`,
+      heldAtIso: existingBill
+        ? String(existingBill.heldAtIso ?? new Date().toISOString())
+        : new Date().toISOString(),
+    };
+
+    const nextList = [
+      updatedBill,
+      ...heldBills.filter((b) => String(b.id) !== heldBillId),
+    ].slice(0, 100);
+
+    db.prepare(
+      `INSERT INTO store_config (key, value, is_protected, updated_by, updated_at)
+       VALUES (?, ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_by = excluded.updated_by,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+    ).run(cfgKey, JSON.stringify(nextList), actorUserId);
+
+    return heldBillId;
+  }
+
+  private dispatchGuestOrderToKdsOnDb(
+    db: DatabaseSync,
+    outletId: string,
+    guestOrder: GuestOrderRecordDto,
+    actorUserId: string
+  ): { kdsSalesOrderId: string; kdsSequenceIds: number[] } {
+    const shiftRow = db
+      .prepare(
+        `SELECT id FROM pos_shifts
+         WHERE outlet_id = ?
+         ORDER BY CASE WHEN status = 'OPEN' THEN 0 ELSE 1 END ASC, opened_at DESC
+         LIMIT 1`
+      )
+      .get(outletId) as { id?: string } | undefined;
+    if (!shiftRow?.id) {
+      throw new Error('HTTP 409 กรุณาเปิดกะการขายก่อนรับออเดอร์เข้าจอครัว KDS');
+    }
+
+    const userRow =
+      (db.prepare(`SELECT id FROM users WHERE id = ? LIMIT 1`).get(actorUserId) as
+        | { id?: string }
+        | undefined) ??
+      (db.prepare(`SELECT id FROM users ORDER BY rowid ASC LIMIT 1`).get() as
+        | { id?: string }
+        | undefined);
+    const validCashierId = userRow?.id ?? 'USR-OWNER-01';
+
+    const terminalRow =
+      (db
+        .prepare(`SELECT id FROM pos_terminals WHERE outlet_id = ? ORDER BY rowid ASC LIMIT 1`)
+        .get(outletId) as { id?: string } | undefined) ??
+      (db.prepare(`SELECT id FROM pos_terminals ORDER BY rowid ASC LIMIT 1`).get() as
+        | { id?: string }
+        | undefined);
+    const terminalId = terminalRow?.id ?? 'POS-TERM-01';
+
+    const kdsSalesOrderId = `SO-QRKDS-${randomUUID()}`;
+    const kdsReceiptNo = `QRKDS-${guestOrder.orderCode}-${randomBytes(3).toString('hex').toUpperCase()}`;
+
+    db.prepare(
+      `INSERT INTO sales_orders (
+         id, idempotency_key, receipt_number, abb_tax_invoice_no,
+         outlet_id, terminal_id, shift_id, cashier_id,
+         order_type, table_or_queue_no, status, tax_mode,
+         subtotal_satang, discount_satang, tax_satang, total_satang, total_cogs_micro_baht
+       ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'OPEN', 'NONE', 0, 0, 0, 0, 0)`
+    ).run(
+      kdsSalesOrderId,
+      `QR-KDS-${guestOrder.id}`,
+      kdsReceiptNo,
+      outletId,
+      terminalId,
+      shiftRow.id,
+      validCashierId,
+      guestOrder.orderType,
+      guestOrder.tableLabel
+    );
+
+    const stationLookup = db.prepare(
+      `SELECT COALESCE(c.kitchen_station, 'MAIN') AS kitchenStation
+       FROM item_variants v
+       JOIN items i ON i.id = v.item_id
+       LEFT JOIN categories c ON c.id = i.category_id
+       WHERE v.id = ?`
+    );
+    const insertSoItem = db.prepare(
+      `INSERT INTO sales_order_items (
+         id, sales_order_id, variant_id, quantity_milli, unit_price_satang,
+         modifiers_total_satang, discount_satang, line_total_satang, line_cogs_micro_baht, notes
+       ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?)`
+    );
+
+    const linesByStation = new Map<
+      string,
+      Array<{
+        salesOrderItemId: string;
+        itemName: string;
+        modifiersSummary: string | null;
+        quantityMilli: number;
+      }>
+    >();
+
+    for (const line of guestOrder.lines) {
+      const soiId = `SOI-QR-${randomUUID()}`;
+      const combinedNotes = [line.note, guestOrder.customerNote].filter(Boolean).join(' | ') || null;
+      insertSoItem.run(
+        soiId,
+        kdsSalesOrderId,
+        line.variantId,
+        line.quantityMilli,
+        line.unitPriceSatang,
+        line.modifiersTotalSatang,
+        line.lineTotalSatang,
+        combinedNotes
+      );
+
+      const stRow = stationLookup.get(line.variantId) as { kitchenStation?: string } | undefined;
+      const rawStation = String(stRow?.kitchenStation ?? 'MAIN').trim().toUpperCase();
+      const station = rawStation && rawStation !== 'NONE' && rawStation !== 'PREP' ? rawStation : 'MAIN';
+
+      const summaryParts: string[] = [];
+      if (line.modifierNames.length > 0) {
+        summaryParts.push(line.modifierNames.join(', '));
+      }
+      if (line.note) {
+        summaryParts.push(`[Note: ${line.note}]`);
+      }
+      if (guestOrder.customerNote) {
+        summaryParts.push(`[${guestOrder.customerNote}]`);
+      }
+
+      const bucket = linesByStation.get(station) ?? [];
+      bucket.push({
+        salesOrderItemId: soiId,
+        itemName: line.itemName,
+        modifiersSummary: summaryParts.length > 0 ? summaryParts.join(' · ') : null,
+        quantityMilli: line.quantityMilli,
+      });
+      linesByStation.set(station, bucket);
+    }
+
+    const insertKo = db.prepare(
+      `INSERT INTO kitchen_orders (id, sales_order_id, outlet_id, station, queue_number, status)
+       VALUES (?, ?, ?, ?, ?, 'QUEUED')`
+    );
+    const insertKoItem = db.prepare(
+      `INSERT INTO kitchen_order_items (
+         id, kitchen_order_id, sales_order_item_id, item_summary_text,
+         modifiers_summary_text, quantity_milli, status
+       ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`
+    );
+
+    const kdsSequenceIds: number[] = [];
+    const queueLabel = `${guestOrder.tableLabel} · ${guestOrder.orderCode}`;
+
+    for (const [station, stationLines] of linesByStation.entries()) {
+      const koId = `KO-QR-${randomUUID()}`;
+      const koRes = insertKo.run(koId, kdsSalesOrderId, outletId, station, queueLabel);
+      kdsSequenceIds.push(Number(koRes.lastInsertRowid));
+      for (const sl of stationLines) {
+        insertKoItem.run(
+          `KOI-QR-${randomUUID()}`,
+          koId,
+          sl.salesOrderItemId,
+          sl.itemName,
+          sl.modifiersSummary,
+          sl.quantityMilli
+        );
+      }
+    }
+
+    return { kdsSalesOrderId, kdsSequenceIds };
+  }
+
+  public async submitGuestOrder(input: {
+    outletId?: string | undefined;
+    tableLabel: string;
+    signedToken?: string | null | undefined;
+    customerName?: string | undefined;
+    customerNote?: string | undefined;
+    lines: GuestOrderLineInputDto[];
+  }): Promise<GuestOrderRecordDto> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const rawLines = Array.isArray(input.lines) ? input.lines : [];
+    if (rawLines.length === 0) {
+      throw new Error('HTTP 400 กรุณาเลือกเมนูอย่างน้อย 1 รายการก่อนส่งออเดอร์');
+    }
+    if (rawLines.length > 50) {
+      throw new Error('HTTP 400 จำนวนรายการต่อคำสั่งซื้อเกินขีดจำกัด 50 รายการ');
+    }
+
+    return this.executeWriteImmediate((db) => {
+      const qrCfg = this.getQrOrderingConfigOnDb(db);
+      const fiscal = this.getFiscalConfigOnDb(db);
+      const requestedTable = sanitizeGuestText(input.tableLabel, 24);
+      if (!requestedTable) {
+        throw new Error('HTTP 400 กรุณาเลือกหมายเลขโต๊ะก่อนส่งออเดอร์');
+      }
+
+      const providedToken = typeof input.signedToken === 'string' ? input.signedToken.trim() : '';
+      let isSignedTableSession = false;
+      let tableSessionNonce: string | null = null;
+
+      if (providedToken) {
+        const verified = this.verifyTableQrTokenOnDb(db, outletId, requestedTable, providedToken);
+        if (!verified.valid) {
+          throw new Error(
+            'HTTP 403 QR โต๊ะนี้หมดอายุหรือถูกปิดบิลแล้ว กรุณาขอใบ QR ใหม่จากพนักงาน'
+          );
+        }
+        isSignedTableSession = true;
+        tableSessionNonce = verified.sessionNonce;
+      } else if (!qrCfg.allowOpenTableSelection) {
+        throw new Error(
+          'HTTP 403 ร้านนี้เปิดรับเฉพาะออเดอร์ที่สแกนจากใบ QR ประจำโต๊ะเท่านั้น'
+        );
+      }
+
+      const matchedCanonicalTable = qrCfg.tableLabels.find(
+        (lbl) => lbl.trim().toUpperCase() === requestedTable.toUpperCase()
+      );
+      if (!isSignedTableSession && !matchedCanonicalTable) {
+        throw new Error(`HTTP 400 ไม่พบหมายเลขโต๊ะ "${requestedTable}" ในรายการโต๊ะของร้าน`);
+      }
+      const canonicalTable = matchedCanonicalTable ?? requestedTable;
+      const orderType: 'DINE_IN' | 'TAKEAWAY' =
+        canonicalTable.toUpperCase() === 'TAKEAWAY' || canonicalTable.includes('กลับบ้าน')
+          ? 'TAKEAWAY'
+          : 'DINE_IN';
+
+      const variantStmt = db.prepare(
+        `SELECT
+           v.id,
+           v.sku,
+           v.variant_name AS variantName,
+           v.price_satang AS priceSatang,
+           v.active AS variantActive,
+           i.name AS itemName,
+           i.unit_name AS unitName,
+           i.is_composite AS isComposite,
+           i.active AS itemActive,
+           i.category_id AS categoryId,
+           COALESCE(c.kitchen_station, 'MAIN') AS kitchenStation,
+           COALESCE(il.in_stock_milli, 0) AS inStockMilli
+         FROM item_variants v
+         JOIN items i ON i.id = v.item_id
+         LEFT JOIN categories c ON c.id = i.category_id
+         LEFT JOIN inventory_levels il ON il.variant_id = v.id AND il.outlet_id = ?
+         WHERE v.id = ?`
+      );
+      const modifierStmt = db.prepare(
+        `SELECT id, name, price_delta_satang AS priceDeltaSatang FROM modifiers WHERE id = ?`
+      );
+
+      const snapshots: GuestOrderLineSnapshotDto[] = [];
+      let subtotalSatang = 0;
+
+      for (const reqLine of rawLines) {
+        const variantId = sanitizeGuestText(reqLine.variantId, 80);
+        const qtyCount = Math.floor(Number(reqLine.quantityCount));
+        if (!variantId || !Number.isSafeInteger(qtyCount) || qtyCount < 1) {
+          throw new Error('HTTP 400 ข้อมูลจำนวนเมนูไม่ถูกต้อง');
+        }
+        if (qtyCount > qrCfg.maxQtyPerItem) {
+          throw new Error(
+            `HTTP 400 สั่งได้สูงสุด ${qrCfg.maxQtyPerItem} ที่ต่อเมนูในหนึ่งครั้ง`
+          );
+        }
+
+        const vRow = variantStmt.get(outletId, variantId) as Record<string, unknown> | undefined;
+        if (!vRow || Number(vRow.variantActive) !== 1 || Number(vRow.itemActive) !== 1) {
+          throw new Error(`HTTP 400 เมนูที่เลือกไม่พร้อมจำหน่าย (${variantId})`);
+        }
+        const catId = String(vRow.categoryId ?? '');
+        const kStation = String(vRow.kitchenStation ?? '').toUpperCase();
+        if (catId === 'CAT-RAW' || kStation === 'PREP') {
+          throw new Error('HTTP 403 ไม่อนุญาตให้สั่งรายการวัตถุดิบหลังร้าน');
+        }
+
+        const quantityMilli = qtyCount * 1_000;
+        const isComposite = Number(vRow.isComposite) === 1;
+        const inStockMilli = Number(vRow.inStockMilli ?? 0);
+        if (!isComposite && inStockMilli < quantityMilli) {
+          throw new Error(`HTTP 409 สินค้า "${String(vRow.itemName)}" คงเหลือไม่เพียงพอ`);
+        }
+
+        const uniqueModIds = Array.from(
+          new Set(
+            (Array.isArray(reqLine.selectedModifierIds) ? reqLine.selectedModifierIds : [])
+              .map((id) => sanitizeGuestText(id, 80))
+              .filter(Boolean)
+          )
+        );
+        const modNames: string[] = [];
+        const modDeltas: Satang[] = [];
+        for (const modId of uniqueModIds) {
+          const mRow = modifierStmt.get(modId) as
+            | { id: string; name: string; priceDeltaSatang: number }
+            | undefined;
+          if (!mRow) {
+            throw new Error(`HTTP 400 ไม่พบตัวเลือกเสริมที่เลือก (${modId})`);
+          }
+          modNames.push(String(mRow.name));
+          modDeltas.push(Number(mRow.priceDeltaSatang));
+        }
+
+        const unitPriceSatang = Number(vRow.priceSatang);
+        const calc = computeGuestOrderLineSatang({
+          quantityMilli,
+          unitPriceSatang,
+          modifierPriceDeltasSatang: modDeltas,
+        });
+        subtotalSatang += calc.lineTotalSatang;
+
+        snapshots.push({
+          variantId,
+          itemName: String(vRow.itemName),
+          variantName: String(vRow.variantName ?? ''),
+          sku: String(vRow.sku),
+          unitName: String(vRow.unitName ?? 'ชิ้น'),
+          quantityMilli,
+          unitPriceSatang,
+          modifiersTotalSatang: calc.modifiersTotalSatang,
+          lineTotalSatang: calc.lineTotalSatang,
+          selectedModifierIds: uniqueModIds,
+          modifierNames: modNames,
+          note: sanitizeGuestText(reqLine.note ?? '', 120),
+        });
+      }
+
+      const financials = computeOrderFinancialTotals({
+        subtotalSatang,
+        discountSatang: 0,
+        vatRateBps: fiscal.vatRateBps,
+        taxMode: fiscal.defaultTaxMode,
+        currencyCode: fiscal.currencyCode,
+        applyCashRounding: false,
+        cashRoundingStepMajor: 0,
+      });
+
+      const existingOrders = this.readGuestOrdersOnDb(db, outletId);
+      let maxOrderNum = existingOrders.length;
+      for (const ord of existingOrders) {
+        const m = /^QR-(\d+)$/.exec(ord.orderCode);
+        if (m?.[1]) {
+          const n = Number(m[1]);
+          if (Number.isSafeInteger(n) && n > maxOrderNum) {
+            maxOrderNum = n;
+          }
+        }
+      }
+      const orderCode = `QR-${String(maxOrderNum + 1).padStart(3, '0')}`;
+      const nowIso = new Date().toISOString();
+
+      const record: GuestOrderRecordDto = {
+        id: `GORD-${randomUUID()}`,
+        orderCode,
+        outletId,
+        tableLabel: canonicalTable,
+        orderType,
+        customerName: sanitizeGuestText(input.customerName ?? '', 50),
+        customerNote: sanitizeGuestText(input.customerNote ?? '', 160),
+        isSignedTableSession,
+        tableSessionNonce,
+        status: 'PENDING_CONFIRM',
+        lines: snapshots,
+        subtotalSatang,
+        estimatedTotalSatang: financials.totalSatang,
+        heldBillId: null,
+        kdsSalesOrderId: null,
+        kdsSequenceIds: [],
+        acceptedByName: null,
+        acceptedAtIso: null,
+        rejectionReason: null,
+        createdAtIso: nowIso,
+        updatedAtIso: nowIso,
+      };
+
+      // Auto-Accept ONLY when store enabled AUTO_ACCEPT_SIGNED_TABLE AND guest has valid HMAC-signed Table QR
+      if (qrCfg.approvalMode === 'AUTO_ACCEPT_SIGNED_TABLE' && isSignedTableSession) {
+        const heldBillId = this.mergeGuestOrderIntoHeldBillOnDb(
+          db,
+          outletId,
+          record,
+          fiscal,
+          'USR-OWNER-01',
+          'Auto-QR'
+        );
+        const kdsRes = this.dispatchGuestOrderToKdsOnDb(db, outletId, record, 'USR-OWNER-01');
+        record.status = 'ACCEPTED';
+        record.heldBillId = heldBillId;
+        record.kdsSalesOrderId = kdsRes.kdsSalesOrderId;
+        record.kdsSequenceIds = kdsRes.kdsSequenceIds;
+        record.acceptedByName = 'Auto-Accept (Signed QR)';
+        record.acceptedAtIso = nowIso;
+      }
+
+      this.writeGuestOrdersOnDb(db, outletId, [record, ...existingOrders], 'GUEST-QR');
+      return record;
+    });
+  }
+
+  public listGuestOrders(outletId = 'OUTLET-HQ'): GuestOrderRecordDto[] {
+    return this.executeRead((db) => {
+      const orders = this.readGuestOrdersOnDb(db, outletId);
+      return orders.map((ord) => this.hydrateGuestOrderKdsStatusOnDb(db, ord));
+    });
+  }
+
+  public getGuestOrderStatusById(
+    outletId: string,
+    guestOrderId: string
+  ): GuestOrderRecordDto | null {
+    return this.executeRead((db) => {
+      const orders = this.readGuestOrdersOnDb(db, outletId);
+      const found = orders.find((o) => o.id === guestOrderId);
+      return found ? this.hydrateGuestOrderKdsStatusOnDb(db, found) : null;
+    });
+  }
+
+  public async acceptGuestOrderToHeldBillAndKds(input: {
+    outletId?: string | undefined;
+    guestOrderId: string;
+    actorUserId?: string | undefined;
+    actorDisplayName?: string | undefined;
+  }): Promise<{ order: GuestOrderRecordDto; heldBillId: string; kdsSequenceIds: number[] }> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const actorUserId = input.actorUserId ?? 'USR-CASHIER-01';
+    const actorDisplayName = sanitizeGuestText(input.actorDisplayName ?? 'Cashier', 60) || 'Cashier';
+
+    return this.executeWriteImmediate((db) => {
+      const orders = this.readGuestOrdersOnDb(db, outletId);
+      const idx = orders.findIndex((o) => o.id === input.guestOrderId);
+      if (idx < 0) {
+        throw new Error('HTTP 404 ไม่พบออเดอร์ QR ที่ระบุ');
+      }
+      const target = orders[idx]!;
+      if (target.status !== 'PENDING_CONFIRM') {
+        throw new Error(
+          `HTTP 409 ออเดอร์ ${target.orderCode} ถูกดำเนินการไปแล้ว (สถานะ: ${target.status})`
+        );
+      }
+
+      const fiscal = this.getFiscalConfigOnDb(db);
+      const heldBillId = this.mergeGuestOrderIntoHeldBillOnDb(
+        db,
+        outletId,
+        target,
+        fiscal,
+        actorUserId,
+        actorDisplayName
+      );
+      const kdsRes = this.dispatchGuestOrderToKdsOnDb(db, outletId, target, actorUserId);
+
+      const nowIso = new Date().toISOString();
+      const updated: GuestOrderRecordDto = {
+        ...target,
+        status: 'ACCEPTED',
+        heldBillId,
+        kdsSalesOrderId: kdsRes.kdsSalesOrderId,
+        kdsSequenceIds: kdsRes.kdsSequenceIds,
+        acceptedByName: actorDisplayName,
+        acceptedAtIso: nowIso,
+        updatedAtIso: nowIso,
+      };
+      orders[idx] = updated;
+      this.writeGuestOrdersOnDb(db, outletId, orders, actorUserId);
+      return {
+        order: updated,
+        heldBillId,
+        kdsSequenceIds: kdsRes.kdsSequenceIds,
+      };
+    });
+  }
+
+  public async rejectGuestOrder(input: {
+    outletId?: string | undefined;
+    guestOrderId: string;
+    reason: string;
+    actorUserId?: string | undefined;
+    actorDisplayName?: string | undefined;
+  }): Promise<GuestOrderRecordDto> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const actorUserId = input.actorUserId ?? 'USR-CASHIER-01';
+    const cleanReason =
+      sanitizeGuestText(input.reason, 160) || 'ร้านไม่สามารถรับออเดอร์รายการนี้ได้ในขณะนี้';
+
+    return this.executeWriteImmediate((db) => {
+      const orders = this.readGuestOrdersOnDb(db, outletId);
+      const idx = orders.findIndex((o) => o.id === input.guestOrderId);
+      if (idx < 0) {
+        throw new Error('HTTP 404 ไม่พบออเดอร์ QR ที่ระบุ');
+      }
+      const target = orders[idx]!;
+      if (target.status !== 'PENDING_CONFIRM') {
+        throw new Error(
+          `HTTP 409 ออเดอร์ ${target.orderCode} ถูกดำเนินการไปแล้ว (สถานะ: ${target.status})`
+        );
+      }
+      const nowIso = new Date().toISOString();
+      const updated: GuestOrderRecordDto = {
+        ...target,
+        status: 'REJECTED',
+        rejectionReason: cleanReason,
+        updatedAtIso: nowIso,
+      };
+      orders[idx] = updated;
+      this.writeGuestOrdersOnDb(db, outletId, orders, actorUserId);
+      return updated;
+    });
+  }
 }
 
 export interface FirstRunOnboardingInput {
   businessProfile: BusinessProfile;
+  countryCode?: CountryCode | undefined;
+  uiLocale?: LocaleCode | undefined;
+  receiptLocale?: LocaleCode | undefined;
+  vatRateBps?: BasisPoints | undefined;
+  defaultTaxMode?: TaxMode | undefined;
+  cashRoundingStepMajor?: CashRoundingStepMajor | undefined;
+  scalePriceEmbeddedMultiplier?: number | undefined;
   storeName: string;
+  storeAddress?: string | undefined;
   taxId: string;
   branchCode: string;
   rdPosRegNo: string;
   promptPayId: string;
+  laoQrStaticTemplate?: string | undefined;
+  laoQrVerificationPolicy?: LaoQrVerificationPolicy | undefined;
+  fxRates?: Partial<FxRatesConfigDto> | undefined;
   ownerDisplayName: string;
   ownerUsername?: string | undefined;
   ownerPin: string;
@@ -5772,11 +7501,13 @@ export interface StoreIdentitySettingsDto {
   outletId: string;
   outletCode: string;
   storeName: string;
+  storeAddress?: string | undefined;
   taxId: string;
   branchCode: string;
   rdPosRegNo: string;
   promptPayId: string;
   businessProfile: BusinessProfile;
+  fiscalConfig?: FiscalConfigDto | undefined;
 }
 
 export interface OutletDto {
@@ -5862,6 +7593,7 @@ export interface SalesOrderHistoryDto {
   taxMode: TaxMode;
   subtotalSatang: Satang;
   discountSatang: Satang;
+  cashRoundingDiscountSatang?: Satang | undefined;
   netBeforeTaxSatang: Satang;
   taxSatang: Satang;
   totalSatang: Satang;
@@ -5878,6 +7610,7 @@ export interface SalesOrderHistoryDto {
   }>;
   cashTenderedSatang: Satang | null;
   changeGivenSatang: Satang | null;
+  fxTender?: FxCashTenderDetailDto | null | undefined;
   senderBankCode: string | null;
   slipTransRefLast4: string | null;
   voidReason: string | null;

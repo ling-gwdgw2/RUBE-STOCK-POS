@@ -367,20 +367,35 @@ export class LocalIpcBridge {
     return this.engine.upsertStaffUser(input);
   }
 
+  public getFiscalConfig() {
+    this.totalReadsRouted++;
+    return this.engine.getFiscalConfig();
+  }
+
+  public async updateFiscalConfig(
+    input: Parameters<SqliteReadWritePoolEngine['updateFiscalConfig']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.updateFiscalConfig(input);
+  }
+
+  public async updateUiLocale(
+    input: Parameters<SqliteReadWritePoolEngine['updateUiLocale']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.updateUiLocale(input);
+  }
+
   public getStoreIdentitySettings(outletId = 'OUTLET-HQ'): StoreIdentitySettingsDto {
     this.totalReadsRouted++;
     return this.engine.getStoreIdentitySettings(outletId);
   }
 
-  public async updateStoreIdentitySettings(input: {
-    outletId?: string | undefined;
-    storeName: string;
-    taxId: string;
-    branchCode: string;
-    rdPosRegNo: string;
-    promptPayId: string;
-    updatedByUserId?: string | undefined;
-  }): Promise<StoreIdentitySettingsDto> {
+  public async updateStoreIdentitySettings(
+    input: Parameters<SqliteReadWritePoolEngine['updateStoreIdentitySettings']>[0]
+  ): Promise<StoreIdentitySettingsDto> {
     this.assertNotQuarantined();
     this.totalWritesRouted++;
     return this.engine.updateStoreIdentitySettings(input);
@@ -564,5 +579,78 @@ export class LocalIpcBridge {
     this.assertNotQuarantined();
     this.totalWritesRouted++;
     return this.engine.initializeFirstRunOnboarding(input);
+  }
+
+  public getQrOrderingConfig() {
+    this.totalReadsRouted++;
+    return this.engine.getQrOrderingConfig();
+  }
+
+  public async updateQrOrderingConfig(
+    input: Parameters<SqliteReadWritePoolEngine['updateQrOrderingConfig']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.updateQrOrderingConfig(input);
+  }
+
+  public async openTableQrSession(
+    input: Parameters<SqliteReadWritePoolEngine['openTableQrSession']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.openTableQrSession(input);
+  }
+
+  public listTableQrSessions(outletId = 'OUTLET-HQ', baseUrl?: string) {
+    this.totalReadsRouted++;
+    return this.engine.listTableQrSessions(outletId, baseUrl);
+  }
+
+  public async revokeTableQrSession(
+    input: Parameters<SqliteReadWritePoolEngine['revokeTableQrSession']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.revokeTableQrSession(input);
+  }
+
+  public verifyTableQrToken(outletId: string, tableLabel: string, rawToken: string) {
+    this.totalReadsRouted++;
+    return this.engine.verifyTableQrToken(outletId, tableLabel, rawToken);
+  }
+
+  public async submitGuestOrder(
+    input: Parameters<SqliteReadWritePoolEngine['submitGuestOrder']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.submitGuestOrder(input);
+  }
+
+  public listGuestOrders(outletId = 'OUTLET-HQ') {
+    this.totalReadsRouted++;
+    return this.engine.listGuestOrders(outletId);
+  }
+
+  public getGuestOrderStatusById(outletId: string, guestOrderId: string) {
+    this.totalReadsRouted++;
+    return this.engine.getGuestOrderStatusById(outletId, guestOrderId);
+  }
+
+  public async acceptGuestOrderToHeldBillAndKds(
+    input: Parameters<SqliteReadWritePoolEngine['acceptGuestOrderToHeldBillAndKds']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.acceptGuestOrderToHeldBillAndKds(input);
+  }
+
+  public async rejectGuestOrder(
+    input: Parameters<SqliteReadWritePoolEngine['rejectGuestOrder']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.rejectGuestOrder(input);
   }
 }

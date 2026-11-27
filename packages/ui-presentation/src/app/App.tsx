@@ -4,6 +4,7 @@ import {
   Building2,
   CheckCircle2,
   Cpu,
+  Globe,
   Lock,
   Printer,
   RefreshCw,
@@ -13,11 +14,14 @@ import {
   XCircle,
 } from 'lucide-react';
 import { parseScaleBarcodeEan13 } from '../../../hal-drivers/src/scanner/mod.ts';
+import { formatMilliUnitsToQtyString } from '../../../shared-contracts/src/fixed-point.ts';
 import {
-  formatMilliUnitsToQtyString,
-  formatSatangToThbString,
-} from '../../../shared-contracts/src/fixed-point.ts';
+  DEFAULT_TH_FISCAL_CONFIG,
+  formatMoney,
+  type LocaleCode,
+} from '../../../shared-contracts/src/currency.ts';
 import { posTransport, setPosSessionToken } from './api/pos-transport.ts';
+import { I18nProvider, pickLocaleText, translateKey } from './i18n/index.tsx';
 import { BomStudioWorkspace } from './components/BomStudioWorkspace.tsx';
 import { FirstRunWizardModal } from './components/FirstRunWizardModal.tsx';
 import { HilSimulatorDrawer } from './components/HilSimulatorDrawer.tsx';
@@ -152,6 +156,7 @@ export const App: React.FC = () => {
   const [isTerminalLocked, setIsTerminalLocked] = useState<boolean>(true);
   const [pinModalOpen, setPinModalOpen] = useState<boolean>(false);
   const [hilDrawerOpen, setHilDrawerOpen] = useState<boolean>(false);
+  const [overrideLocale, setOverrideLocale] = useState<LocaleCode | undefined>(undefined);
 
   const [simulationModeEnabled, setSimulationModeEnabled] = useState<boolean>(() => {
     try {
@@ -400,8 +405,11 @@ export const App: React.FC = () => {
       const mult = Math.max(1, multiplierCount);
 
       // 1. Supermarket Scale Barcode (Prefix 20-29)
+      const activeFiscal = bootstrap.fiscalConfig ?? DEFAULT_TH_FISCAL_CONFIG;
       if (bootstrap.featureFlags.enableScaleBarcodeParser && /^\d{13}$/.test(trimmed)) {
-        const prefixCheck = parseScaleBarcodeEan13(trimmed);
+        const prefixCheck = parseScaleBarcodeEan13(trimmed, undefined, {
+          priceEmbeddedMultiplier: activeFiscal.scalePriceEmbeddedMultiplier,
+        });
         if (prefixCheck.isScaleBarcode && prefixCheck.sku) {
           const matchedScaleItem = bootstrap.catalogDetailed.find(
             (v) =>
@@ -411,20 +419,27 @@ export const App: React.FC = () => {
           if (matchedScaleItem) {
             if (!matchedScaleItem.active) {
               pushToast(
-                `รายการ "${matchedScaleItem.itemName}" ถูกพักการขายชั่วคราว — ไม่สามารถเพิ่มลงบิลได้`,
+                pickLocaleText(
+                  overrideLocale ?? activeFiscal.uiLocale,
+                  `รายการ "${matchedScaleItem.itemName}" ถูกพักการขายชั่วคราว — ไม่สามารถเพิ่มลงบิลได้`,
+                  `ລາຍການ "${matchedScaleItem.itemName}" ຖືກພັກການຂາຍຊົ່ວຄາວ`,
+                  `Item "${matchedScaleItem.itemName}" is currently paused`
+                ),
                 'warn'
               );
               return;
             }
-            const fullParsed = parseScaleBarcodeEan13(trimmed, matchedScaleItem.priceSatang);
+            const fullParsed = parseScaleBarcodeEan13(trimmed, matchedScaleItem.priceSatang, {
+              priceEmbeddedMultiplier: activeFiscal.scalePriceEmbeddedMultiplier,
+            });
             const qtyMilli =
               fullParsed.mode === 'WEIGHT_EMBEDDED'
                 ? (fullParsed.weightMilliKg ?? 1_000)
                 : (fullParsed.computedWeightMilliFromPrice ?? 1_000);
             const badge =
               fullParsed.mode === 'WEIGHT_EMBEDDED'
-                ? `ตราชั่ง Prefix ${fullParsed.prefix} · น้ำหนัก ${formatMilliUnitsToQtyString(qtyMilli, matchedScaleItem.unitName)}`
-                : `ป้ายฝังราคา Prefix ${fullParsed.prefix} · ฿${formatSatangToThbString(fullParsed.totalPriceSatang ?? 0)}`;
+                ? `Prefix ${fullParsed.prefix} · ${formatMilliUnitsToQtyString(qtyMilli, matchedScaleItem.unitName)}`
+                : `Prefix ${fullParsed.prefix} · ${formatMoney(fullParsed.totalPriceSatang ?? 0, activeFiscal.currencyCode)}`;
             const overrideLineTotalSatang =
               fullParsed.mode === 'PRICE_EMBEDDED' && fullParsed.totalPriceSatang !== undefined
                 ? fullParsed.totalPriceSatang
@@ -636,35 +651,65 @@ export const App: React.FC = () => {
     );
   }
 
+  const activeFiscalConfig = bootstrap.fiscalConfig ?? DEFAULT_TH_FISCAL_CONFIG;
+  const activeUiLocale: LocaleCode = overrideLocale ?? activeFiscalConfig.uiLocale;
+
+  const handleChangeUiLocale = async (nextLocale: LocaleCode) => {
+    setOverrideLocale(nextLocale);
+    try {
+      if (bootstrap.onboarded && !isTerminalLocked) {
+        await posTransport.updateUiLocale({ uiLocale: nextLocale });
+        await refreshBootstrap();
+      }
+    } catch {
+      // Keep local override active even if server session is locked
+    }
+  };
+
   if (!bootstrap.onboarded) {
     return (
-      <FirstRunWizardModal
-        open={true}
-        isPreviewMode={Boolean(bootstrap.isPreviewWizard)}
-        initialStoreSettings={bootstrap.storeSettings}
-        initialPrinterConfig={bootstrap.printerConfig}
-        onCompleted={async (ownerUser) => {
-          bootstrapSeqRef.current += 1;
-          currentUserRef.current = ownerUser;
-          try {
-            window.sessionStorage.setItem(ACTIVE_SESSION_USER_STORAGE_KEY, ownerUser.id);
-          } catch {
-            // ignore
+      <I18nProvider
+        fiscalConfig={activeFiscalConfig}
+        overrideLocale={overrideLocale}
+        onChangeLocale={handleChangeUiLocale}
+      >
+        <FirstRunWizardModal
+          open={true}
+          isPreviewMode={Boolean(bootstrap.isPreviewWizard)}
+          initialStoreSettings={bootstrap.storeSettings}
+          initialPrinterConfig={bootstrap.printerConfig}
+          onCompleted={async (ownerUser) => {
+            bootstrapSeqRef.current += 1;
+            currentUserRef.current = ownerUser;
+            setOverrideLocale(undefined);
+            try {
+              window.sessionStorage.setItem(ACTIVE_SESSION_USER_STORAGE_KEY, ownerUser.id);
+            } catch {
+              // ignore
+            }
+            await refreshBootstrap();
+            setCurrentUser(ownerUser);
+            setIsTerminalLocked(false);
+            pushToast(
+              pickLocaleText(
+                activeUiLocale,
+                'ตั้งค่าเครื่องจุดขายเสร็จสมบูรณ์ พร้อมใช้งานจริง!',
+                'ຕັ້ງຄ່າເຄື່ອງ POS ສຳເລັດແລ້ວ ພ້ອມໃຊ້ງານຈິງ!',
+                'POS setup completed and ready for production!'
+              ),
+              'success'
+            );
+          }}
+          onCancelPreview={
+            bootstrap.isPreviewWizard || bootstrap.staffUsers.length > 0
+              ? async () => {
+                  await posTransport.setPreviewFirstRunWizard(false);
+                  await refreshBootstrap();
+                }
+              : undefined
           }
-          await refreshBootstrap();
-          setCurrentUser(ownerUser);
-          setIsTerminalLocked(false);
-          pushToast('ตั้งค่าเครื่องจุดขายเสร็จสมบูรณ์ พร้อมใช้งานจริง!', 'success');
-        }}
-        onCancelPreview={
-          bootstrap.isPreviewWizard || bootstrap.staffUsers.length > 0
-            ? async () => {
-                await posTransport.setPreviewFirstRunWizard(false);
-                await refreshBootstrap();
-              }
-            : undefined
-        }
-      />
+        />
+      </I18nProvider>
     );
   }
 
@@ -676,6 +721,7 @@ export const App: React.FC = () => {
     !isTerminalLocked &&
     (activeUser.role === 'OWNER' || activeUser.role === 'MANAGER' || activeUser.role === 'WAREHOUSE');
   const isBackgroundInert = isTerminalLocked || pinModalOpen || hilDrawerOpen;
+  const tNav = (key: Parameters<typeof translateKey>[0]) => translateKey(key, activeUiLocale);
 
   const navItems: Array<{
     id: WorkspaceTabId;
@@ -685,13 +731,13 @@ export const App: React.FC = () => {
   }> = [
     {
       id: 'POS',
-      label: 'หน้าขาย POS',
+      label: tNav('nav.pos'),
       badge: !isTerminalLocked && cart.length > 0 ? cart.length : undefined,
       hidden: !allowedTabs.includes('POS'),
     },
     {
       id: 'KDS',
-      label: 'จอครัว KDS',
+      label: tNav('nav.kds'),
       badge:
         !isTerminalLocked && bootstrap.kdsTickets.length > 0
           ? bootstrap.kdsTickets.length
@@ -700,27 +746,32 @@ export const App: React.FC = () => {
     },
     {
       id: 'WAREHOUSE',
-      label: 'คลังสินค้า & PO',
+      label: tNav('nav.warehouse'),
       hidden: !allowedTabs.includes('WAREHOUSE'),
     },
     {
       id: 'BOM',
-      label: 'สูตร BOM',
+      label: tNav('nav.bom'),
       hidden: !allowedTabs.includes('BOM'),
     },
     {
       id: 'SHIFTS_REPORTS',
-      label: 'ปิดกะ & รายงาน',
+      label: tNav('nav.shifts'),
       hidden: !allowedTabs.includes('SHIFTS_REPORTS'),
     },
     {
       id: 'SETTINGS',
-      label: 'ตั้งค่าระบบ',
+      label: tNav('nav.settings'),
       hidden: !allowedTabs.includes('SETTINGS'),
     },
   ];
 
   return (
+    <I18nProvider
+      fiscalConfig={activeFiscalConfig}
+      overrideLocale={overrideLocale}
+      onChangeLocale={handleChangeUiLocale}
+    >
     <div className="min-h-screen flex flex-col bg-canvas text-ink">
       {/* Sticky Top Chrome Wrapper (keeps UPS Power-Loss Banner + Top Nav visible without hiding content) */}
       <div className="sticky top-0 z-30" inert={isBackgroundInert ? true : undefined}>
@@ -751,7 +802,8 @@ export const App: React.FC = () => {
                   RUBE POS
                 </div>
                 <div className="text-[11px] text-ink-muted leading-none">
-                  {getProfileMeta(bootstrap.profile).shortBadge}
+                  {getProfileMeta(bootstrap.profile).shortBadge} · {activeFiscalConfig.countryCode}{' '}
+                  {activeFiscalConfig.currencySymbol}
                 </div>
               </div>
             </button>
@@ -791,6 +843,21 @@ export const App: React.FC = () => {
 
           {/* Right-Aligned Hairline Pill Controls */}
           <div className="flex items-center gap-2 shrink-0">
+            {/* Quick Offline Language Switcher (`ລາວ` / `ไทย` / `EN`) */}
+            <div className="hidden sm:flex h-10 items-center gap-1 rounded-[48px] border border-hairline bg-canvas pl-2.5 pr-2 text-xs text-ink">
+              <Globe className="h-3.5 w-3.5 text-primary shrink-0" aria-hidden="true" />
+              <select
+                aria-label="Language"
+                value={activeUiLocale}
+                onChange={(e) => void handleChangeUiLocale(e.target.value as LocaleCode)}
+                className="bg-transparent font-google-display text-xs font-medium text-ink focus:outline-none cursor-pointer"
+              >
+                <option value="lo">ລາວ</option>
+                <option value="th">ไทย</option>
+                <option value="en">EN</option>
+              </select>
+            </div>
+
             {/* Multi-Outlet Branch Selector Pill (rendered automatically when >= 2 outlets exist) */}
             {bootstrap.outlets.length > 1 && (
               <div className="hidden lg:flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas pl-3 pr-2 text-xs text-ink">
@@ -843,11 +910,11 @@ export const App: React.FC = () => {
                 <span>{bootstrap.activeShift.shiftNumber}</span>
                 {showExpectedDrawerInHeader ? (
                   <strong className="font-medium text-ink tabular-nums-google">
-                    · ฿{formatSatangToThbString(bootstrap.activeShift.expectedCashSatang)}
+                    · {formatMoney(bootstrap.activeShift.expectedCashSatang, activeFiscalConfig.currencyCode)}
                   </strong>
                 ) : (
                   <span className="rounded-[48px] bg-surface-1 px-2 py-0.5 text-[11px] text-ink-muted">
-                    กะเปิดอยู่
+                    {pickLocaleText(activeUiLocale, 'กะเปิดอยู่', 'ກະເປີດຢູ່', 'Shift Open')}
                   </span>
                 )}
               </button>
@@ -1041,25 +1108,31 @@ export const App: React.FC = () => {
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-4">
             <span className="font-medium text-ink">{bootstrap.storeSettings.storeName}</span>
-            <span>สาขา {bootstrap.storeSettings.outletCode} ({bootstrap.storeSettings.branchCode})</span>
-            <span>เลขผู้เสียภาษี {bootstrap.storeSettings.taxId}</span>
+            <span>
+              {activeFiscalConfig.countryCode === 'LA'
+                ? `LA · ${activeFiscalConfig.currencyCode} (${activeFiscalConfig.currencySymbol})`
+                : `สาขา ${bootstrap.storeSettings.outletCode} (${bootstrap.storeSettings.branchCode})`}
+            </span>
+            <span>
+              {activeFiscalConfig.countryCode === 'LA'
+                ? tNav('nav.taxIdPrefix.LA')
+                : tNav('nav.taxIdPrefix.TH')}{' '}
+              {bootstrap.storeSettings.taxId || '-'}
+            </span>
             <span className="inline-flex items-center gap-1 text-ink-soft">
               <ShieldCheck className="h-3.5 w-3.5 text-primary" />
-              Ledger Invariant:{' '}
-              {bootstrap.ledgerInvariant.valid ? '100% ตรงตามสมการบัญชี' : 'ตรวจสอบพบความต่าง'}
+              {bootstrap.ledgerInvariant.valid ? tNav('nav.ledgerOk') : tNav('nav.ledgerErr')}
             </span>
             <span className="inline-flex items-center gap-1 text-ink-soft">
               <Printer className="h-3.5 w-3.5 text-primary" />
-              เครื่องพิมพ์ ({bootstrap.printerConfig.paperWidthMm}mm):{' '}
+              {tNav('nav.printerLabel')} ({bootstrap.printerConfig.paperWidthMm}mm):{' '}
               {bootstrap.printer.ready
-                ? 'พร้อมใช้งาน'
-                : `ค้างคิว ${bootstrap.printer.pendingQueueLength} ใบ`}
+                ? tNav('nav.printerReady')
+                : `${tNav('nav.printerOffline')} (${bootstrap.printer.pendingQueueLength})`}
             </span>
           </div>
           {allowedTabs.includes('POS') && (
-            <div className="hidden lg:block text-ink-muted">
-              คีย์ลัด: F2 ค้นหา · F4 ตัวคูณ · F8 พักบิล · F9 ส่วนลด · F10 แยกจ่าย/เลือกชำระ · F12 รับเงินสดด่วน
-            </div>
+            <div className="hidden lg:block text-ink-muted">{tNav('nav.shortcuts')}</div>
           )}
         </div>
       </footer>
@@ -1134,5 +1207,6 @@ export const App: React.FC = () => {
         ))}
       </div>
     </div>
+    </I18nProvider>
   );
 };

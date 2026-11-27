@@ -84,6 +84,7 @@ export interface SplitPaymentLegInput {
   amountSatang: Satang;
   cashTenderedSatang?: Satang | undefined;
   slipTransRefRaw?: string | undefined;
+  slipSenderBankCode?: string | undefined;
 }
 
 export interface CheckoutOrderRequest {
@@ -98,8 +99,16 @@ export interface CheckoutOrderRequest {
   discountSatang: Satang;
   paymentMethod: 'CASH' | 'PROMPTPAY_QR' | 'CARD' | 'VOUCHER';
   cashTenderedSatang?: Satang | undefined;
+  foreignTenderCurrency?: 'THB' | 'USD' | undefined;
+  foreignTenderAmountSatang?: Satang | undefined;
   slipTransRefRaw?: string | undefined;
+  slipSenderBankCode?: string | undefined;
   splitPayments?: ReadonlyArray<SplitPaymentLegInput> | undefined;
+  /**
+   * When true, skips creating new `kitchen_orders` rows at checkout because items
+   * were already dispatched to KDS when a QR Table Order was accepted.
+   */
+  skipKdsEnqueue?: boolean | undefined;
   lines: ReadonlyArray<{
     variantId: string;
     quantityMilli: MilliUnit;

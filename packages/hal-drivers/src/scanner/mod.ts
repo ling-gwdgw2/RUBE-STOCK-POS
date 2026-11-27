@@ -138,12 +138,14 @@ export function verifyEan13CheckDigit(barcode13: string): boolean {
 /**
  * Parses 13-digit EAN-13 Supermarket Scale Barcodes (`PP IIIII VVVVV C`):
  * - Prefix `20`–`24`: `VVVVV` is Weight in Grams (`Milli-Kilograms`, e.g., `01250` = 1.250 kg)
- * - Prefix `25`–`29`: `VVVVV` is Total Sticker Price in Satang (or Baht*100), computing weight from `unitPriceSatangPerKg`
+ * - Prefix `25`–`29`: `VVVVV` is Total Sticker Price scaled by `priceEmbeddedMultiplier` minor units
+ *   - Thailand (`THB`, default multiplier `1`): `22500` = `22,500` satang (`฿225.00`)
+ *   - Laos (`LAK`, e.g. multiplier `10_000` = 100 LAK per unit): `01500` = `15,000,000` minor (`150,000 ₭`)
  */
 export function parseScaleBarcodeEan13(
   barcode: string,
   unitPriceSatangPerKg?: Satang,
-  options?: { enforceCheckDigit?: boolean }
+  options?: { enforceCheckDigit?: boolean; priceEmbeddedMultiplier?: number }
 ): ParsedScaleBarcode {
   if (!/^\d{13}$/.test(barcode)) {
     return { isScaleBarcode: false };
@@ -174,8 +176,14 @@ export function parseScaleBarcodeEan13(
     };
   }
 
-  // Prefix 25-29: Price-Embedded (embeddedValue in Satang, e.g., 22500 = 225.00 THB)
-  const totalPriceSatang = embeddedValue;
+  // Prefix 25-29: Price-Embedded
+  const multiplier =
+    options?.priceEmbeddedMultiplier &&
+    Number.isSafeInteger(options.priceEmbeddedMultiplier) &&
+    options.priceEmbeddedMultiplier > 0
+      ? options.priceEmbeddedMultiplier
+      : 1;
+  const totalPriceSatang = embeddedValue * multiplier;
   const computedWeightMilliFromPrice =
     unitPriceSatangPerKg && unitPriceSatangPerKg > 0
       ? roundDiv(BigInt(totalPriceSatang) * 1_000n, BigInt(unitPriceSatangPerKg))

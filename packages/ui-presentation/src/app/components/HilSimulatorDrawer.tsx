@@ -11,6 +11,7 @@ import {
   ZapOff,
 } from 'lucide-react';
 import { posTransport } from '../api/pos-transport.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type { BootstrapPayload, PrintedReceiptPreview } from '../types.ts';
 import {
   getModalZIndex,
@@ -48,6 +49,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
   const modalId = modalIdRef.current;
 
   const uid = useId();
+  const { countryCode } = useI18n();
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const prevFocusRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
@@ -234,11 +236,18 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
               <span className="text-xs text-ink-muted shrink-0">&lt; 50ms KeyCode</span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              {[
-                { title: 'น้ำดื่ม 600ml', code: '8851952350161' },
-                { title: 'หมูสามชั้น 1.50 กก.', code: '2010045015004' },
-                { title: 'หมูสามชั้น ฿225', code: '2510045225009' },
-              ].map((preset) => (
+              {(countryCode === 'LA'
+                ? [
+                    { title: 'ນ້ຳດື່ມ 600ml', code: '8851952350161' },
+                    { title: 'ຊີ້ນໝູສາມຊັ້ນ 1.50 ກກ.', code: '2010045015004' },
+                    { title: 'ຊີ້ນໝູສາມຊັ້ນ 150,000 ₭', code: '2510045015009' },
+                  ]
+                : [
+                    { title: 'น้ำดื่ม 600ml', code: '8851952350161' },
+                    { title: 'หมูสามชั้น 1.50 กก.', code: '2010045015004' },
+                    { title: 'หมูสามชั้น ฿225', code: '2510045225009' },
+                  ]
+              ).map((preset) => (
                 <button
                   key={preset.code}
                   type="button"

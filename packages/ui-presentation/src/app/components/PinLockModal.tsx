@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Delete, KeyRound, Lock, ShieldCheck, UserCheck, X } from 'lucide-react';
 import { posTransport } from '../api/pos-transport.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type { StaffUserDto } from '../types.ts';
 import { resolveDigitFromKeyboardEvent } from '../utils/keyboard-digits.ts';
 import { ModalDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
@@ -31,6 +32,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
   onAuthenticated,
   onClose,
 }) => {
+  const { t, pick } = useI18n();
   const uid = useId();
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [selectedUserId, setSelectedUserId] = useState<string>(
@@ -59,7 +61,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
       const code = overridePin ?? pin;
       const targetUserId = overrideUserId !== undefined ? overrideUserId : selectedUserId;
       if (code.length < 4) {
-        setErrorMsg('กรุณากรอกรหัส PIN อย่างน้อย 4 หลัก');
+        setErrorMsg(t('pin.minDigitsErr'));
         return;
       }
       setSubmitting(true);
@@ -132,12 +134,14 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
               id={`${uid}-pin-title`}
               className="font-google-display text-[20px] font-normal text-ink"
             >
-              {canDismiss ? 'สลับผู้ใช้งานประจำเครื่อง' : 'หน้าจอล็อกเครื่องจุดขาย (PIN Lock)'}
+              {canDismiss
+                ? pick('สลับผู้ใช้งานประจำเครื่อง', 'ປ່ຽນພະນັກງານປະຈຳເຄື່ອງ', 'Switch Terminal Staff')
+                : t('pin.title')}
             </h2>
             <p className="text-xs text-ink-muted">
               {canDismiss
-                ? 'กรอกรหัส PIN เพื่อเปลี่ยนบทบาทหรือผู้ปฏิบัติงาน'
-                : 'กรอกรหัส PIN ประจำตัวพนักงานเพื่อปลดล็อกเข้าใช้งาน'}
+                ? pick('กรอกรหัส PIN เพื่อเปลี่ยนบทบาทหรือผู้ปฏิบัติงาน', 'ປ້ອນລະຫັດ PIN ເພື່ອປ່ຽນພະນັກງານ', 'Enter PIN to switch staff or role')
+                : pick('กรอกรหัส PIN ประจำตัวพนักงานเพื่อปลดล็อกเข้าใช้งาน', 'ປ້ອນລະຫັດ PIN ພະນັກງານເພື່ອປົດລັອກ', 'Enter staff PIN to unlock terminal')}
             </p>
           </div>
         </div>

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Delete, KeyRound, RotateCcw, ShieldAlert, ShieldCheck, X } from 'lucide-react';
-import { formatSatangToThbString } from '../../../../shared-contracts/src/fixed-point.ts';
 import { posTransport } from '../api/pos-transport.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type { StaffUserDto } from '../types.ts';
 import { resolveDigitFromKeyboardEvent } from '../utils/keyboard-digits.ts';
 import { canApproveVoidWithoutOverride } from '../utils/rbac.ts';
@@ -42,6 +42,7 @@ export const VoidOrderAuthModal: React.FC<VoidOrderAuthModalProps> = ({
   onClose,
   onVoidAuthorized,
 }) => {
+  const { money, pick } = useI18n();
   const uid = useId();
   const contentRef = useRef<HTMLDivElement | null>(null);
   const requiresManagerPin = !canApproveVoidWithoutOverride(currentUser.role);
@@ -195,10 +196,11 @@ export const VoidOrderAuthModal: React.FC<VoidOrderAuthModalProps> = ({
                   id={`${uid}-void-title`}
                   className="font-google-display text-[20px] font-normal text-ink"
                 >
-                  อนุมัติยกเลิกบิล {order.receiptNumber}
+                  {pick('อนุมัติยกเลิกบิล', 'ອະນຸມັດຍົກເລີກບິນ', 'Approve Void Order')} {order.receiptNumber}
                 </h2>
                 <p className="text-xs text-ink-muted tabular-nums-google">
-                  ยอดสุทธิ ฿{formatSatangToThbString(order.totalSatang)} · คืนสต็อกตามต้นทุนเดิม ณ เวลาขาย
+                  {pick('ยอดสุทธิ', 'ຍອດສຸດທິ', 'Net Total')} {money(order.totalSatang)} ·{' '}
+                  {pick('คืนสต็อกตามต้นทุนเดิม ณ เวลาขาย', 'ຄືນສະຕັອກຕາມຕົ້ນທຶນເດີມ', 'Restores stock at historical cost')}
                 </p>
               </div>
             </div>

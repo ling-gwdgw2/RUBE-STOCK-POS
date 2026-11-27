@@ -18,10 +18,13 @@ import {
   X,
 } from 'lucide-react';
 import {
-  formatSatangToThbString,
-  parseDecimalStringToScaledInt,
-} from '../../../../shared-contracts/src/fixed-point.ts';
+  foreignMinorToBaseLakMinor,
+  formatForeignMoney,
+  getCashDenominationsForCountry,
+} from '../../../../shared-contracts/src/currency.ts';
+import { parseDecimalStringToScaledInt } from '../../../../shared-contracts/src/fixed-point.ts';
 import { posTransport, type ReportsBundleDto } from '../api/pos-transport.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type { BootstrapPayload, StaffUserDto } from '../types.ts';
 import { downloadUtf8BomCsv } from '../utils/csv-exporter.ts';
 import { canViewCostAndMarginReports, canViewExpectedDrawerCash } from '../utils/rbac.ts';
@@ -36,25 +39,6 @@ interface ShiftAndReportsWorkspaceProps {
   onToast: (msg: string, tone?: 'success' | 'warn' | 'error') => void;
 }
 
-const THAI_DENOMINATIONS: ReadonlyArray<{
-  id: string;
-  label: string;
-  satang: number;
-  kind: 'NOTE' | 'COIN';
-}> = [
-  { id: 'B1000', label: 'แบงก์ ฿1,000', satang: 100_000, kind: 'NOTE' },
-  { id: 'B500', label: 'แบงก์ ฿500', satang: 50_000, kind: 'NOTE' },
-  { id: 'B100', label: 'แบงก์ ฿100', satang: 10_000, kind: 'NOTE' },
-  { id: 'B50', label: 'แบงก์ ฿50', satang: 5_000, kind: 'NOTE' },
-  { id: 'B20', label: 'แบงก์ ฿20', satang: 2_000, kind: 'NOTE' },
-  { id: 'C10', label: 'เหรียญ ฿10', satang: 1_000, kind: 'COIN' },
-  { id: 'C5', label: 'เหรียญ ฿5', satang: 500, kind: 'COIN' },
-  { id: 'C2', label: 'เหรียญ ฿2', satang: 200, kind: 'COIN' },
-  { id: 'C1', label: 'เหรียญ ฿1', satang: 100, kind: 'COIN' },
-  { id: 'C050', label: 'เหรียญ ฿0.50', satang: 50, kind: 'COIN' },
-  { id: 'C025', label: 'เหรียญ ฿0.25', satang: 25, kind: 'COIN' },
-];
-
 export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> = ({
   outletId = 'OUTLET-HQ',
   bootstrap,
@@ -62,6 +46,30 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
   onRefreshState,
   onToast,
 }) => {
+  const {
+    fiscal,
+    countryCode,
+    currencyCode,
+    receiptLocale,
+    vatRatePercentLabel,
+    t,
+    pick,
+    money,
+    moneyInput,
+    parseMoney,
+    dateTime,
+  } = useI18n();
+  const isLaos = countryCode === 'LA';
+  const currencyUnitLabel = isLaos ? t('currency.unit.LAK') : t('currency.unit.THB');
+  const activeDenominations = useMemo(
+    () =>
+      getCashDenominationsForCountry(countryCode).map((d) => ({
+        ...d,
+        label: `${d.kind === 'NOTE' ? t('rep.noteLabel') : t('rep.coinLabel')} ${money(d.satang)}`,
+      })),
+    [countryCode, money, t]
+  );
+
   const uid = useId();
   const showExpectedCash = canViewExpectedDrawerCash(currentUser.role);
   const showCostReports = canViewCostAndMarginReports(currentUser.role);
@@ -78,15 +86,21 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
 
   // Cash Drawer Movement Form
   const [mvType, setMvType] = useState<'PAID_IN' | 'PAID_OUT' | 'CASH_DROP'>('PAID_IN');
-  const [mvAmountBaht, setMvAmountBaht] = useState('200.00');
-  const [mvReason, setMvReason] = useState('แลกเหรียญทอนเข้าลิ้นชัก');
+  const [mvAmountBaht, setMvAmountBaht] = useState(isLaos ? '50000' : '200.00');
+  const [mvReason, setMvReason] = useState(
+    pick('แลกเหรียญทอนเข้าลิ้นชัก', 'ແລກເງິນທອນເຂົ້າລິ້ນຊັກ', 'Cash float replenishment')
+  );
 
   // True Blind Drop Shift Close (NEVER pre-filled with expectedCashSatang!)
   const [countedCashBaht, setCountedCashBaht] = useState<string>('');
   const [showDenomHelper, setShowDenomHelper] = useState<boolean>(true);
   const [denomCounts, setDenomCounts] = useState<Record<string, string>>({});
-  const [openingCashInput, setOpeningCashInput] = useState<string>('1000.00');
-  const [closeNotes, setCloseNotes] = useState('ปิดกะตรวจนับเงินสดประจำวัน');
+  const [countedForeignThbInput, setCountedForeignThbInput] = useState<string>('');
+  const [countedForeignUsdInput, setCountedForeignUsdInput] = useState<string>('');
+  const [openingCashInput, setOpeningCashInput] = useState<string>(isLaos ? '500000' : '1000.00');
+  const [closeNotes, setCloseNotes] = useState(
+    pick('ปิดกะตรวจนับเงินสดประจำวัน', 'ປິດກະກວດນັບເງິນສົດປະຈຳວັນ', 'Daily shift blind drop close')
+  );
   const [confirmCloseOpen, setConfirmCloseOpen] = useState<boolean>(false);
   const [zPrintPaperMm, setZPrintPaperMm] = useState<80 | 58>(
     bootstrap.printerConfig?.paperWidthMm === 58 ? 58 : 80
@@ -103,57 +117,123 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
   const reportsLoadSeqRef = useRef(0);
 
   useEffect(() => {
+    setOpeningCashInput(isLaos ? '500000' : '1000.00');
+    setMvAmountBaht(isLaos ? '50000' : '200.00');
+  }, [isLaos]);
+
+  useEffect(() => {
     if (!showCostReports && (reportTab === 'VALUATION' || reportTab === 'MARGIN')) {
       setReportTab('SHIFT_DRAWER');
     }
   }, [reportTab, showCostReports]);
 
-  const denomBreakdownSummary = useMemo(() => {
+  const fxDrawerEnabled = isLaos && fiscal.fxRates.enabled;
+
+  const computeCombinedBlindDrop = (
+    nextDenomMap: Record<string, string>,
+    nextThbRaw: string,
+    nextUsdRaw: string
+  ) => {
     let totalSatang = 0;
-    const parts: string[] = [];
     let hasAnyEntry = false;
-    for (const d of THAI_DENOMINATIONS) {
-      const raw = (denomCounts[d.id] ?? '').trim();
+    const parts: string[] = [];
+    for (const d of activeDenominations) {
+      const raw = (nextDenomMap[d.id] ?? '').trim();
       if (!raw) continue;
       const qty = Math.max(0, Math.floor(Number(raw) || 0));
       if (qty > 0) {
         hasAnyEntry = true;
         totalSatang += qty * d.satang;
-        parts.push(`${d.label.replace(/^(แบงก์|เหรียญ)\s*/, '')}×${qty}`);
+        parts.push(`${money(d.satang)}×${qty}`);
       }
     }
-    return { totalSatang, summaryText: parts.join(', '), hasAnyEntry };
-  }, [denomCounts]);
+    let thbSatang = 0;
+    let thbEquivSatang = 0;
+    if (fxDrawerEnabled && nextThbRaw.trim()) {
+      try {
+        thbSatang = Math.max(0, parseDecimalStringToScaledInt(nextThbRaw.trim(), 2));
+        if (thbSatang > 0) {
+          hasAnyEntry = true;
+          thbEquivSatang = foreignMinorToBaseLakMinor(thbSatang, fiscal.fxRates.thbToLakRate);
+          totalSatang += thbEquivSatang;
+          parts.push(`THB ${formatForeignMoney(thbSatang, 'THB')}=${money(thbEquivSatang)}`);
+        }
+      } catch {
+        // ignore partial typing
+      }
+    }
+    let usdSatang = 0;
+    let usdEquivSatang = 0;
+    if (fxDrawerEnabled && nextUsdRaw.trim()) {
+      try {
+        usdSatang = Math.max(0, parseDecimalStringToScaledInt(nextUsdRaw.trim(), 2));
+        if (usdSatang > 0) {
+          hasAnyEntry = true;
+          usdEquivSatang = foreignMinorToBaseLakMinor(usdSatang, fiscal.fxRates.usdToLakRate);
+          totalSatang += usdEquivSatang;
+          parts.push(`USD ${formatForeignMoney(usdSatang, 'USD')}=${money(usdEquivSatang)}`);
+        }
+      } catch {
+        // ignore partial typing
+      }
+    }
+    return {
+      totalSatang,
+      summaryText: parts.join(', '),
+      hasAnyEntry,
+      thbEquivSatang,
+      usdEquivSatang,
+    };
+  };
+
+  const denomBreakdownSummary = useMemo(
+    () =>
+      computeCombinedBlindDrop(denomCounts, countedForeignThbInput, countedForeignUsdInput),
+    [
+      activeDenominations,
+      countedForeignThbInput,
+      countedForeignUsdInput,
+      denomCounts,
+      fiscal.fxRates.thbToLakRate,
+      fiscal.fxRates.usdToLakRate,
+      fxDrawerEnabled,
+      money,
+    ]
+  );
 
   const handleDenomChange = (denomId: string, rawVal: string) => {
     const digitsOnly = rawVal.replace(/[^\d]/g, '');
     const nextMap = { ...denomCounts, [denomId]: digitsOnly };
     setDenomCounts(nextMap);
-
-    let nextSatang = 0;
-    let anyCount = false;
-    for (const d of THAI_DENOMINATIONS) {
-      const q = Math.max(0, Math.floor(Number(nextMap[d.id] || '0') || 0));
-      if (q > 0) anyCount = true;
-      nextSatang += q * d.satang;
-    }
-    setCountedCashBaht(
-      anyCount ? formatSatangToThbString(nextSatang).replace(/,/g, '') : ''
+    const combined = computeCombinedBlindDrop(
+      nextMap,
+      countedForeignThbInput,
+      countedForeignUsdInput
     );
+    setCountedCashBaht(combined.hasAnyEntry ? moneyInput(combined.totalSatang) : '');
+  };
+
+  const handleForeignCashCountChange = (currency: 'THB' | 'USD', rawVal: string) => {
+    const cleaned = rawVal.replace(/[^0-9.]/g, '');
+    const nextThb = currency === 'THB' ? cleaned : countedForeignThbInput;
+    const nextUsd = currency === 'USD' ? cleaned : countedForeignUsdInput;
+    if (currency === 'THB') setCountedForeignThbInput(cleaned);
+    else setCountedForeignUsdInput(cleaned);
+    const combined = computeCombinedBlindDrop(denomCounts, nextThb, nextUsd);
+    setCountedCashBaht(combined.hasAnyEntry ? moneyInput(combined.totalSatang) : '');
   };
 
   const clearDenominationCounts = () => {
     setDenomCounts({});
+    setCountedForeignThbInput('');
+    setCountedForeignUsdInput('');
     setCountedCashBaht('');
   };
 
   const handleOpenNewShift = async () => {
     setBusy(true);
     try {
-      const openingCashSatang = Math.max(
-        0,
-        parseDecimalStringToScaledInt(openingCashInput || '0', 2)
-      );
+      const openingCashSatang = Math.max(0, parseMoney(openingCashInput || '0'));
       await posTransport.openShift({
         outletId,
         openedByUserId: currentUser.id,
@@ -231,7 +311,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
   const handleRecordMovement = async () => {
     setBusy(true);
     try {
-      const amountSatang = parseDecimalStringToScaledInt(mvAmountBaht, 2);
+      const amountSatang = parseMoney(mvAmountBaht);
       await posTransport.recordCashMovement({
         outletId,
         movementType: mvType,
@@ -241,7 +321,10 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
       });
       await onRefreshState();
       await loadReports();
-      onToast(`บันทึกรายการลิ้นชักเงินสด (${mvType}) สำเร็จ`, 'success');
+      onToast(
+        `${pick('บันทึกรายการลิ้นชักเงินสด', 'ບັນທຶກລາຍການລິ້ນຊັກເງິນສົດ', 'Drawer movement recorded')} (${mvType})`,
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -252,11 +335,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
   const parsedCountedSatang = useMemo(() => {
     if (!countedCashBaht.trim()) return null;
     try {
-      return Math.max(0, parseDecimalStringToScaledInt(countedCashBaht.trim(), 2));
+      return Math.max(0, parseMoney(countedCashBaht.trim()));
     } catch {
       return null;
     }
-  }, [countedCashBaht]);
+  }, [countedCashBaht, parseMoney]);
 
   const requestBlindDropClose = () => {
     if (parsedCountedSatang === null) {
@@ -306,42 +389,42 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
   const visibleSubTabs = [
     {
       id: 'SHIFT_DRAWER' as const,
-      label: 'ลิ้นชักเงินสด & ปิดกะ (Blind Drop)',
+      label: t('rep.tab.drawer'),
       icon: Wallet,
       visible: true,
     },
     {
       id: 'Z_REPORT' as const,
-      label: 'รายงานปิดกะ (Z-Report)',
+      label: t('rep.tab.zreport'),
       icon: FileText,
       visible: true,
     },
     {
       id: 'ABB_TAX' as const,
-      label: 'รายงานภาษีขาย VAT 7% (ABB)',
+      label: isLaos ? t('rep.tab.tax.LA') : t('rep.tab.tax.TH'),
       icon: Receipt,
       visible: true,
     },
     {
       id: 'VALUATION' as const,
-      label: 'มูลค่าคงคลัง (Stock Valuation)',
+      label: t('rep.tab.valuation'),
       icon: BarChart3,
       visible: showCostReports,
     },
     {
       id: 'MARGIN' as const,
-      label: 'กำไรขั้นต้น (COGS & Margin)',
+      label: t('rep.tab.margin'),
       icon: TrendingUp,
       visible: showCostReports,
     },
-  ].filter((t) => t.visible);
+  ].filter((tabItem) => tabItem.visible);
 
   const isViewingOpenShiftAsBlindCashier =
     !showExpectedCash && reports?.zReport?.status === 'OPEN';
 
   const cleanNumericString = (formattedCurrency: string | null | undefined): string => {
-    if (!formattedCurrency) return '0.00';
-    return formattedCurrency.replace(/[฿,\s]/g, '');
+    if (!formattedCurrency) return currencyCode === 'LAK' ? '0' : '0.00';
+    return formattedCurrency.replace(/[฿₭,\s]/g, '');
   };
 
   const handlePrintThermalZReport = async (overrideWidthMm?: 80 | 58) => {
@@ -352,14 +435,20 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
     try {
       const raster = renderThaiZReportTo203DpiCanvasRaster({
         paperWidthMm: widthMm,
+        countryCode,
+        receiptLocale,
+        vatRatePercentLabel,
         storeName: bootstrap.storeSettings.storeName,
+        storeAddress: fiscal.storeAddress,
         taxId: bootstrap.storeSettings.taxId,
         branchCode: bootstrap.storeSettings.branchCode,
         posRegNo: bootstrap.storeSettings.rdPosRegNo,
         shiftNumber: z.shiftNumber,
         status: z.status,
-        openedAtText: new Date(z.openedAt).toLocaleString('th-TH'),
-        closedAtText: z.closedAt ? new Date(z.closedAt).toLocaleString('th-TH') : 'ยังไม่ปิดกะ',
+        openedAtText: dateTime(z.openedAt),
+        closedAtText: z.closedAt
+          ? dateTime(z.closedAt)
+          : pick('ยังไม่ปิดกะ', 'ຍັງບໍ່ປິດກະ', 'Open'),
         printedByName: currentUser.displayName,
         completedOrdersCount: z.completedOrdersCount,
         voidedOrdersCount: z.voidedOrdersCount,
@@ -379,7 +468,26 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         cashDropText: z.cashDropFormatted,
         expectedCashText: z.expectedDrawerCashFormatted,
         countedCashText: z.countedDrawerCashFormatted ?? '—',
-        cashVarianceText: z.cashVarianceFormatted ?? 'ยังไม่ปิดกะ',
+        cashVarianceText:
+          z.cashVarianceFormatted ?? pick('ยังไม่ปิดกะ', 'ຍັງບໍ່ປິດກະ', 'Open'),
+        ...(z.fxCashSummaryFormatted && z.fxCashSummaryFormatted.fxTransactionsCount > 0
+          ? {
+              fxDrawerLines: [
+                t('fx.drawerSummaryTitle'),
+                `${pick('เงินสดกีบแท้ (LAK)', 'ເງິນສົດກີບແທ້ (LAK)', 'Native LAK')}: ${z.fxCashSummaryFormatted.expectedNativeBaseCashFormatted}`,
+                ...(z.fxCashSummaryFormatted.thbCollectedSatang > 0
+                  ? [
+                      `THB: ${z.fxCashSummaryFormatted.thbCollectedFormatted} (= ${z.fxCashSummaryFormatted.thbEquivalentFormatted})`,
+                    ]
+                  : []),
+                ...(z.fxCashSummaryFormatted.usdCollectedSatang > 0
+                  ? [
+                      `USD: ${z.fxCashSummaryFormatted.usdCollectedFormatted} (= ${z.fxCashSummaryFormatted.usdEquivalentFormatted})`,
+                    ]
+                  : []),
+              ],
+            }
+          : {}),
       });
 
       const hwRes = await posTransport.printCanvasRaster({
@@ -425,34 +533,34 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
     if (!z || isViewingOpenShiftAsBlindCashier) return;
     downloadUtf8BomCsv(
       `Z_Report_${outletId}_${z.shiftNumber}.csv`,
-      ['หัวข้อรายการ', 'ค่า / จำนวนเงิน (บาท)'],
+      ['Item', `Amount (${currencyCode})`],
       [
-        ['รหัสสาขา', outletId],
-        ['เลขกะแคชเชียร์', z.shiftNumber],
-        ['สถานะกะ', z.status],
-        ['เวลาเปิดกะ', z.openedAt],
-        ['เวลาปิดกะ', z.closedAt ?? 'ยังไม่ปิดกะ'],
-        ['จำนวนบิลสำเร็จ', z.completedOrdersCount],
-        ['จำนวนบิลยกเลิก (Void)', z.voidedOrdersCount],
-        ['ยอดบิลยกเลิกรวม', cleanNumericString(z.voidedTotalFormatted)],
-        ['ยอดขายก่อนส่วนลด (Gross Sales)', cleanNumericString(z.grossSalesFormatted)],
-        ['ส่วนลดรวม', cleanNumericString(z.discountsFormatted)],
-        ['มูลค่าก่อนภาษี (Net Before Tax)', cleanNumericString(z.netBeforeTaxFormatted)],
-        ['ภาษีขาย VAT 7%', cleanNumericString(z.vat7PercentFormatted)],
-        ['ยอดขายสุทธิรวม VAT', cleanNumericString(z.netSalesTotalFormatted)],
-        ['รับชำระด้วยเงินสด', cleanNumericString(z.cashSalesFormatted)],
-        ['รับชำระด้วย PromptPay QR', cleanNumericString(z.promptPaySalesFormatted)],
-        ['รับชำระด้วยบัตรเครดิต / EDC', cleanNumericString(z.cardSalesFormatted)],
-        ['เงินทอนตั้งต้นเปิดกะ (Opening Float)', cleanNumericString(z.openingCashFormatted)],
-        ['นำเงินเข้าลิ้นชัก (Paid-In)', cleanNumericString(z.paidInFormatted)],
-        ['จ่ายเงินสดย่อย (Paid-Out)', cleanNumericString(z.paidOutFormatted)],
-        ['เก็บเงินเข้าเซฟ (Cash Drop)', cleanNumericString(z.cashDropFormatted)],
-        ['เงินสดตามสมการบัญชี (Expected)', cleanNumericString(z.expectedDrawerCashFormatted)],
-        ['เงินสดที่นับได้จริง (Counted)', z.countedDrawerCashFormatted ? cleanNumericString(z.countedDrawerCashFormatted) : ''],
-        ['ผลต่างเงินสด (Variance)', z.cashVarianceFormatted ? cleanNumericString(z.cashVarianceFormatted) : ''],
+        ['Outlet', outletId],
+        ['Shift', z.shiftNumber],
+        ['Status', z.status],
+        ['Opened At', z.openedAt],
+        ['Closed At', z.closedAt ?? 'OPEN'],
+        ['Completed Orders', z.completedOrdersCount],
+        ['Voided Orders', z.voidedOrdersCount],
+        ['Voided Total', cleanNumericString(z.voidedTotalFormatted)],
+        ['Gross Sales', cleanNumericString(z.grossSalesFormatted)],
+        ['Discounts', cleanNumericString(z.discountsFormatted)],
+        ['Net Before Tax', cleanNumericString(z.netBeforeTaxFormatted)],
+        [`Output VAT ${vatRatePercentLabel}%`, cleanNumericString(z.vat7PercentFormatted)],
+        ['Net Sales Total', cleanNumericString(z.netSalesTotalFormatted)],
+        ['Cash Sales', cleanNumericString(z.cashSalesFormatted)],
+        [isLaos ? 'LAOQR / OnePay Sales' : 'PromptPay QR Sales', cleanNumericString(z.promptPaySalesFormatted)],
+        ['Card / EDC Sales', cleanNumericString(z.cardSalesFormatted)],
+        ['Opening Float', cleanNumericString(z.openingCashFormatted)],
+        ['Paid-In', cleanNumericString(z.paidInFormatted)],
+        ['Paid-Out', cleanNumericString(z.paidOutFormatted)],
+        ['Cash Drop', cleanNumericString(z.cashDropFormatted)],
+        ['Expected Drawer Cash', cleanNumericString(z.expectedDrawerCashFormatted)],
+        ['Counted Drawer Cash', z.countedDrawerCashFormatted ? cleanNumericString(z.countedDrawerCashFormatted) : ''],
+        ['Cash Variance', z.cashVarianceFormatted ? cleanNumericString(z.cashVarianceFormatted) : ''],
       ]
     );
-    onToast(`ส่งออกไฟล์ CSV ใบสรุปกะ ${z.shiftNumber} เรียบร้อยแล้ว`, 'success');
+    onToast(`Exported Z_Report_${outletId}_${z.shiftNumber}.csv`, 'success');
   };
 
   const handleExportAbbTaxCsv = () => {
@@ -462,16 +570,16 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         ? `${reportStartDate || 'start'}_to_${reportEndDate || 'now'}`
         : new Date().toISOString().slice(0, 10);
     downloadUtf8BomCsv(
-      `ABB_SalesTax_VAT7_${outletId}_${rangeTag}.csv`,
+      `${isLaos ? 'LAO_TaxRIS_VAT' : 'ABB_SalesTax_VAT'}${vatRatePercentLabel}_${outletId}_${rangeTag}.csv`,
       [
-        'เลขที่ใบกำกับภาษีอย่างย่อ (ABB)',
-        'เลขที่ใบเสร็จ',
-        'วันเวลาออกบิล',
-        'ประเภทออเดอร์',
-        'สถานะเอกสาร',
-        'มูลค่าฐานภาษี (บาท)',
-        'ภาษีมูลค่าเพิ่ม VAT 7% (บาท)',
-        'ยอดสุทธิรวมภาษี (บาท)',
+        isLaos ? 'Invoice No (INV-LA)' : 'เลขที่ใบกำกับภาษีอย่างย่อ (ABB)',
+        'Receipt No',
+        'Timestamp',
+        'Order Type',
+        'Status',
+        `Taxable Base (${currencyCode})`,
+        `VAT ${vatRatePercentLabel}% (${currencyCode})`,
+        `Grand Total (${currencyCode})`,
       ],
       reports.abbReport.invoices.map((inv) => [
         inv.abbTaxInvoiceNo,
@@ -484,7 +592,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         cleanNumericString(inv.totalFormatted),
       ])
     );
-    onToast('ส่งออกรายงานภาษีขาย VAT 7% (CSV สำหรับสำนักงานบัญชี) เรียบร้อยแล้ว', 'success');
+    onToast(`Exported VAT ${vatRatePercentLabel}% (${currencyCode}) CSV`, 'success');
   };
 
   const handleExportValuationCsv = () => {
@@ -492,7 +600,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
     const dateTag = new Date().toISOString().slice(0, 10);
     downloadUtf8BomCsv(
       `Stock_Valuation_MAC_${outletId}_${dateTag}.csv`,
-      ['SKU', 'ชื่อสินค้า / วัตถุดิบ', 'สต็อกคงเหลือ', 'ต้นทุนเฉลี่ย MAC (บาท)', 'มูลค่าคงคลังสุทธิ (บาท)'],
+      ['SKU', 'Item', 'In Stock', `MAC (${currencyCode})`, `Valuation (${currencyCode})`],
       reports.valuationReport.lines.map((l) => [
         l.sku,
         l.itemName,
@@ -501,7 +609,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         cleanNumericString(l.valuationFormatted),
       ])
     );
-    onToast('ส่งออกรายงานมูลค่าคงคลัง (CSV) เรียบร้อยแล้ว', 'success');
+    onToast('Exported Stock Valuation CSV', 'success');
   };
 
   const handleExportMarginCsv = () => {
@@ -512,7 +620,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         : new Date().toISOString().slice(0, 10);
     downloadUtf8BomCsv(
       `Menu_COGS_Margin_${outletId}_${rangeTag}.csv`,
-      ['รายการที่ขาย', 'จำนวนขาย', 'ยอดขายรวม (บาท)', 'ต้นทุนขายจริง COGS (บาท)', 'กำไรขั้นต้น (บาท)', '% GP Margin'],
+      ['Item', 'Qty Sold', `Revenue (${currencyCode})`, `COGS (${currencyCode})`, `Gross Profit (${currencyCode})`, '% GP Margin'],
       reports.marginReport.lines.map((l) => [
         l.itemName,
         l.soldQtyFormatted,
@@ -522,7 +630,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         l.grossMarginPercentFormatted,
       ])
     );
-    onToast('ส่งออกรายงานต้นทุนขาย COGS & กำไรขั้นต้น (CSV) เรียบร้อยแล้ว', 'success');
+    onToast('Exported COGS & Margin CSV', 'success');
   };
 
   return (
@@ -625,7 +733,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 htmlFor={`${uid}-open-cash`}
                 className="block text-xs font-medium text-ink-muted mb-1.5"
               >
-                เงินสดทอนตั้งต้นในลิ้นชัก (บาท)
+                {pick('เงินสดทอนตั้งต้นในลิ้นชัก', 'ເງິນສົດທອນຕັ້ງຕົ້ນໃນລິ້ນຊັກ', 'Opening Cash Float')} ({currencyUnitLabel})
               </label>
               <input
                 id={`${uid}-open-cash`}
@@ -669,8 +777,8 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                     <div className="text-xs text-white/75">
                       เงินสดคาดหวังในลิ้นชัก (Expected Cash · สิทธิ์ผู้จัดการ)
                     </div>
-                    <div className="mt-1 font-google-display text-[36px] sm:text-[42px] font-normal leading-[44px] sm:leading-[50px] tracking-[-0.5px] text-white tabular-nums-google">
-                      ฿{formatSatangToThbString(bootstrap.activeShift.expectedCashSatang)}
+                    <div className="mt-1 font-google-display text-[32px] sm:text-[38px] font-normal leading-[40px] sm:leading-[46px] tracking-[-0.5px] text-white tabular-nums-google">
+                      {money(bootstrap.activeShift.expectedCashSatang)}
                     </div>
                   </>
                 ) : (
@@ -692,13 +800,13 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 <div className="rounded-[4px] border border-hairline bg-surface-1 p-4">
                   <div className="text-ink-muted">เงินทอนตั้งต้นเปิดกะ (Opening Float)</div>
                   <div className="mt-1 font-google-display text-[22px] font-normal text-ink tabular-nums-google">
-                    ฿{formatSatangToThbString(bootstrap.activeShift.openingCashSatang)}
+                    {money(bootstrap.activeShift.openingCashSatang)}
                   </div>
                 </div>
                 <div className="rounded-[4px] border border-hairline bg-surface-1 p-4">
-                  <div className="text-ink-muted">เวลาเปิดกะ</div>
+                  <div className="text-ink-muted">{pick('เวลาเปิดกะ', 'ເວລາເປີດກະ', 'Opened At')}</div>
                   <div className="mt-1.5 font-google-display text-[16px] font-normal text-ink tabular-nums-google">
-                    {new Date(bootstrap.activeShift.openedAt).toLocaleString('th-TH')}
+                    {dateTime(bootstrap.activeShift.openedAt)}
                   </div>
                 </div>
               </div>
@@ -723,10 +831,10 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   </select>
                   <input
                     type="text"
-                    aria-label="จำนวนเงินเคลื่อนไหว (บาท)"
+                    aria-label={`${pick('จำนวนเงิน', 'ຈຳນວນເງິນ', 'Amount')} (${currencyUnitLabel})`}
                     value={mvAmountBaht}
                     onChange={(e) => setMvAmountBaht(e.target.value)}
-                    placeholder="จำนวนเงิน (บาท)"
+                    placeholder={`${pick('จำนวนเงิน', 'ຈຳນວນເງິນ', 'Amount')} (${currencyUnitLabel})`}
                     className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-right text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
                   />
                   <input
@@ -771,8 +879,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                             {m.movementType} — {m.reason}
                           </div>
                           <div className="text-[11px] text-ink-muted tabular-nums-google">
-                            โดย {m.performedByName} ·{' '}
-                            {new Date(m.createdAt).toLocaleTimeString('th-TH')}
+                            {m.performedByName} · {dateTime(m.createdAt)}
                           </div>
                         </div>
                       </div>
@@ -781,11 +888,12 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                           {m.movementType === 'OPENING_FLOAT' || m.movementType === 'PAID_IN'
                             ? '+'
                             : '-'}
-                          ฿{formatSatangToThbString(m.amountSatang)}
+                          {money(m.amountSatang)}
                         </div>
                         {showExpectedCash && (
                           <div className="text-[11px] text-ink-muted">
-                            คงเหลือคาดหวัง ฿{formatSatangToThbString(m.expectedCashAfterSatang)}
+                            {pick('คงเหลือคาดหวัง', 'ຄົງເຫຼືອຄາດຫວັງ', 'Expected')}{' '}
+                            {money(m.expectedCashAfterSatang)}
                           </div>
                         )}
                       </div>
@@ -828,7 +936,13 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-google-display text-xs font-medium text-ink flex items-center gap-1.5">
                     <Banknote className="h-4 w-4 text-primary" />
-                    เครื่องช่วยนับธนบัตรและเหรียญไทย (คำนวณยอดรวมอัตโนมัติ)
+                    {isLaos
+                      ? pick(
+                          'เครื่องช่วยนับธนบัตรกีบลาว (LAK 500–100,000 ₭)',
+                          'ເຄື່ອງຊ່ວຍນັບທະນະບັດເງິນກີບລາວ (500–100,000 ₭)',
+                          'Lao Kip Banknote Counter (500–100,000 ₭)'
+                        )
+                      : 'เครื่องช่วยนับธนบัตรและเหรียญไทย (คำนวณยอดรวมอัตโนมัติ)'}
                   </span>
                   {denomBreakdownSummary.hasAnyEntry && (
                     <button
@@ -836,13 +950,13 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                       onClick={clearDenominationCounts}
                       className={`inline-flex items-center gap-1 rounded-[48px] px-2.5 py-1 text-[11px] font-medium text-ink-muted hover:bg-canvas hover:text-ink ${UI_INTERACTION.focusButton}`}
                     >
-                      <RotateCcw className="h-3 w-3" /> ล้างจำนวนที่นับ
+                      <RotateCcw className="h-3 w-3" /> {pick('ล้างจำนวนที่นับ', 'ລ້າງຈຳນວນ', 'Clear')}
                     </button>
                   )}
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
-                  {THAI_DENOMINATIONS.map((d) => {
+                  {activeDenominations.map((d) => {
                     const countVal = denomCounts[d.id] ?? '';
                     const qty = Math.max(0, Math.floor(Number(countVal || '0') || 0));
                     const lineSatang = qty * d.satang;
@@ -857,7 +971,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                           </label>
                           {qty > 0 && (
                             <span className="text-[11px] font-medium text-primary-dark tabular-nums-google">
-                              ฿{formatSatangToThbString(lineSatang)}
+                              {money(lineSatang)}
                             </span>
                           )}
                         </div>
@@ -867,13 +981,69 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                           inputMode="numeric"
                           value={countVal}
                           onChange={(e) => handleDenomChange(d.id, e.target.value)}
-                          placeholder="0 ใบ/เหรียญ"
+                          placeholder={isLaos ? '0 ໃບ' : '0 ใบ/เหรียญ'}
                           className={`h-9 w-full rounded-[4px] border border-hairline bg-surface-1 px-2.5 text-right text-xs text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
                         />
                       </div>
                     );
                   })}
                 </div>
+
+                {fxDrawerEnabled && (
+                  <div className="border-t border-hairline pt-3 space-y-2">
+                    <div className="text-xs font-medium text-ink">
+                      {pick(
+                        'ธนบัตรต่างประเทศในลิ้นชัก (แปลงเป็น LAK รวมในยอดปิดกะอัตโนมัติ)',
+                        'ທະນະບັດຕ່າງປະເທດໃນລິ້ນຊັກ (ແປງເປັນ LAK ລວມໃນຍອດປິດກະອັດຕະໂນມັດ)',
+                        'Foreign Cash Counted in Drawer (Auto-converted to LAK)'
+                      )}
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                      <div className="rounded-[4px] border border-hairline bg-canvas p-2.5 space-y-1">
+                        <div className="flex items-center justify-between gap-1">
+                          <label htmlFor={`${uid}-blind-thb`} className="font-medium text-ink">
+                            THB ฿ (@ {fiscal.fxRates.thbToLakRate.toLocaleString('en-US')} ₭)
+                          </label>
+                          {denomBreakdownSummary.thbEquivSatang > 0 && (
+                            <span className="text-[11px] font-medium text-primary-dark tabular-nums-google">
+                              = {money(denomBreakdownSummary.thbEquivSatang)}
+                            </span>
+                          )}
+                        </div>
+                        <input
+                          id={`${uid}-blind-thb`}
+                          type="text"
+                          inputMode="decimal"
+                          value={countedForeignThbInput}
+                          onChange={(e) => handleForeignCashCountChange('THB', e.target.value)}
+                          placeholder="0.00 THB"
+                          className={`h-9 w-full rounded-[4px] border border-hairline bg-surface-1 px-2.5 text-right text-xs text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                        />
+                      </div>
+                      <div className="rounded-[4px] border border-hairline bg-canvas p-2.5 space-y-1">
+                        <div className="flex items-center justify-between gap-1">
+                          <label htmlFor={`${uid}-blind-usd`} className="font-medium text-ink">
+                            USD $ (@ {fiscal.fxRates.usdToLakRate.toLocaleString('en-US')} ₭)
+                          </label>
+                          {denomBreakdownSummary.usdEquivSatang > 0 && (
+                            <span className="text-[11px] font-medium text-primary-dark tabular-nums-google">
+                              = {money(denomBreakdownSummary.usdEquivSatang)}
+                            </span>
+                          )}
+                        </div>
+                        <input
+                          id={`${uid}-blind-usd`}
+                          type="text"
+                          inputMode="decimal"
+                          value={countedForeignUsdInput}
+                          onChange={(e) => handleForeignCashCountChange('USD', e.target.value)}
+                          placeholder="0.00 USD"
+                          className={`h-9 w-full rounded-[4px] border border-hairline bg-surface-1 px-2.5 text-right text-xs text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -883,7 +1053,12 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   htmlFor={`${uid}-counted-cash`}
                   className="block text-xs font-medium text-ink mb-1.5"
                 >
-                  ยอดเงินสดในลิ้นชักที่พนักงานนับได้จริงรวมทั้งสิ้น (บาท)
+                  {pick(
+                    'ยอดเงินสดในลิ้นชักที่พนักงานนับได้จริงรวมทั้งสิ้น',
+                    'ຍອດເງິນສົດໃນລິ້ນຊັກທີ່ນັບໄດ້ຈິງລວມທັງໝົດ',
+                    'Total Counted Cash in Drawer'
+                  )}{' '}
+                  ({currencyUnitLabel})
                 </label>
                 <input
                   id={`${uid}-counted-cash`}
@@ -891,7 +1066,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   inputMode="decimal"
                   value={countedCashBaht}
                   onChange={(e) => setCountedCashBaht(e.target.value)}
-                  placeholder="ระบุยอดที่นับได้จริง เช่น 1850.00"
+                  placeholder={isLaos ? 'ເຊັ່ນ 1250000' : 'ระบุยอดที่นับได้จริง เช่น 1850.00'}
                   className={`h-14 w-full rounded-[4px] border border-hairline bg-canvas px-4 font-google-display text-[28px] font-normal text-ink placeholder:text-ink-muted placeholder:text-base tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               </div>
@@ -1037,7 +1212,9 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                     </div>
                   </div>
                   <div className="rounded-[4px] border border-hairline bg-canvas p-4">
-                    <div className="text-xs text-ink-muted">ภาษีขาย VAT 7%</div>
+                    <div className="text-xs text-ink-muted">
+                      {pick(`ภาษีขาย VAT ${vatRatePercentLabel}%`, `ອາກອນຂາຍ ອມພ ${vatRatePercentLabel}%`, `Output VAT ${vatRatePercentLabel}%`)}
+                    </div>
                     <div className="mt-1 font-google-display text-[24px] font-normal text-ink tabular-nums-google">
                       {reports.zReport.vat7PercentFormatted}
                     </div>
@@ -1093,7 +1270,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">รับชำระด้วย PromptPay QR</span>
+                      <span className="text-ink-muted">
+                        {isLaos
+                          ? pick('รับชำระด้วย LAOQR / OnePay', 'ຮັບຊຳລະດ້ວຍ LAOQR / OnePay', 'LAOQR / OnePay')
+                          : 'รับชำระด้วย PromptPay QR'}
+                      </span>
                       <span className="font-medium text-ink tabular-nums-google">
                         {reports.zReport.promptPaySalesFormatted}
                       </span>
@@ -1160,6 +1341,53 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                     </div>
                   </div>
                 </div>
+
+                {reports.zReport.fxCashSummaryFormatted &&
+                  reports.zReport.fxCashSummaryFormatted.fxTransactionsCount > 0 && (
+                    <div className="rounded-[4px] border border-primary/40 bg-surface-1 p-5 space-y-2.5 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-google-display text-sm font-medium text-ink">
+                          {t('fx.drawerSummaryTitle')}
+                        </span>
+                        <span className="rounded-[48px] border border-hairline bg-canvas px-2.5 py-0.5 text-[11px] text-ink-muted tabular-nums-google">
+                          {reports.zReport.fxCashSummaryFormatted.fxTransactionsCount}{' '}
+                          {pick('บิลรับเงินต่างประเทศ', 'ບິນຮັບເງິນຕ່າງປະເທດ', 'FX Bills')}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                        <div className="rounded-[4px] border border-hairline bg-canvas p-3">
+                          <div className="text-ink-muted">
+                            {pick('เงินสดกีบแท้ในลิ้นชัก (Native LAK)', 'ເງິນສົດກີບແທ້ໃນລິ້ນຊັກ (Native LAK)', 'Expected Native LAK')}
+                          </div>
+                          <div className="mt-1 font-google-display text-lg font-medium text-ink tabular-nums-google">
+                            {reports.zReport.fxCashSummaryFormatted.expectedNativeBaseCashFormatted}
+                          </div>
+                        </div>
+                        <div className="rounded-[4px] border border-hairline bg-canvas p-3">
+                          <div className="text-ink-muted">
+                            {pick('ธนบัตรบาทไทยที่รับเข้า (THB)', 'ທະນະບັດບາດໄທທີ່ຮັບເຂົ້າ (THB)', 'THB Cash Collected')}
+                          </div>
+                          <div className="mt-1 font-google-display text-lg font-medium text-primary-hover tabular-nums-google">
+                            {reports.zReport.fxCashSummaryFormatted.thbCollectedFormatted}
+                          </div>
+                          <div className="text-[11px] text-ink-muted tabular-nums-google">
+                            = {reports.zReport.fxCashSummaryFormatted.thbEquivalentFormatted}
+                          </div>
+                        </div>
+                        <div className="rounded-[4px] border border-hairline bg-canvas p-3">
+                          <div className="text-ink-muted">
+                            {pick('ธนบัตรดอลลาร์ที่รับเข้า (USD)', 'ທະນະບັດໂດລາທີ່ຮັບເຂົ້າ (USD)', 'USD Cash Collected')}
+                          </div>
+                          <div className="mt-1 font-google-display text-lg font-medium text-primary-hover tabular-nums-google">
+                            {reports.zReport.fxCashSummaryFormatted.usdCollectedFormatted}
+                          </div>
+                          <div className="text-[11px] text-ink-muted tabular-nums-google">
+                            = {reports.zReport.fxCashSummaryFormatted.usdEquivalentFormatted}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
               </div>
             )}
           </div>
@@ -1170,29 +1398,35 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
           <div className="p-5 border-b border-hairline bg-surface-1 flex flex-wrap items-center justify-between gap-4">
             <h3 className="font-google-display text-[20px] font-normal text-ink">
-              รายงานภาษีขายใบกำกับภาษีอย่างย่อ (Thai RD ABB VAT 7% Register)
+              {isLaos
+                ? pick(
+                    `รายงานภาษีขาย สปป.ลาว (TaxRIS / VAT ${vatRatePercentLabel}%)`,
+                    `ລາຍງານອາກອນມູນຄ່າເພີ່ມ ສປປ.ລາວ (TaxRIS / ອມພ ${vatRatePercentLabel}%)`,
+                    `Lao PDR Sales Tax Register (TaxRIS / VAT ${vatRatePercentLabel}%)`
+                  )
+                : `รายงานภาษีขายใบกำกับภาษีอย่างย่อ (Thai RD ABB VAT ${vatRatePercentLabel}% Register)`}
             </h3>
             <div className="flex flex-wrap items-center gap-4 text-xs tabular-nums-google">
               <span className="text-ink-muted">
-                บิลปกติ / ยกเลิก:{' '}
+                {pick('บิลปกติ / ยกเลิก', 'ບິນປົກກະຕິ / ຍົກເລີກ', 'Active / Voided')}:{' '}
                 <strong className="font-medium text-ink">
                   {reports.abbReport.activeInvoiceCount} / {reports.abbReport.voidedInvoiceCount}
                 </strong>
               </span>
               <span className="text-ink-muted">
-                ฐานภาษีรวม:{' '}
+                {pick('ฐานภาษีรวม', 'ຖານອາກອນລວມ', 'Taxable Base')}:{' '}
                 <strong className="font-medium text-ink">
                   {reports.abbReport.totalTaxableBaseFormatted}
                 </strong>
               </span>
               <span className="text-ink-muted">
-                VAT 7%:{' '}
+                VAT {vatRatePercentLabel}%:{' '}
                 <strong className="font-medium text-ink">
                   {reports.abbReport.totalVatFormatted}
                 </strong>
               </span>
               <span className="text-ink-muted">
-                ยอดรวมสุทธิ:{' '}
+                {pick('ยอดรวมสุทธิ', 'ຍອດລວມສຸດທິ', 'Gross Total')}:{' '}
                 <strong className="font-medium text-primary-hover">
                   {reports.abbReport.totalGrossFormatted}
                 </strong>
@@ -1203,7 +1437,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[48px] border border-primary bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:bg-primary-soft/50 ${UI_INTERACTION.focusButton}`}
               >
                 <Download className="h-3.5 w-3.5" />
-                <span>Export CSV ส่งบัญชี</span>
+                <span>Export CSV</span>
               </button>
             </div>
           </div>
@@ -1212,22 +1446,22 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               <thead className="bg-surface-1 text-ink-muted font-medium border-b border-hairline">
                 <tr>
                   <th scope="col" className="py-3 px-4">
-                    เลขที่ใบกำกับภาษี ABB
+                    {isLaos ? 'Invoice No (INV-LA)' : 'เลขที่ใบกำกับภาษี ABB'}
                   </th>
                   <th scope="col" className="py-3 px-4">
-                    เลขที่ใบเสร็จ / เวลา
+                    {pick('เลขที่ใบเสร็จ / เวลา', 'ເລກທີບິນ / ເວລາ', 'Receipt / Time')}
                   </th>
                   <th scope="col" className="py-3 px-4">
-                    ประเภท / สถานะ
+                    {pick('ประเภท / สถานะ', 'ປະເພດ / ສະຖານະ', 'Type / Status')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    มูลค่าก่อนภาษี
+                    {pick('มูลค่าก่อนภาษี', 'ມູນຄ່າກ່ອນອາກອນ', 'Net Before Tax')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    VAT 7%
+                    VAT {vatRatePercentLabel}%
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    ยอดสุทธิ
+                    {pick('ยอดสุทธิ', 'ຍອດສຸດທິ', 'Total')}
                   </th>
                 </tr>
               </thead>
@@ -1249,9 +1483,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                       </td>
                       <td className="py-3 px-4 text-ink-muted tabular-nums-google">
                         <div>{inv.receiptNumber}</div>
-                        <div className="text-[11px]">
-                          {new Date(inv.createdAt).toLocaleString('th-TH')}
-                        </div>
+                        <div className="text-[11px]">{dateTime(inv.createdAt)}</div>
                       </td>
                       <td className="py-3 px-4 space-x-1.5">
                         <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-[11px] text-ink-muted">
@@ -1559,8 +1791,12 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         title={`ยืนยันปิดกะ ${bootstrap.activeShift?.shiftNumber ?? ''}?`}
         description={
           parsedCountedSatang === 0
-            ? 'คุณระบุยอดเงินสดที่นับได้จริงเป็น ฿0.00! โปรดตรวจสอบให้แน่ใจก่อนยืนยัน เนื่องจากเมื่อปิดกะแล้วจะไม่สามารถแก้ไขยอดนับย้อนหลังได้'
-            : `ยอดเงินสดในลิ้นชักที่คุณนับได้จริงคือ ฿${formatSatangToThbString(parsedCountedSatang ?? 0)} ระบบจะออกใบสรุป Z-Report สำรองฐานข้อมูลเข้ารหัสลง USB และเปิดกะถัดไปอัตโนมัติ`
+            ? pick(
+                `คุณระบุยอดเงินสดที่นับได้จริงเป็น ${money(0)}! โปรดตรวจสอบให้แน่ใจก่อนยืนยัน`,
+                `ທ່ານລະບຸຍອດເງິນສົດທີ່ນັບໄດ້ເປັນ ${money(0)}! ກະລຸນາກວດສອບກ່ອນຢືນຢັນ`,
+                `Counted cash is ${money(0)}! Please double check before closing.`
+              )
+            : `${pick('ยอดเงินสดในลิ้นชักที่นับได้จริง', 'ຍອດເງິນສົດໃນລິ້ນຊັກທີ່ນັບໄດ້ຈິງ', 'Counted drawer cash')}: ${money(parsedCountedSatang ?? 0)}`
         }
         confirmLabel="ยืนยันปิดกะ & ออกใบ Z-Report"
         tone={parsedCountedSatang === 0 ? 'danger' : 'primary'}

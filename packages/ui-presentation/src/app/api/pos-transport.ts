@@ -2,23 +2,35 @@ import type {
   BomEdgeDto,
   BootstrapPayload,
   BusinessProfile,
+  CashRoundingStepMajor,
   CatalogVariantDetailDto,
   CategoryDto,
   CheckoutOrderRequest,
   ComponentRole,
+  CountryCode,
   DiscoveredStorageDriveDto,
+  FiscalConfigDto,
+  ForeignTenderCurrencyCode,
+  FxCashTenderDetailDto,
+  FxRatesConfigDto,
+  GuestOrderRecordDto,
   HeldBillRecordDto,
   KdsTicketDto,
+  LaoQrVerificationPolicy,
+  LocaleCode,
   ModifierDto,
   ModifierGroupWithItemsDto,
   PosShiftDto,
   PrintedReceiptPreview,
   PrinterHardwareConfigDto,
+  QrOrderingConfigDto,
+  QrOrderingRuntimeStatusDto,
   SalesOrderHistoryDto,
   SplitPaymentLegInput,
   StaffUserDto,
   StoreIdentitySettingsDto,
   SupplierDto,
+  TableQrSessionDto,
   TaxMode,
   UpsAlertBannerDto,
   UsbBackupConfigStatusDto,
@@ -160,6 +172,21 @@ export interface ReportsBundleDto {
     countedDrawerCashFormatted: string | null;
     cashVarianceSatang: number | null;
     cashVarianceFormatted: string | null;
+    fxCashSummaryFormatted?: {
+      fxTransactionsCount: number;
+      thbCollectedSatang: number;
+      thbEquivalentBaseSatang: number;
+      usdCollectedSatang: number;
+      usdEquivalentBaseSatang: number;
+      totalForeignEquivalentBaseSatang: number;
+      expectedNativeBaseCashInDrawerSatang: number;
+      thbCollectedFormatted: string;
+      thbEquivalentFormatted: string;
+      usdCollectedFormatted: string;
+      usdEquivalentFormatted: string;
+      totalForeignEquivalentFormatted: string;
+      expectedNativeBaseCashFormatted: string;
+    } | undefined;
   } | null;
   abbReport: {
     outletId: string;
@@ -222,11 +249,22 @@ export const posTransport = {
 
   async completeFirstRunOnboarding(input: {
     businessProfile: BusinessProfile;
+    countryCode?: CountryCode;
+    uiLocale?: LocaleCode;
+    receiptLocale?: LocaleCode;
+    vatRateBps?: number;
+    defaultTaxMode?: TaxMode;
+    cashRoundingStepMajor?: CashRoundingStepMajor;
+    scalePriceEmbeddedMultiplier?: number;
     storeName: string;
+    storeAddress?: string;
     taxId: string;
     branchCode: string;
     rdPosRegNo: string;
     promptPayId: string;
+    laoQrStaticTemplate?: string;
+    laoQrVerificationPolicy?: LaoQrVerificationPolicy;
+    fxRates?: Partial<FxRatesConfigDto>;
     ownerDisplayName: string;
     ownerUsername?: string;
     ownerPin: string;
@@ -401,6 +439,30 @@ export const posTransport = {
     });
   },
 
+  validateLaoQrTemplate(input: {
+    rawTemplate?: string;
+    generateSample?: boolean;
+    merchantName?: string;
+    merchantCity?: string;
+    previewAmountSatang?: number;
+  }): Promise<{
+    valid: boolean;
+    errorReason?: string;
+    normalizedTemplate?: string;
+    merchantAccountTag?: string;
+    merchantName?: string;
+    merchantCity?: string;
+    currencyNumeric?: string;
+    previewPayload?: string;
+    previewCrcHex?: string;
+    previewWholeLakAmount?: number;
+  }> {
+    return requestJson('/api/pos/validate-laoqr-template', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
   generatePromptPayQr(input: {
     outletId?: string;
     overrideAmountSatang?: number;
@@ -416,6 +478,8 @@ export const posTransport = {
   }): Promise<{
     payload: string;
     crcHex: string;
+    qrScheme?: 'PROMPTPAY' | 'LAOQR';
+    currencyCode?: 'THB' | 'LAK';
     promptPayId: string;
     storeName: string;
     totalSatang: number;
@@ -428,6 +492,7 @@ export const posTransport = {
 
   verifyBotSlipStep1(input: {
     miniQrRaw: string;
+    senderBankCode?: string;
     overrideAmountSatang?: number;
     taxMode: TaxMode;
     discountSatang: number;
@@ -453,11 +518,15 @@ export const posTransport = {
     tableOrQueueNo?: string | undefined;
     paymentMethod: CheckoutOrderRequest['paymentMethod'];
     cashTenderedSatang?: number;
+    foreignTenderCurrency?: ForeignTenderCurrencyCode;
+    foreignTenderAmountSatang?: number;
     slipTransRefRaw?: string;
+    slipSenderBankCode?: string;
     splitPayments?: SplitPaymentLegInput[];
     taxMode: TaxMode;
     discountSatang: number;
     paperWidthPx?: 384 | 576;
+    skipKdsEnqueue?: boolean | undefined;
     lines: Array<{
       variantId: string;
       itemName: string;
@@ -475,6 +544,7 @@ export const posTransport = {
       tableOrQueueNo: string | null;
       subtotalSatang: number;
       discountSatang: number;
+      cashRoundingDiscountSatang?: number | undefined;
       netBeforeTaxSatang: number;
       taxSatang: number;
       totalSatang: number;
@@ -487,6 +557,7 @@ export const posTransport = {
         slipTransRefLast4: string | null;
       }>;
       changeGivenSatang: number | null;
+      fxTender?: FxCashTenderDetailDto | null | undefined;
       kitchenOrderSequenceId: number | null;
       createdAt: string;
     };
@@ -1136,13 +1207,43 @@ export const posTransport = {
   updateStoreSettings(input: {
     outletId?: string;
     storeName: string;
+    storeAddress?: string;
     taxId: string;
     branchCode: string;
     rdPosRegNo: string;
     promptPayId: string;
+    countryCode?: CountryCode;
+    uiLocale?: LocaleCode;
+    receiptLocale?: LocaleCode;
+    vatRateBps?: number;
+    defaultTaxMode?: TaxMode;
+    cashRoundingStepMajor?: CashRoundingStepMajor;
+    scalePriceEmbeddedMultiplier?: number;
+    laoQrStaticTemplate?: string;
+    laoQrVerificationPolicy?: LaoQrVerificationPolicy;
+    fxRates?: Partial<FxRatesConfigDto>;
     updatedByUserId: string;
-  }): Promise<{ storeSettings: StoreIdentitySettingsDto }> {
+  }): Promise<{ storeSettings: StoreIdentitySettingsDto; fiscalConfig?: FiscalConfigDto }> {
     return requestJson('/api/settings/store', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  updateFiscalConfig(
+    input: Partial<FiscalConfigDto> & { updatedByUserId?: string }
+  ): Promise<{ fiscalConfig: FiscalConfigDto }> {
+    return requestJson('/api/settings/fiscal', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  updateUiLocale(input: {
+    uiLocale: LocaleCode;
+    receiptLocale?: LocaleCode;
+  }): Promise<{ fiscalConfig: FiscalConfigDto }> {
+    return requestJson('/api/settings/locale', {
       method: 'POST',
       body: JSON.stringify(input),
     });
@@ -1188,6 +1289,100 @@ export const posTransport = {
     batteryChargePercent: number;
   }): Promise<{ protectionState: string; upsBanner: UpsAlertBannerDto }> {
     return requestJson('/api/hal/ups-state', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  // Local QR Table Ordering & Captive Portal APIs (POS Loopback Port 4173)
+  getQrOrderingConfig(outletId = 'OUTLET-HQ'): Promise<{
+    config: QrOrderingConfigDto;
+    status: QrOrderingRuntimeStatusDto;
+    tableSessions: TableQrSessionDto[];
+  }> {
+    return requestJson(`/api/qr-ordering/config?outletId=${encodeURIComponent(outletId)}`);
+  },
+
+  saveQrOrderingConfig(
+    input: Partial<QrOrderingConfigDto> & { outletId?: string }
+  ): Promise<{
+    ok: boolean;
+    config: QrOrderingConfigDto;
+    status: QrOrderingRuntimeStatusDto;
+    tableSessions: TableQrSessionDto[];
+  }> {
+    return requestJson('/api/qr-ordering/config', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  openTableQrSession(input: {
+    outletId?: string;
+    tableLabel: string;
+    openedByName?: string;
+  }): Promise<{
+    ok: boolean;
+    session: TableQrSessionDto;
+    tableSessions: TableQrSessionDto[];
+  }> {
+    return requestJson('/api/qr-ordering/table-session', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  revokeTableQrSession(input: {
+    outletId?: string;
+    tableLabel: string;
+  }): Promise<{
+    ok: boolean;
+    revoked: boolean;
+    tableSessions: TableQrSessionDto[];
+  }> {
+    return requestJson('/api/qr-ordering/table-session', {
+      method: 'DELETE',
+      body: JSON.stringify(input),
+    });
+  },
+
+  listQrGuestOrders(outletId = 'OUTLET-HQ'): Promise<{
+    orders: GuestOrderRecordDto[];
+    pendingCount: number;
+    tableSessions: TableQrSessionDto[];
+    status: QrOrderingRuntimeStatusDto;
+  }> {
+    return requestJson(`/api/qr-ordering/orders?outletId=${encodeURIComponent(outletId)}`);
+  },
+
+  acceptQrGuestOrder(input: {
+    outletId?: string;
+    guestOrderId: string;
+  }): Promise<{
+    ok: boolean;
+    order: GuestOrderRecordDto;
+    heldBillId: string;
+    kdsSequenceIds: number[];
+    orders: GuestOrderRecordDto[];
+    heldBills: HeldBillRecordDto[];
+    kdsTickets: KdsTicketDto[];
+  }> {
+    return requestJson('/api/qr-ordering/orders/accept', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  rejectQrGuestOrder(input: {
+    outletId?: string;
+    guestOrderId: string;
+    reason: string;
+  }): Promise<{
+    ok: boolean;
+    order: GuestOrderRecordDto;
+    orders: GuestOrderRecordDto[];
+  }> {
+    return requestJson('/api/qr-ordering/orders/reject', {
       method: 'POST',
       body: JSON.stringify(input),
     });

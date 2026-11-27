@@ -405,6 +405,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Rust Cargo Workspace (`cargo test --workspace`): **18/18 passing (100%)**
   - Schema Checksum Verification: **34 Tables, 4 Triggers, SHA-256 Checksum Match**
 
+---
+
+## [3.1.1] - 2026-11-27
+
+### Multi-Country Support (Lao PDR `LA` Phases 1–4), Multi-Currency FX Cash Tender (Phase 5) & Local LAN QR Table Ordering with Captive Portal (Phase 8)
+
+#### Added — Lao PDR (`LA`) Full Country Support (Phases 1–4)
+- **Multi-Country Fiscal, Currency & Tax Engine (`packages/shared-contracts/src/currency.ts`, `packages/core-engine/src/runtime/sqlite-engine.ts`)**:
+  - รองรับการสลับโปรไฟล์ประเทศ **ไทย (`TH` — THB `฿`, ทศนิยม 2 ตำแหน่ง, VAT 7%)** และ **สปป.ลาว (`LA` — LAK `₭`, ทศนิยม 0 ตำแหน่งสำหรับราคาขายปลีก พร้อมคงความละเอียด Sub-Kip ใน BOM/MAC, อากอน ອມພ 10% / 0%)** โดยไม่แก้ไข `0001_initial_v3_1_schema.sql` (เก็บค่าการตั้งค่าด้วยลายเซ็น `HMAC-SHA256` ใน `store_config`)
+  - รองรับนโยบายปัดเศษเงินสดกีบอัตโนมัติ (**LAK Cash Rounding**: ไม่ปัด / ปัดลง `500 ₭` / ปัดลง `1,000 ₭`) พร้อมคงสมการบัญชีและส่วนลดปัดเศษแม่นยำ 100%
+  - รองรับรหัสใบกำกับภาษีลาว (`INV-LA-YYYYMMDD-XXXXXX`), ปี ค.ศ. (Gregorian CE) ในเขตเวลา `Asia/Vientiane`, และตัวคูณราคาบาร์โค้ดตราชั่งลาว (`Prefix 25–29` สำหรับ `×100 ₭`, `×1,000 ₭`, `×1 ₭`)
+- **Offline Static-to-Dynamic LAOQR / BCEL OnePay & Lao Slip Anti-Fraud (`packages/shared-contracts/src/lao-payment.ts`, `packages/hal-drivers/src/payment/mod.ts`)**:
+  - รองรับการนำเข้า Static EMVCo QR ของร้านในเครือ **LAPNet / LAOQR / BCEL OnePay** และแปลงเป็น **Dynamic QR ออฟไลน์ 100%** (อัปเดต `Tag 01=12`, `Tag 53=418`, แทรก `Tag 54` ยอดกีบ, `Tag 58=LA` และคำนวณ `Tag 63 CRC16-CCITT` ใหม่ทุกบิล)
+  - ระบบป้องกันสลิปโอนเงินซ้ำด้วยแฮช `SHA-256` ครอบคลุมธนาคารลาว (BCEL, LDB, JDB, APB, Maruhan, Sacombank ฯลฯ) พร้อมนโยบายตรวจสลิป (`STRICT_REF` / `VISUAL_CONFIRM_ALLOWED`)
+- **3-Language Offline i18n (`lo` / `th` / `en`), Bundled Lao Fonts & Win32 `KBDLAO.DLL` Scanner (`packages/ui-presentation/src/app/i18n/`, `packages/hal-drivers/src/scanner/mod.ts`, `packages/ui-presentation/src/app/utils/keyboard-digits.ts`)**:
+  - ฝังฟอนต์ออฟไลน์ **`@fontsource/noto-sans-lao` (`.woff2` / `.woff`)** ลงใน Production Bundle และ `Setup.exe` โดยไม่ต้องต่ออินเทอร์เน็ต
+  - ตั้งค่าเริ่มต้นหน้าจอและใบเสร็จเป็น **ภาษาลาว (`lo`)** อัตโนมัติเมื่อเลือกประเทศ `LA` และสลับ **ລາວ / ไทย / EN** ได้ทันทีบนแถบด้านบน
+  - รองรับการแปลงเลขลาว (`໐–໙`) และแป้นพิมพ์ Win32 `KBDLAO.DLL` เข้าสู่ตัวเลขมาตรฐาน พร้อมปุ่มธนบัตรกีบ (`500 ₭` – `100,000 ₭`), ปุ่มพิมพ์ลัด `000`, และการนับเงินปิดกะ Blind Drop สกุลกีบ
+  - อัปเกรดตัววาดใบเสร็จและ Z-Report 203-DPI (`thai-canvas-rasterizer.ts` & `packages/hal-drivers/src/printer/mod.ts`) ให้รองรับทั้ง 3 ภาษา (ลาว/ไทย/อังกฤษ) ไม่มีสระลอย
+
+#### Added — Multi-Currency FX Cash Tender (Phase 5: `LAK` + `THB` + `USD`)
+- **HMAC-Protected Store FX Rates & Exact BigInt Conversion (`currency.ts`, `sqlite-engine.ts`, `pos-desktop-server.ts`)**:
+  - รองรับร้านค้าใน สปป.ลาว รับชำระเงินสดเป็น **บาทไทย (`THB ฿`)** หรือ **ดอลลาร์สหรัฐ (`USD $`)** และคำนวณยอดทอนเป็น **กีบ (`LAK ₭`)** ด้วยคณิตศาสตร์ `BigInt` ไร้ทศนิยมลอย
+  - บันทึกอัตราแลกเปลี่ยนร้านค้าลง `store_config` (`fx_rates_json`) พร้อมลายเซ็น `HMAC-SHA256` และบันทึกหลักฐานธุรกรรม FX ลงตารางนิรภัย `security_audit_logs` (`event_type = 'FX_CASH_TENDER'`) โดยเชื่อม `JOIN sales_orders` เพื่อตัดบิลยกเลิก (`VOIDED`) ออกจากรายงานอัตโนมัติ
+  - เพิ่มสลับสกุลเงินสดในหน้าชำระเงิน (`PosRegisterWorkspace.tsx`), พิมพ์บรรทัด FX บนใบเสร็จ 203-DPI และใบพิมพ์ซ้ำ, เพิ่มเครื่องนับธนบัตร `THB`/`USD` ในหน้าปิดกะ Blind Drop และส่วนสรุป **Multi-Currency Drawer Breakdown** บนรายงาน Z-Report (`ShiftAndReportsWorkspace.tsx`)
+
+#### Added — Local LAN QR Table Ordering & Captive Portal (Phase 8)
+- **Zero-Trust Port Isolation (`packages/ui-presentation/src/server/guest-qr-server.ts`)**:
+  - แยกเซิร์ฟเวอร์สำหรับมือถือลูกค้าเป็น `http.Server` อิสระบน **`0.0.0.0:4174`** (**ปิดเป็นค่าเริ่มต้น**, เปิด/ปิดได้แบบ Live ในหน้าตั้งค่า) ขณะที่ระบบ POS หลักยังคงล็อก Loopback **`127.0.0.1:4173`** 100% และบล็อก API ของ POS/Admin บนพอร์ตลูกค้าด้วย `HTTP 403`
+  - รองรับ **Captive Portal OS Probe Intercept** (`/generate_204`, `/gen_204`, `/hotspot-detect.html`, `/ncsi.txt`, `/connecttest.txt`, `/redirect`, `/canonical.html` -> `302 /m?captive=1`), **Per-IP Rate Limiting (`HTTP 429`)**, ซ่อนวัตถุดิบ `CAT-RAW` และต้นทุน MAC จาก `GET /api/guest/menu`, และคำนวณราคาออเดอร์ใหม่ฝั่งเซิร์ฟเวอร์ทุกครั้งด้วย `BigInt`
+- **Offline Mobile Customer Self-Ordering Web App (`packages/ui-presentation/src/server/guest-menu-html.ts`)**:
+  - หน้าเว็บมือถือ Zero-Dependency 3 ภาษา (**ລາວ / ไทย / EN**) ใช้ฟอนต์ `Noto Sans Lao` จากเครื่อง POS โดยตรง ไม่มี CDN ภายนอก
+  - รองรับการเลือกหมวดหมู่, เลือกตัวเลือกเสริม **Modifiers** + โน้ตถึงครัว, เลือกโต๊ะ (หรือล็อกโต๊ะอัตโนมัติจาก Signed Table QR), และหน้าติดตามสถานะสดจาก KDS (`รอร้านรับ -> รับออเดอร์แล้ว -> กำลังทำ -> พร้อมเสิร์ฟ`)
+- **HMAC-Signed Table Sessions, Cashier Inbox, KDS Integration & Printable Thermal/A4 QR (`qr-ordering.ts`, `QrOrderingInboxPanel.tsx`, `QrOrderingSettingsCard.tsx`, `thai-canvas-rasterizer.ts`, `a4-qr-sheet-printer.ts`)**:
+  - แท็บ **"ออเดอร์ QR"** ในหน้าขาย POS พร้อมเสียงกระดิ่ง WebAudio แจ้งเตือนเมื่อมีออเดอร์ใหม่, ปุ่ม **"รับออเดอร์ -> รวมบิลโต๊ะ & ส่งครัว KDS"** (รองรับทั้งโหมด **Cashier Confirm** ค่าเริ่มต้น และ **Auto-Accept เฉพาะ Signed Table QR**), และปุ่มปฏิเสธพร้อมส่งเหตุผลกลับหน้าจอมือถือลูกค้า
+  - ข้ามการส่งตั๋วครัว KDS ซ้ำอัตโนมัติ (`skipKdsEnqueue`) เมื่อเช็กบิลโต๊ะที่ส่งเข้าครัวไปแล้ว และยกเลิก Signed Table QR ของโต๊ะนั้นอัตโนมัติทันทีที่ชำระเงินปิดบิล
+  - รองรับการพิมพ์ **สลิปเปิดโต๊ะความร้อน 203-DPI (80mm / 58mm)** ที่มีทั้ง **Wi-Fi QR** และ **Signed Table QR** จากหน้า POS รวมถึงหน้า **พิมพ์แผ่นป้าย QR ตั้งโต๊ะ A4 ทุกโต๊ะ** และคู่มือตั้งค่า Captive Portal (MikroTik / OpenWrt / UniFi) + Windows Firewall ในหน้าตั้งค่าระบบ
+
+#### Verified & Tested (2026-11-27)
+- **TypeScript (`npx tsc --noEmit`)**: **0 errors**
+- **PR Gatekeeping (`npm run verify:pr-gatekeeping`)**: **3/3 Rules PASSED** (Zero `f32`/`f64`/`parseFloat` ทั่ว 19 Rust files & 49 TS files, Contract Parity, SQLite Schema SHA-256 `866a600d3e5eaf0351712c2e7d3085dc6abd68f39f800a1dc7d7ada1895b8d37` คงเดิม 100%)
+- **Automated Node.js E2E & Invariant Suite (`npm test`)**: **50/50 tests PASSED (0 failed)** — เพิ่ม `tests/e2e-integration/phase7-lao-country-support.test.ts` (8 tests) และ `tests/e2e-integration/phase8-local-qr-ordering.test.ts` (2 comprehensive suites)
+- **Rust Workspace & Tauri Native Tests (`cargo test`)**: **23/23 tests PASSED (0 failed)**
+- **UI/UX & Offline Audit**: **0 violations** (Zero CDN, Zero `#80868b`, Zero `shadow-*`, Zero `window.alert/confirm/prompt`)
+- **Windows Installer Build (`npm run build:installer`)**: สร้าง `dist-installer/RubeStockPOS_3.1.1_x64_Setup.exe` (`46,904,832` bytes) สำเร็จพร้อมฟอนต์ลาวออฟไลน์ครบชุด
+
+
 
 
 

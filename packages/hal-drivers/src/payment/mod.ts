@@ -8,7 +8,41 @@
 
 import { createHash } from 'node:crypto';
 import type { Satang } from '../../../shared-contracts/src/fixed-point.ts';
+import {
+  type LocaleCode,
+  formatMoney,
+} from '../../../shared-contracts/src/currency.ts';
+import {
+  type EmvCoTlvNode,
+  type LaoBankOption,
+  type ValidatedLaoQrTemplate,
+  LAO_BANKS,
+  buildSampleStaticLaoQrTemplate,
+  computeCrc16CcittHex,
+  formatEmvTlv,
+  generateOfflineLaoQrDynamicQr,
+  getLaoBankDisplayName,
+  parseEmvCoTlv,
+  serializeEmvCoTlvWithCrc,
+  validateLaoQrStaticTemplate,
+} from '../../../shared-contracts/src/lao-payment.ts';
 import type { BotSlipVerificationResult } from '../../../shared-contracts/src/hal-events.ts';
+
+export {
+  type EmvCoTlvNode,
+  type LaoBankOption,
+  type ValidatedLaoQrTemplate,
+  LAO_BANKS,
+  buildSampleStaticLaoQrTemplate,
+  computeCrc16CcittHex,
+  generateOfflineLaoQrDynamicQr,
+  getLaoBankDisplayName,
+  parseEmvCoTlv,
+  serializeEmvCoTlvWithCrc,
+  validateLaoQrStaticTemplate,
+};
+
+const formatTlv = formatEmvTlv;
 
 const THAI_BANK_NAMES: Readonly<Record<string, string>> = {
   '002': 'ธนาคารกรุงเทพ (BBL)',
@@ -20,24 +54,112 @@ const THAI_BANK_NAMES: Readonly<Record<string, string>> = {
   '030': 'ธนาคารออมสิน (GSB)',
 };
 
-export function computeCrc16CcittHex(payload: string): string {
-  let crc = 0xffff;
-  for (let i = 0; i < payload.length; i++) {
-    crc ^= payload.charCodeAt(i) << 8;
-    for (let bit = 0; bit < 8; bit++) {
-      if ((crc & 0x8000) !== 0) {
-        crc = ((crc << 1) ^ 0x1021) & 0xffff;
-      } else {
-        crc = (crc << 1) & 0xffff;
-      }
-    }
+/**
+ * Verifies a Lao Bank Transfer Slip Reference / QR payload in 100% Offline Mode:
+ * - Accepts either a direct transfer Reference/Ticket ID (4–64 alphanumeric chars) OR a scanned bank slip QR string
+ * - Computes SHA-256 hash of `LA:${bankCode}:${normalizedRef}` to prevent duplicate slip reuse
+ * - Always flags `requiresVisualAmountConfirmation = true` so cashier verifies actual Kip transfer amount
+ */
+export function verifyOfflineLaoTransferSlip(
+  rawRefOrQr: string,
+  senderBankCodeRaw: string,
+  expectedAmountSatang: Satang,
+  usedSlipHashes: Set<string>,
+  options?: VerifyBotSlipOptions & { locale?: LocaleCode | undefined }
+): BotSlipVerificationResult {
+  const bankCode = (senderBankCodeRaw || 'BCEL').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '') || 'BCEL';
+  const locale = options?.locale ?? 'lo';
+  const bankDisplayName = getLaoBankDisplayName(bankCode, locale);
+  const cleaned = rawRefOrQr.trim().replace(/\s+/g, '');
+
+  if (cleaned.length < 4 || cleaned.length > 160) {
+    return {
+      validFormat: false,
+      isDuplicate: false,
+      senderBankCode: bankCode,
+      senderBankNameThai: bankDisplayName,
+      transRef: '',
+      transRefLast4: '',
+      transRefSha256Hex: '',
+      expectedAmountSatang,
+      requiresVisualAmountConfirmation: true,
+      errorReason:
+        locale === 'lo'
+          ? 'ກະລຸນາປ້ອນ ຫຼື ສະແກນເລກອ້າງອີງສະລິບໂອນເງິນ (ຢ່າງໜ້ອຍ 4 ຕົວອັກສອນ)'
+          : locale === 'en'
+            ? 'Please enter or scan the bank transfer reference / ticket ID (at least 4 characters)'
+            : 'กรุณากรอกหรือสแกนเลขที่อ้างอิงสลิปโอนเงิน (อย่างน้อย 4 ตัวอักษร)',
+    };
   }
-  return crc.toString(16).toUpperCase().padStart(4, '0');
+
+  // Canonicalize reference string (preserve alphanumeric + _ - for hash determinism)
+  const canonicalRef = cleaned.toUpperCase();
+  const transRefSha256Hex = createHash('sha256')
+    .update(`LA:${bankCode}:${canonicalRef}`)
+    .digest('hex');
+
+  const isDuplicate = usedSlipHashes.has(transRefSha256Hex);
+  const shouldCommit = options?.commitSlipHash ?? true;
+  if (!isDuplicate && shouldCommit) {
+    usedSlipHashes.add(transRefSha256Hex);
+  }
+
+  return {
+    validFormat: true,
+    isDuplicate,
+    senderBankCode: bankCode,
+    senderBankNameThai: bankDisplayName,
+    transRef: canonicalRef,
+    transRefLast4: canonicalRef.slice(-4),
+    transRefSha256Hex,
+    expectedAmountSatang,
+    requiresVisualAmountConfirmation: true,
+    ...(isDuplicate
+      ? {
+          errorReason:
+            locale === 'lo'
+              ? 'ກວດພົບການໃຊ້ສະລິບໂອນເງິນຊ້ຳ! (Duplicate Slip Fraud Alert)'
+              : locale === 'en'
+                ? 'Duplicate transfer slip reference detected! (Duplicate Slip Fraud Alert)'
+                : 'ตรวจพบการใช้สลิปโอนเงินซ้ำ! (Duplicate Slip Fraud Alert)',
+        }
+      : {}),
+  };
 }
 
-function formatTlv(tag: string, value: string): string {
-  const len = value.length.toString().padStart(2, '0');
-  return `${tag}${len}${value}`;
+export function buildTwoPhaseLaoSlipConfirmationModal(
+  rawRefOrQr: string,
+  senderBankCode: string,
+  expectedAmountSatang: Satang,
+  usedSlipHashes: Set<string>,
+  locale: LocaleCode = 'lo'
+): TwoPhaseSlipConfirmationModalModel {
+  const verification = verifyOfflineLaoTransferSlip(
+    rawRefOrQr,
+    senderBankCode,
+    expectedAmountSatang,
+    usedSlipHashes,
+    { commitSlipHash: false, locale }
+  );
+
+  const expectedAmountFormatted = formatMoney(expectedAmountSatang, 'LAK');
+  const warningText =
+    locale === 'lo'
+      ? 'ກະລຸນາກວດສອບຍອດເງິນໃນແອັບທະນາຄານ/ສຽງແຈ້ງເຕືອນ OnePay ໃຫ້ຕົງກັບຍອດສຸດທິຂ້າງເທິງກ່ອນກົດຢືນຢັນ'
+      : locale === 'en'
+        ? 'Please verify the exact LAK amount received in your bank app / OnePay notification before confirming'
+        : 'โปรดตรวจสอบยอดเงินกีบในแอปธนาคาร/เสียงแจ้งเตือน OnePay ให้ตรงกับยอดสุทธิขนาดใหญ่ด้านบนก่อนกดยืนยัน';
+
+  return {
+    canProceedToStep2Confirm: verification.validFormat && !verification.isDuplicate,
+    verification,
+    expectedAmountSatang,
+    expectedAmountFormatted,
+    senderBankCode: verification.senderBankCode,
+    senderBankNameThai: verification.senderBankNameThai,
+    transRefLast4: verification.transRefLast4,
+    antiFraudWarningBannerThai: warningText,
+  };
 }
 
 /**

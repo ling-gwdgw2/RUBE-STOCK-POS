@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { formatMilliUnitsToQtyString } from '../../../../shared-contracts/src/fixed-point.ts';
 import { posTransport } from '../api/pos-transport.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type { KdsTicketDto } from '../types.ts';
 import { UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
@@ -68,6 +69,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
   onRefreshBootstrap,
   onToast,
 }) => {
+  const { dateTime, pick } = useI18n();
   const [tickets, setTickets] = useState<KdsTicketDto[]>(initialTickets);
   const [stationFilter, setStationFilter] = useState<string>('ALL');
   const [includeServed, setIncludeServed] = useState(false);
@@ -275,7 +277,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
               {autoSyncEnabled && (
                 <span className="inline-flex items-center gap-1 rounded-[48px] border border-white/25 px-2.5 py-0.5 text-[11px] normal-case text-white tabular-nums-google">
                   <Radio className="h-3 w-3 text-primary" />
-                  ซิงค์อัตโนมัติ · {lastSyncedAt.toLocaleTimeString('th-TH')}
+                  {pick('ซิงค์อัตโนมัติ', 'ຊິງຄ໌ອັດຕະໂນມັດ', 'Auto-Sync')} · {dateTime(lastSyncedAt)}
                 </span>
               )}
             </div>

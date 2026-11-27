@@ -2,8 +2,8 @@
 
 Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Hardened Blueprint)
 
-[![Phase 0–6 & HIL Tests](https://img.shields.io/badge/Node%20Tests-34%2F34%20Passing-brightgreen)](#automated-testing)
-[![Rust Workspace Tests](https://img.shields.io/badge/Cargo%20Tests-18%2F18%20Passing-brightgreen)](#automated-testing)
+[![Phase 0–8 & HIL Tests](https://img.shields.io/badge/Node%20Tests-50%2F50%20Passing-brightgreen)](#automated-testing)
+[![Rust Workspace Tests](https://img.shields.io/badge/Cargo%20Tests-23%2F23%20Passing-brightgreen)](#automated-testing)
 [![Architecture Version](https://img.shields.io/badge/Architecture-v3.1.1-blue)](#key-architectural-pillars)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Standalone%20%7C%20Local%20LAN-orange)](#overview)
 
@@ -33,9 +33,13 @@ Unified Local-First Warehouse & POS System (Enterprise Production & Audit-Harden
 4. **Local LAN Cluster & Epoch Fencing**:
    - ค้นหาเครื่องแม่ข่ายอัตโนมัติด้วย mDNS (`_rube-pos._tcp.local.`) และเข้ารหัส mTLS
    - ซิงค์เครื่องสำรองด้วยสตรีมธุรกรรมเชิงตรรกะ (`global_tx_seq`) และกั้น Split-Brain ด้วย `cluster_epoch`
-5. **Complete Shift Management & Thai VAT (ABB)**:
-   - ตาราง `pos_shifts` และ `cash_drawer_movements` ควบคุมเงินสดในลิ้นชักแม่นยำ
-   - รองรับใบกำกับภาษีอย่างย่อ (ABB) พร้อมสูตรถอด VAT 7% สตางค์ตรงเป๊ะ
+5. **Complete Shift Management, Multi-Country Fiscal (`TH` / `LA`) & Multi-Currency FX**:
+   - ตาราง `pos_shifts` และ `cash_drawer_movements` ควบคุมเงินสดในลิ้นชักแบบ Blind Drop แม่นยำ
+   - รองรับทั้ง **ประเทศไทย (`THB ฿`, VAT 7% ABB, PromptPay & BOT Mini-QR)** และ **สปป.ลาว (`LAK ₭`, ອມພ 10%/0%, ปัดเศษเงินสด 500/1,000 ₭, Static-to-Dynamic LAOQR/BCEL OnePay, ภาษา ລາວ/ไทย/EN พร้อมฟอนต์ Noto Sans Lao ออฟไลน์)**
+   - รองรับการรับเงินสดหลายสกุลเงิน (**Multi-Currency FX Cash Tender: `LAK` + `THB` + `USD`**) พร้อมอัตราแลกเปลี่ยนที่ลงนาม `HMAC-SHA256` และรายงานแยกสกุลเงินบน Z-Report
+6. **Zero-Trust Local LAN QR Table Ordering & Captive Portal (100% Offline)**:
+   - เซิร์ฟเวอร์ลูกค้าแยกพอร์ตอิสระ (`0.0.0.0:4174`, ปิดเป็นค่าเริ่มต้น) แยกขาดจากพอร์ต POS หลัก (`127.0.0.1:4173`) พร้อมดักจับ Captive Portal Probe (`/generate_204`, `/hotspot-detect.html`, `/ncsi.txt`) และ Per-IP Rate Limiting
+   - หน้าเว็บเมนูมือถือ 3 ภาษา (**ລາວ / ไทย / EN**) โหลดผ่าน Wi-Fi วง LAN โดยตรง, รองรับ **HMAC-Signed Table QR**, พิมพ์ใบเปิดโต๊ะความร้อน 80mm/58mm (Wi-Fi QR + Table QR) และแผ่นป้ายตั้งโต๊ะ A4 ทุกโต๊ะ, รวมออเดอร์เข้าบิลพักโต๊ะ + ส่งจอครัว KDS พร้อมติดตามสถานะสดบนมือถือลูกค้า
 
 ---
 
@@ -114,11 +118,17 @@ npm run test:hil
 # รันชุดทดสอบเซิร์ฟเวอร์และหน้าจอ Interactive POS & Warehouse UI Server (E2E)
 npm run test:ui-server
 
-# รันชุดทดสอบทั้งหมดของฝั่ง TypeScript / SQLite Runtime (Phase 0–5 + Section 6.2 HIL + Interactive UI Server + Accounting Invariants)
+# รันชุดทดสอบรองรับ สปป.ลาว (LAK, VAT 10%/0%, LAOQR/BCEL OnePay, Multi-Currency FX THB/USD -> LAK)
+npm run test:lao
+
+# รันชุดทดสอบระบบสแกนสั่งอาหารผ่าน Wi-Fi วง LAN (Isolated Guest Port 4174, Captive Portal, Signed Table QR, Held Bill + KDS)
+npm run test:qr
+
+# รันชุดทดสอบทั้งหมดของฝั่ง TypeScript / SQLite Runtime (50/50 Tests: Phase 0–8 + Section 6.2 HIL + Accounting Invariants)
 npm test
 
-# รันชุดทดสอบและคอมไพล์ฝั่ง Rust Workspace ทั้ง 4 Crates (rusqlite + i128 math + Shift/VAT + Keyring HMAC + 5-Step Migrator + mDNS/mTLS/KDS/Epoch Fencing)
-cargo test
+# รันชุดทดสอบและคอมไพล์ฝั่ง Rust Workspace + Tauri Shell (23/23 Tests)
+cargo test && cargo test --manifest-path src-tauri/Cargo.toml
 ```
 ---
 

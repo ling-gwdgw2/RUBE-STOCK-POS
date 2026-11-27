@@ -115,11 +115,16 @@ export function encodeChunkedRasterGsV0(
 
 export interface ThaiAbbReceiptPrintInput {
   storeName: string;
+  storeAddress?: string | undefined;
   taxId: string;
   branchCode: string;
   posRegNo: string;
   receiptNumber: string;
   abbTaxInvoiceNo: string;
+  countryCode?: 'TH' | 'LA' | undefined;
+  receiptLocale?: 'th' | 'lo' | 'en' | undefined;
+  vatRatePercentLabel?: string | undefined;
+  taxMode?: 'NONE' | 'INCLUSIVE' | 'EXCLUSIVE' | undefined;
   lines: ReadonlyArray<{
     itemName: string;
     quantityFormatted: string;
@@ -128,12 +133,14 @@ export interface ThaiAbbReceiptPrintInput {
   }>;
   subtotalFormatted: string;
   discountFormatted: string;
+  cashRoundingDiscountFormatted?: string | undefined;
   netBeforeTaxFormatted: string;
   taxFormatted: string;
   totalFormatted: string;
   paymentMethod: 'CASH' | 'PROMPTPAY_QR' | 'CARD' | 'VOUCHER';
   cashTenderedFormatted?: string;
   changeGivenFormatted?: string;
+  fxTenderSummaryLine?: string | undefined;
   slipRefLast4?: string;
   kickCashDrawer: boolean;
   widthPx?: 384 | 576;
@@ -151,7 +158,7 @@ export interface RenderedThaiAbbPrintJob {
 }
 
 /**
- * Phase 2 (`PRINTER_HAL` — WBS-08): Renders a Thai Simplified Tax Invoice (ABB) into a 203-DPI
+ * Phase 2 (`PRINTER_HAL` — WBS-08): Renders a Thai ABB or Lao VAT/Receipt invoice into a 203-DPI
  * monochrome raster bitmap, slices it into safe `GS v 0` bands (`<= 8 KB`) with `ESC J n` whitespace skipping,
  * and appends Cash Drawer Kick (`ESC p`) + Paper Cut (`GS V`).
  */
@@ -160,38 +167,153 @@ export function renderThaiReceiptAbbEscPosJob(
 ): RenderedThaiAbbPrintJob {
   const widthPx = input.widthPx ?? 576;
   const widthBytes = widthPx / 8;
+  const isLaos = input.countryCode === 'LA';
+  const locale = input.receiptLocale ?? (isLaos ? 'lo' : 'th');
+  const vatPct = input.vatRatePercentLabel ?? (isLaos ? '10' : '7');
+  const taxMode = input.taxMode ?? 'INCLUSIVE';
 
-  const formattedTextLines: string[] = [
-    `*** ใบเสร็จรับเงิน/ใบกำกับภาษีอย่างย่อ (ABB) ***`,
-    `${input.storeName} (สาขา ${input.branchCode})`,
-    `TAX ID: ${input.taxId} | POS REG: ${input.posRegNo}`,
-    `เลขที่ใบกำกับภาษี: ${input.abbTaxInvoiceNo} | เลขที่บิล: ${input.receiptNumber}`,
-    `------------------------------------------------`,
-  ];
+  const paymentLabel =
+    input.paymentMethod === 'PROMPTPAY_QR'
+      ? isLaos
+        ? 'LAOQR / OnePay'
+        : 'PROMPTPAY_QR'
+      : input.paymentMethod;
 
-  for (const line of input.lines) {
-    formattedTextLines.push(
-      `${line.itemName} x${line.quantityFormatted} = ${line.lineTotalFormatted}`
-    );
-    if (line.modifiersText) {
-      formattedTextLines.push(`  + ${line.modifiersText}`);
+  let formattedTextLines: string[];
+  if (isLaos && locale === 'lo') {
+    const title =
+      taxMode === 'NONE'
+        ? '*** ໃບບິນຮັບເງິນ (RECEIPT) ***'
+        : `*** ໃບບິນຮັບເງິນ / ໃບອາກອນມູນຄ່າເພີ່ມ (ອມພ ${vatPct}%) ***`;
+    formattedTextLines = [
+      title,
+      input.storeName,
+      ...(input.storeAddress?.trim() ? [input.storeAddress.trim()] : []),
+      `TIN: ${input.taxId || '-'} | POS: ${input.posRegNo || '-'}`,
+      `ເລກທີບິນ: ${input.abbTaxInvoiceNo} | Ref: ${input.receiptNumber}`,
+      `------------------------------------------------`,
+    ];
+    for (const line of input.lines) {
+      formattedTextLines.push(
+        `${line.itemName} x${line.quantityFormatted} = ${line.lineTotalFormatted}`
+      );
+      if (line.modifiersText) {
+        formattedTextLines.push(`  + ${line.modifiersText}`);
+      }
     }
-  }
-
-  formattedTextLines.push(
-    `------------------------------------------------`,
-    `รวมเป็นเงิน: ${input.subtotalFormatted} | ส่วนลด: ${input.discountFormatted}`,
-    `มูลค่าก่อนภาษี: ${input.netBeforeTaxFormatted} | VAT 7%: ${input.taxFormatted}`,
-    `ยอดสุทธิ (GRAND TOTAL): ${input.totalFormatted}`,
-    `ชำระโดย: ${input.paymentMethod}${input.slipRefLast4 ? ` (Ref *${input.slipRefLast4})` : ''}`
-  );
-
-  if (input.paymentMethod === 'CASH' && input.cashTenderedFormatted) {
     formattedTextLines.push(
-      `รับเงินสด: ${input.cashTenderedFormatted} | เงินทอน: ${input.changeGivenFormatted ?? '฿0.00'}`
+      `------------------------------------------------`,
+      `ລວມລາຄາສິນຄ້າ: ${input.subtotalFormatted} | ສ່ວນຫຼຸດ: ${input.discountFormatted}`,
+      ...(input.cashRoundingDiscountFormatted
+        ? [`ປັດເສດເງິນສົດ: -${input.cashRoundingDiscountFormatted}`]
+        : []),
+      `ມູນຄ່າກ່ອນອາກອນ: ${input.netBeforeTaxFormatted} | ອມພ ${vatPct}%: ${input.taxFormatted}`,
+      `ຍອດສຸດທິ (TOTAL): ${input.totalFormatted}`,
+      `ຊຳລະໂດຍ: ${paymentLabel}${input.slipRefLast4 ? ` (Ref *${input.slipRefLast4})` : ''}`
+    );
+    if (input.paymentMethod === 'CASH' && input.fxTenderSummaryLine) {
+      formattedTextLines.push(input.fxTenderSummaryLine);
+      formattedTextLines.push(`ເງິນທອນ (LAK): ${input.changeGivenFormatted ?? '0 ₭'}`);
+    } else if (input.paymentMethod === 'CASH' && input.cashTenderedFormatted) {
+      formattedTextLines.push(
+        `ຮັບເງິນສົດ: ${input.cashTenderedFormatted} | ເງິນທອນ: ${input.changeGivenFormatted ?? '0 ₭'}`
+      );
+    }
+    formattedTextLines.push(
+      taxMode === 'NONE'
+        ? '*** ຂອບໃຈທີ່ໃຊ້ບໍລິການ ***'
+        : `*** VAT ${vatPct}% ${taxMode === 'EXCLUSIVE' ? '(ແຍກນອກ)' : '(ລວມໃນ)'} - ຂອບໃຈທີ່ໃຊ້ບໍລິການ ***`
+    );
+  } else if (locale === 'en') {
+    const title = isLaos
+      ? taxMode === 'NONE'
+        ? '*** OFFICIAL RECEIPT ***'
+        : `*** RECEIPT / TAX INVOICE (VAT ${vatPct}%) ***`
+      : '*** RECEIPT / TAX INVOICE (ABB) ***';
+    formattedTextLines = [
+      title,
+      input.storeName,
+      ...(input.storeAddress?.trim() ? [input.storeAddress.trim()] : []),
+      `${isLaos ? 'TIN' : 'TAX ID'}: ${input.taxId || '-'} | POS: ${input.posRegNo || '-'}`,
+      `INVOICE: ${input.abbTaxInvoiceNo} | BILL: ${input.receiptNumber}`,
+      `------------------------------------------------`,
+    ];
+    for (const line of input.lines) {
+      formattedTextLines.push(
+        `${line.itemName} x${line.quantityFormatted} = ${line.lineTotalFormatted}`
+      );
+      if (line.modifiersText) {
+        formattedTextLines.push(`  + ${line.modifiersText}`);
+      }
+    }
+    formattedTextLines.push(
+      `------------------------------------------------`,
+      `Subtotal: ${input.subtotalFormatted} | Discount: ${input.discountFormatted}`,
+      ...(input.cashRoundingDiscountFormatted
+        ? [`Cash Rounding: -${input.cashRoundingDiscountFormatted}`]
+        : []),
+      `Net Before Tax: ${input.netBeforeTaxFormatted} | VAT ${vatPct}%: ${input.taxFormatted}`,
+      `GRAND TOTAL: ${input.totalFormatted}`,
+      `Paid via: ${paymentLabel}${input.slipRefLast4 ? ` (Ref *${input.slipRefLast4})` : ''}`
+    );
+    if (input.paymentMethod === 'CASH' && input.fxTenderSummaryLine) {
+      formattedTextLines.push(input.fxTenderSummaryLine);
+      formattedTextLines.push(`Change (${isLaos ? 'LAK' : 'THB'}): ${input.changeGivenFormatted ?? (isLaos ? '0 ₭' : '฿0.00')}`);
+    } else if (input.paymentMethod === 'CASH' && input.cashTenderedFormatted) {
+      formattedTextLines.push(
+        `Cash Tendered: ${input.cashTenderedFormatted} | Change: ${input.changeGivenFormatted ?? (isLaos ? '0 ₭' : '฿0.00')}`
+      );
+    }
+    formattedTextLines.push(`*** THANK YOU ***`);
+  } else {
+    const title = isLaos
+      ? taxMode === 'NONE'
+        ? '*** ใบเสร็จรับเงิน ***'
+        : `*** ใบเสร็จรับเงิน / ใบกำกับภาษี (VAT ${vatPct}% สปป.ลาว) ***`
+      : '*** ใบเสร็จรับเงิน/ใบกำกับภาษีอย่างย่อ (ABB) ***';
+    formattedTextLines = [
+      title,
+      `${input.storeName}${!isLaos && input.branchCode ? ` (สาขา ${input.branchCode})` : ''}`,
+      ...(input.storeAddress?.trim() ? [input.storeAddress.trim()] : []),
+      `${isLaos ? 'TIN' : 'TAX ID'}: ${input.taxId} | POS REG: ${input.posRegNo}`,
+      `เลขที่ใบกำกับภาษี: ${input.abbTaxInvoiceNo} | เลขที่บิล: ${input.receiptNumber}`,
+      `------------------------------------------------`,
+    ];
+
+    for (const line of input.lines) {
+      formattedTextLines.push(
+        `${line.itemName} x${line.quantityFormatted} = ${line.lineTotalFormatted}`
+      );
+      if (line.modifiersText) {
+        formattedTextLines.push(`  + ${line.modifiersText}`);
+      }
+    }
+
+    formattedTextLines.push(
+      `------------------------------------------------`,
+      `รวมเป็นเงิน: ${input.subtotalFormatted} | ส่วนลด: ${input.discountFormatted}`,
+      ...(input.cashRoundingDiscountFormatted
+        ? [`ปัดเศษเงินสด: -${input.cashRoundingDiscountFormatted}`]
+        : []),
+      `มูลค่าก่อนภาษี: ${input.netBeforeTaxFormatted} | VAT ${vatPct}%: ${input.taxFormatted}`,
+      `ยอดสุทธิ (GRAND TOTAL): ${input.totalFormatted}`,
+      `ชำระโดย: ${paymentLabel}${input.slipRefLast4 ? ` (Ref *${input.slipRefLast4})` : ''}`
+    );
+
+    if (input.paymentMethod === 'CASH' && input.fxTenderSummaryLine) {
+      formattedTextLines.push(input.fxTenderSummaryLine);
+      formattedTextLines.push(`เงินทอน (${isLaos ? 'กีบ LAK' : 'บาท'}): ${input.changeGivenFormatted ?? (isLaos ? '0 ₭' : '฿0.00')}`);
+    } else if (input.paymentMethod === 'CASH' && input.cashTenderedFormatted) {
+      formattedTextLines.push(
+        `รับเงินสด: ${input.cashTenderedFormatted} | เงินทอน: ${input.changeGivenFormatted ?? (isLaos ? '0 ₭' : '฿0.00')}`
+      );
+    }
+    formattedTextLines.push(
+      taxMode === 'NONE'
+        ? '*** ขอบคุณที่ใช้บริการ ***'
+        : `*** VAT INCLUDED - ขอบคุณที่ใช้บริการ ***`
     );
   }
-  formattedTextLines.push(`*** VAT INCLUDED - ขอบคุณที่ใช้บริการ ***`);
 
   // Synthesize deterministic 203-DPI 1-bit monochrome bitmap:
   // Each text line occupies 20 dots vertically, with a 24-dot whitespace gap before totals

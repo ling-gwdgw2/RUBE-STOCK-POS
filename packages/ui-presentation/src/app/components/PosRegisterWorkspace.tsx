@@ -32,19 +32,32 @@ import {
   X,
 } from 'lucide-react';
 import {
-  computeVatSatang,
   formatMilliUnitsToQtyString,
-  formatSatangToThbString,
   parseDecimalStringToScaledInt,
   roundDivBigInt,
   SCALE_BASIS_POINTS,
   SCALE_MILLI,
 } from '../../../../shared-contracts/src/fixed-point.ts';
 import {
+  type CashTenderCurrencyCode,
+  baseLakMinorToRequiredForeignMinor,
+  computeOrderFinancialTotals,
+  foreignMinorToBaseLakMinor,
+  formatForeignAmountForInput,
+  formatForeignMoney,
+  formatFxTenderReceiptLine,
+  getForeignQuickCashButtons,
+  getFxRateForCurrency,
+  getQuickCashTenderButtonsForCountry,
+  getSplitCashQuickPresetsForCountry,
+} from '../../../../shared-contracts/src/currency.ts';
+import { LAO_BANKS } from '../../../../shared-contracts/src/lao-payment.ts';
+import {
   posTransport,
   resolveBackendAssetUrl,
   type SlipConfirmationModalDto,
 } from '../api/pos-transport.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type { GlobalScannerRoutingMode } from '../hooks/useGlobalBarcodeScanner.ts';
 import {
   getAllowedOrderTypesForProfile,
@@ -58,13 +71,21 @@ import type {
   CartItem,
   CatalogVariantDetailDto,
   CheckoutOrderRequest,
+  GuestOrderRecordDto,
   HeldBillRecordDto,
   ModifierDto,
   PrintedReceiptPreview,
+  QrOrderingRuntimeStatusDto,
   SplitPaymentLegInput,
   StaffUserDto,
+  TableQrSessionDto,
   TaxMode,
 } from '../types.ts';
+import {
+  playNewQrOrderChime,
+  QrOrderingInboxPanel,
+  TableQrSlipModal,
+} from './QrOrderingInboxPanel.tsx';
 import { ConfirmDialog, ModalDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
 import { VoidOrderAuthModal, type VoidTargetOrderSummary } from './VoidOrderAuthModal.tsx';
 
@@ -336,10 +357,31 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   onRefreshState,
   onToast,
 }) => {
+  const {
+    fiscal,
+    countryCode,
+    currencyCode,
+    locale,
+    receiptLocale,
+    vatRatePercentLabel,
+    t,
+    pick,
+    money,
+    moneyInput,
+    parseMoney,
+    dateTime,
+  } = useI18n();
+  const isLaos = countryCode === 'LA';
+  const qrMethodLabel = isLaos ? t('pos.qrLabel.LA') : t('pos.qrLabel.TH');
+  const vatDisplayName =
+    locale === 'lo'
+      ? `ອມພ ${vatRatePercentLabel}%`
+      : `VAT ${vatRatePercentLabel}%`;
+
   const defaultLayout =
     bootstrap.profile === 'RETAIL' ? 'SCAN_LEDGER' : 'STUDIO_CARDS';
   const [posSubView, setPosSubView] = useState<
-    'STUDIO_CARDS' | 'SCAN_LEDGER' | 'HELD_BILLS' | 'ORDER_HISTORY'
+    'STUDIO_CARDS' | 'SCAN_LEDGER' | 'HELD_BILLS' | 'QR_ORDERS' | 'ORDER_HISTORY'
   >(defaultLayout);
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>('ALL');
   const [scanMultiplier, setScanMultiplier] = useState<number>(1);
@@ -347,7 +389,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     bootstrap.profile === 'RETAIL' ? 'RETAIL' : 'TAKEAWAY'
   );
   const [queueOrTableLabel, setQueueOrTableLabel] = useState<string>('');
-  const [taxMode, setTaxMode] = useState<TaxMode>('INCLUSIVE');
+  const [taxMode, setTaxMode] = useState<TaxMode>(fiscal.defaultTaxMode);
+  const [laoSenderBankCode, setLaoSenderBankCode] = useState<string>('BCEL');
+
+  useEffect(() => {
+    setTaxMode(fiscal.defaultTaxMode);
+  }, [fiscal.countryCode, fiscal.defaultTaxMode]);
 
   // Discount supports either Baht (THB) or Percentage (%)
   const [discountMode, setDiscountMode] = useState<'BAHT' | 'PERCENT'>('BAHT');
@@ -362,6 +409,85 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     () => bootstrap.heldBills ?? []
   );
   const [syncingHeldBills, setSyncingHeldBills] = useState<boolean>(false);
+
+  // Local LAN QR Table Ordering Inbox & Table QR Slip Modal
+  const [qrGuestOrders, setQrGuestOrders] = useState<GuestOrderRecordDto[]>(
+    () => bootstrap.qrGuestOrders ?? []
+  );
+  const [qrTableSessions, setQrTableSessions] = useState<TableQrSessionDto[]>(
+    () => bootstrap.qrTableSessions ?? []
+  );
+  const [qrStatus, setQrStatus] = useState<QrOrderingRuntimeStatusDto | undefined>(
+    () => bootstrap.qrOrderingStatus
+  );
+  const [syncingQrOrders, setSyncingQrOrders] = useState<boolean>(false);
+  const [tableQrModalOpen, setTableQrModalOpen] = useState<boolean>(false);
+  const prevPendingQrCountRef = useRef<number>(
+    (bootstrap.qrGuestOrders ?? []).filter((o) => o.status === 'PENDING_CONFIRM').length
+  );
+
+  useEffect(() => {
+    if (bootstrap.qrGuestOrders) {
+      setQrGuestOrders(bootstrap.qrGuestOrders);
+    }
+    if (bootstrap.qrTableSessions) {
+      setQrTableSessions(bootstrap.qrTableSessions);
+    }
+    if (bootstrap.qrOrderingStatus) {
+      setQrStatus(bootstrap.qrOrderingStatus);
+    }
+  }, [bootstrap.qrGuestOrders, bootstrap.qrTableSessions, bootstrap.qrOrderingStatus]);
+
+  const refreshQrGuestOrders = useCallback(
+    async (silent = false) => {
+      if (!silent) setSyncingQrOrders(true);
+      try {
+        const res = await posTransport.listQrGuestOrders(outletId);
+        setQrGuestOrders(res.orders);
+        setQrTableSessions(res.tableSessions);
+        setQrStatus(res.status);
+        if (res.pendingCount > prevPendingQrCountRef.current) {
+          playNewQrOrderChime();
+          const newest = res.orders.find((o) => o.status === 'PENDING_CONFIRM');
+          if (newest) {
+            onToast(
+              pick(
+                `ออเดอร์ QR ใหม่เข้า! ${newest.orderCode} (โต๊ะ ${newest.tableLabel}) — ${newest.lines.length} รายการ`,
+                `ອໍເດີ QR ໃໝ່ເຂົ້າ! ${newest.orderCode} (ໂຕະ ${newest.tableLabel})`,
+                `New QR Order ${newest.orderCode} (Table ${newest.tableLabel})`
+              ),
+              'warn'
+            );
+          }
+        }
+        prevPendingQrCountRef.current = res.pendingCount;
+      } catch {
+        // ignore transient polling error
+      } finally {
+        if (!silent) setSyncingQrOrders(false);
+      }
+    },
+    [onToast, outletId, pick]
+  );
+
+  useEffect(() => {
+    if (posSubView === 'QR_ORDERS') {
+      void refreshQrGuestOrders(false);
+    }
+  }, [posSubView, refreshQrGuestOrders]);
+
+  useEffect(() => {
+    if (!bootstrap.qrOrderingConfig?.enabled) return;
+    const timer = window.setInterval(() => {
+      void refreshQrGuestOrders(true);
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [bootstrap.qrOrderingConfig?.enabled, refreshQrGuestOrders]);
+
+  const pendingQrOrdersCount = useMemo(
+    () => qrGuestOrders.filter((o) => o.status === 'PENDING_CONFIRM').length,
+    [qrGuestOrders]
+  );
 
   // Order History Search & Status Filter (P3.1)
   const [orderHistoryQuery, setOrderHistoryQuery] = useState<string>('');
@@ -432,6 +558,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     'PROMPTPAY_QR'
   );
   const [splitCashBahtInput, setSplitCashBahtInput] = useState<string>('100');
+  const [cashTenderCurrency, setCashTenderCurrency] = useState<CashTenderCurrencyCode>('LAK');
   const [cashTenderedBahtInput, setCashTenderedBahtInput] = useState<string>('');
   const [cashNumpadPristine, setCashNumpadPristine] = useState<boolean>(true);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -586,10 +713,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     let discountSatang = 0;
     try {
       if (discountMode === 'BAHT') {
-        discountSatang = Math.min(
-          subtotalSatang,
-          Math.max(0, parseDecimalStringToScaledInt(discountInput || '0', 2))
-        );
+        discountSatang = Math.min(subtotalSatang, Math.max(0, parseMoney(discountInput || '0')));
       } else {
         const pctBps = Math.min(
           10_000,
@@ -603,10 +727,23 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       discountSatang = 0;
     }
 
-    const afterDiscount = Math.max(0, subtotalSatang - discountSatang);
-    const taxSatang = computeVatSatang(afterDiscount, 700, taxMode);
-    const netBeforeTaxSatang = taxMode === 'INCLUSIVE' ? afterDiscount - taxSatang : afterDiscount;
-    const totalSatang = taxMode === 'EXCLUSIVE' ? afterDiscount + taxSatang : afterDiscount;
+    const baseFinancials = computeOrderFinancialTotals({
+      subtotalSatang,
+      discountSatang,
+      vatRateBps: fiscal.vatRateBps,
+      taxMode,
+      currencyCode,
+      applyCashRounding: false,
+    });
+    const cashFinancials = computeOrderFinancialTotals({
+      subtotalSatang,
+      discountSatang,
+      vatRateBps: fiscal.vatRateBps,
+      taxMode,
+      currencyCode,
+      applyCashRounding: true,
+      cashRoundingStepMajor: fiscal.cashRoundingStepMajor,
+    });
     const totalItemUnitsCount = computedLines.reduce(
       (acc, l) => acc + (l.isWeightedScale ? 1 : Math.max(1, Math.round(l.quantityMilli / 1000))),
       0
@@ -615,13 +752,27 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     return {
       lines: computedLines,
       totalItemUnitsCount,
-      subtotalSatang,
-      discountSatang,
-      netBeforeTaxSatang,
-      taxSatang,
-      totalSatang,
+      subtotalSatang: baseFinancials.subtotalSatang,
+      discountSatang: baseFinancials.discountSatang,
+      netBeforeTaxSatang: baseFinancials.netBeforeTaxSatang,
+      taxSatang: baseFinancials.taxSatang,
+      totalSatang: baseFinancials.totalSatang,
+      cashPayableTotalSatang: cashFinancials.totalSatang,
+      cashRoundingDiscountSatang: cashFinancials.cashRoundingDiscountSatang,
+      cashNetBeforeTaxSatang: cashFinancials.netBeforeTaxSatang,
+      cashTaxSatang: cashFinancials.taxSatang,
     };
-  }, [cart, discountInput, discountMode, modifiersById, taxMode]);
+  }, [
+    cart,
+    currencyCode,
+    discountInput,
+    discountMode,
+    fiscal.cashRoundingStepMajor,
+    fiscal.vatRateBps,
+    modifiersById,
+    parseMoney,
+    taxMode,
+  ]);
 
   const addVariantToCartDirect = useCallback(
     (variant: CatalogVariantDetailDto, qtyMilli: number, modifierIds: string[] = []) => {
@@ -914,9 +1065,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
     if (cart.length > 0) {
       setConfirmAction({
-        title: `แทนที่บิลปัจจุบันด้วย "${held.referenceLabel}"?`,
-        description: `บิลปัจจุบันมีสินค้าอยู่ ${cartSummary.totalItemUnitsCount} รายการ (฿${formatSatangToThbString(cartSummary.totalSatang)}) การเรียกบิลที่พักไว้จะล้างรายการปัจจุบันออกทั้งหมด`,
-        confirmLabel: 'ยืนยันเรียกบิลแทนที่',
+        title: `${pick('แทนที่บิลปัจจุบันด้วย', 'ແທນທີ່ບິນປັດຈຸບັນດ້ວຍ', 'Replace current bill with')} "${held.referenceLabel}"?`,
+        description: `${cartSummary.totalItemUnitsCount} ${t('pos.itemsUnit')} (${money(cartSummary.totalSatang)})`,
+        confirmLabel: t('common.confirm'),
         tone: 'primary',
         onConfirm: async () => {
           await executeRecallHeldBill(held, reconciledCart, warnings);
@@ -930,12 +1081,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
   const splitCashSatang = useMemo(() => {
     try {
-      const parsed = parseDecimalStringToScaledInt(splitCashBahtInput || '0', 2);
+      const parsed = parseMoney(splitCashBahtInput || '0');
       return Math.max(0, Math.min(cartSummary.totalSatang, parsed));
     } catch {
       return 0;
     }
-  }, [cartSummary.totalSatang, splitCashBahtInput]);
+  }, [cartSummary.totalSatang, parseMoney, splitCashBahtInput]);
 
   const splitRemainingSatang = Math.max(0, cartSummary.totalSatang - splitCashSatang);
 
@@ -1071,6 +1222,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       }>;
       subtotalSatang: number;
       discountSatang: number;
+      cashRoundingDiscountSatang?: number | undefined;
       netBeforeTaxSatang: number;
       taxSatang: number;
       totalSatang: number;
@@ -1081,21 +1233,29 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       const widthMm = input.paperWidthMm ?? printPaperWidthMm;
       const raster = renderThaiReceiptTo203DpiCanvasRaster({
         paperWidthMm: widthMm,
+        countryCode,
+        receiptLocale,
+        vatRatePercentLabel,
         storeName: bootstrap.storeSettings.storeName,
+        storeAddress: fiscal.storeAddress,
         taxId: bootstrap.storeSettings.taxId,
         branchCode: bootstrap.storeSettings.branchCode,
         posRegNo: bootstrap.storeSettings.rdPosRegNo,
         receiptNumber: input.receiptNumber,
         abbTaxInvoiceNo: input.abbTaxInvoiceNo,
-        createdAtText: new Date(input.createdAtIso).toLocaleString('th-TH'),
+        createdAtText: dateTime(input.createdAtIso),
         cashierName: input.cashierName,
         taxMode: input.taxMode ?? taxMode,
         lines: input.lines,
-        subtotalText: `฿${formatSatangToThbString(input.subtotalSatang)}`,
-        discountText: `฿${formatSatangToThbString(input.discountSatang)}`,
-        netBeforeTaxText: `฿${formatSatangToThbString(input.netBeforeTaxSatang)}`,
-        vatText: `฿${formatSatangToThbString(input.taxSatang)}`,
-        grandTotalText: `฿${formatSatangToThbString(input.totalSatang)}`,
+        subtotalText: money(input.subtotalSatang),
+        discountSatang: input.discountSatang,
+        discountText: money(input.discountSatang),
+        ...(input.cashRoundingDiscountSatang && input.cashRoundingDiscountSatang > 0
+          ? { cashRoundingDiscountText: money(input.cashRoundingDiscountSatang) }
+          : {}),
+        netBeforeTaxText: money(input.netBeforeTaxSatang),
+        vatText: money(input.taxSatang),
+        grandTotalText: money(input.totalSatang),
         paymentSummaryLines: input.paymentSummaryLines,
       });
 
@@ -1122,8 +1282,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       bootstrap.storeSettings.rdPosRegNo,
       bootstrap.storeSettings.storeName,
       bootstrap.storeSettings.taxId,
+      countryCode,
+      dateTime,
+      fiscal.storeAddress,
+      money,
       printPaperWidthMm,
+      receiptLocale,
       taxMode,
+      vatRatePercentLabel,
     ]
   );
 
@@ -1139,12 +1305,18 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           ? 'CASH'
           : initialTab;
       if (resolvedTab !== initialTab) {
-        onToast('ยอดชำระสุทธิเป็น ฿0.00 กรุณารับชำระผ่านช่องทางเงินสด ฿0.00', 'warn');
+        onToast(
+          pick(
+            `ยอดชำระสุทธิเป็น ${money(0)} กรุณารับชำระผ่านช่องทางเงินสด`,
+            `ຍອດຊຳລະສຸດທິເປັນ ${money(0)} ກະລຸນາຮັບຊຳລະຜ່ານເງິນສົດ`,
+            `Net total is ${money(0)}; please complete via Cash`
+          ),
+          'warn'
+        );
       }
       setPaymentTab(resolvedTab);
-      setCashTenderedBahtInput(
-        formatSatangToThbString(cartSummary.totalSatang).replace(/,/g, '')
-      );
+      setCashTenderCurrency('LAK');
+      setCashTenderedBahtInput(moneyInput(cartSummary.cashPayableTotalSatang));
       const computedHalf =
         cartSummary.totalSatang > 200
           ? Math.floor(cartSummary.totalSatang / 200) * 100
@@ -1152,7 +1324,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       const initialSplitCash =
         cartSummary.totalSatang > 100 ? Math.max(100, computedHalf) : computedHalf;
       if (resolvedTab === 'SPLIT' || cartSummary.totalSatang > 200) {
-        setSplitCashBahtInput(formatSatangToThbString(initialSplitCash).replace(/,/g, ''));
+        setSplitCashBahtInput(moneyInput(initialSplitCash));
       }
       setCashNumpadPristine(true);
       setSlipMiniQrInput('');
@@ -1172,10 +1344,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     },
     [
       cart.length,
+      cartSummary.cashPayableTotalSatang,
       cartSummary.totalSatang,
       clearPromptPayQrState,
       loadPromptPayQr,
+      money,
+      moneyInput,
       onToast,
+      pick,
       splitSecondMethod,
     ]
   );
@@ -1249,13 +1425,23 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     async (overrideAmountSatang?: number, explicitQrRaw?: string) => {
       const rawQr = (explicitQrRaw ?? slipMiniQrInput).trim();
       if (!rawQr) {
-        onToast('กรุณาสแกนหรือวางข้อมูล BOT Mini-QR จากสลิปธนาคารลูกค้า', 'warn');
+        onToast(
+          isLaos
+            ? pick(
+                'กรุณาสแกนหรือกรอกเลข Ref / Ticket สลิปโอนเงินลูกค้า',
+                'ກະລຸນາສະແກນ ຫຼື ປ້ອນເລກອ້າງອີງ Ref / Ticket ສະລິບໂອນເງິນ',
+                'Please scan or enter the transfer slip reference ID'
+              )
+            : 'กรุณาสแกนหรือวางข้อมูล BOT Mini-QR จากสลิปธนาคารลูกค้า',
+          'warn'
+        );
         return;
       }
       setProcessingCheckout(true);
       try {
         const modal = await posTransport.verifyBotSlipStep1({
           miniQrRaw: rawQr,
+          ...(isLaos ? { senderBankCode: laoSenderBankCode } : {}),
           taxMode,
           discountSatang: cartSummary.discountSatang,
           ...(overrideAmountSatang !== undefined ? { overrideAmountSatang } : {}),
@@ -1279,7 +1465,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         setProcessingCheckout(false);
       }
     },
-    [cart, cartSummary.discountSatang, onToast, slipMiniQrInput, taxMode]
+    [cart, cartSummary.discountSatang, isLaos, laoSenderBankCode, onToast, pick, slipMiniQrInput, taxMode]
   );
 
   // Sync context-aware 2D scanner mode with App-level global scanner listener
@@ -1376,31 +1562,78 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
     try {
       if ((method === 'PROMPTPAY_QR' || method === 'SPLIT') && cartSummary.totalSatang <= 0) {
-        onToast('ยอดสุทธิเป็น ฿0.00 กรุณารับชำระผ่านช่องทางเงินสด ฿0.00', 'warn');
+        onToast(
+          pick(
+            `ยอดสุทธิเป็น ${money(0)} กรุณารับชำระผ่านช่องทางเงินสด`,
+            `ຍອດສຸດທິເປັນ ${money(0)} ກະລຸນາຮັບຊຳລະຜ່ານເງິນສົດ`,
+            `Total is ${money(0)}; please complete via Cash`
+          ),
+          'warn'
+        );
         return;
       }
 
-      let tenderedSatang = cartSummary.totalSatang;
+      const requiredCashTotalSatang = cartSummary.cashPayableTotalSatang;
+      const useForeignCash =
+        method === 'CASH' &&
+        !instantExactCash &&
+        isLaos &&
+        fiscal.fxRates.enabled &&
+        (cashTenderCurrency === 'THB' || cashTenderCurrency === 'USD');
+      let tenderedSatang = method === 'CASH' ? requiredCashTotalSatang : cartSummary.totalSatang;
+      let foreignTenderAmountSatang: number | undefined;
       let splitPaymentsPayload: SplitPaymentLegInput[] | undefined;
 
       if (method === 'CASH') {
         if (!instantExactCash) {
-          try {
-            tenderedSatang = parseDecimalStringToScaledInt(cashTenderedBahtInput || '0', 2);
-          } catch {
-            onToast('จำนวนเงินสดที่รับมาไม่ถูกต้อง', 'error');
-            return;
+          if (useForeignCash) {
+            try {
+              foreignTenderAmountSatang = parseDecimalStringToScaledInt(
+                cashTenderedBahtInput || '0',
+                2
+              );
+            } catch {
+              onToast(
+                pick('จำนวนเงินสดต่างประเทศไม่ถูกต้อง', 'ຈຳນວນເງິນສົດຕ່າງປະເທດບໍ່ຖືກຕ້ອງ', 'Invalid foreign cash amount'),
+                'error'
+              );
+              return;
+            }
+            const rateWholeLak = getFxRateForCurrency(
+              fiscal.fxRates,
+              cashTenderCurrency as 'THB' | 'USD'
+            );
+            tenderedSatang = foreignMinorToBaseLakMinor(foreignTenderAmountSatang, rateWholeLak);
+          } else {
+            try {
+              tenderedSatang = parseMoney(cashTenderedBahtInput || '0');
+            } catch {
+              onToast(pick('จำนวนเงินสดที่รับมาไม่ถูกต้อง', 'ຈຳນວນເງິນສົດທີ່ຮັບມາບໍ່ຖືກຕ້ອງ', 'Invalid cash amount'), 'error');
+              return;
+            }
           }
-          if (tenderedSatang < cartSummary.totalSatang) {
-            onToast('จำนวนเงินสดที่รับมาน้อยกว่ายอดสุทธิที่ต้องชำระ', 'warn');
+          if (tenderedSatang < requiredCashTotalSatang) {
+            onToast(
+              pick('จำนวนเงินสดที่รับมาน้อยกว่ายอดสุทธิที่ต้องชำระ', 'ຈຳນວນເງິນສົດທີ່ຮັບມາໜ້ອຍກວ່າຍອດຊຳລະ', 'Cash tendered is less than total due'),
+              'warn'
+            );
             return;
           }
         }
       } else if (method === 'SPLIT') {
         if (splitCashSatang <= 0 || splitRemainingSatang <= 0) {
-          onToast('สำหรับการแยกจ่าย กรุณาระบุยอดเงินสดให้มากกว่า 0 และน้อยกว่ายอดสุทธิ', 'warn');
+          onToast(
+            pick(
+              'สำหรับการแยกจ่าย กรุณาระบุยอดเงินสดให้มากกว่า 0 และน้อยกว่ายอดสุทธิ',
+              'ສຳລັບການແຍກຈ່າຍ ກະລຸນາລະບຸຍອດເງິນສົດໃຫ້ຫຼາຍກວ່າ 0 ແລະ ໜ້ອຍກວ່າຍອດສຸດທິ',
+              'For split payment, cash portion must be > 0 and < total'
+            ),
+            'warn'
+          );
           return;
         }
+        const splitSlipRaw =
+          verifiedSlipRaw !== undefined ? verifiedSlipRaw.trim() : '';
         splitPaymentsPayload = [
           {
             paymentMethod: 'CASH',
@@ -1410,8 +1643,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           {
             paymentMethod: splitSecondMethod,
             amountSatang: splitRemainingSatang,
-            ...(splitSecondMethod === 'PROMPTPAY_QR'
-              ? { slipTransRefRaw: verifiedSlipRaw || slipMiniQrInput.trim() }
+            ...(splitSecondMethod === 'PROMPTPAY_QR' && splitSlipRaw
+              ? { slipTransRefRaw: splitSlipRaw }
+              : {}),
+            ...(splitSecondMethod === 'PROMPTPAY_QR' && isLaos
+              ? { slipSenderBankCode: laoSenderBankCode }
               : {}),
           },
         ];
@@ -1433,13 +1669,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         qtyText: l.isWeightedScale
           ? formatMilliUnitsToQtyString(l.quantityMilli, l.unitName)
           : `${Math.round(l.quantityMilli / 1000)} ${l.unitName}`,
-        totalText: `฿${formatSatangToThbString(l.lineTotalSatang)}`,
+        totalText: money(l.lineTotalSatang),
         ...(l.mods.length > 0 ? { modifiersText: l.mods.map((m) => m.name).join(', ') } : {}),
       }));
       const snapshotSubtotal = cartSummary.subtotalSatang;
       const snapshotDiscount = cartSummary.discountSatang;
-      const snapshotNet = cartSummary.netBeforeTaxSatang;
-      const snapshotTax = cartSummary.taxSatang;
       const snapshotQueueOrTable = queueOrTableLabel.trim();
 
       setProcessingCheckout(true);
@@ -1450,14 +1684,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         orderType,
         ...(snapshotQueueOrTable ? { tableOrQueueNo: snapshotQueueOrTable } : {}),
         paymentMethod: method === 'SPLIT' ? 'CASH' : method,
-        ...(method === 'CASH' ? { cashTenderedSatang: tenderedSatang } : {}),
+        ...(method === 'CASH' && !useForeignCash ? { cashTenderedSatang: tenderedSatang } : {}),
+        ...(useForeignCash && foreignTenderAmountSatang !== undefined
+          ? {
+              foreignTenderCurrency: cashTenderCurrency as 'THB' | 'USD',
+              foreignTenderAmountSatang,
+            }
+          : {}),
         ...(method === 'PROMPTPAY_QR' && verifiedSlipRaw
           ? { slipTransRefRaw: verifiedSlipRaw }
           : {}),
+        ...(method === 'PROMPTPAY_QR' && isLaos ? { slipSenderBankCode: laoSenderBankCode } : {}),
         ...(splitPaymentsPayload ? { splitPayments: splitPaymentsPayload } : {}),
         taxMode,
         discountSatang: snapshotDiscount,
         paperWidthPx: printPaperWidthMm === 58 ? 384 : 576,
+        ...(cart.length > 0 && cart.every((l) => l.kdsDispatched === true)
+          ? { skipKdsEnqueue: true }
+          : {}),
         lines: cart.map((l) => ({
           variantId: l.variantId,
           itemName: l.itemName,
@@ -1471,17 +1715,23 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         })),
       });
 
+      const formatPaymentMethodName = (m: string) =>
+        m === 'PROMPTPAY_QR' ? qrMethodLabel : m;
+
       const paymentSummaryLines = res.order.payments.map(
         (p) =>
-          `${p.paymentMethod}: ฿${formatSatangToThbString(p.amountSatang)}${
+          `${formatPaymentMethodName(p.paymentMethod)}: ${money(p.amountSatang)}${
             p.slipTransRefLast4 ? ` (Ref *${p.slipTransRefLast4})` : ''
           }`
       );
       if (snapshotQueueOrTable) {
-        paymentSummaryLines.unshift(`ป้ายคิว/โต๊ะ: ${snapshotQueueOrTable}`);
+        paymentSummaryLines.unshift(`${pick('ป้ายคิว/โต๊ะ', 'ເລກຄິວ/ໂຕະ', 'Queue/Table')}: ${snapshotQueueOrTable}`);
+      }
+      if (res.order.fxTender) {
+        paymentSummaryLines.push(formatFxTenderReceiptLine(res.order.fxTender, receiptLocale));
       }
       if (res.order.changeGivenSatang && res.order.changeGivenSatang > 0) {
-        paymentSummaryLines.push(`เงินทอน: ฿${formatSatangToThbString(res.order.changeGivenSatang)}`);
+        paymentSummaryLines.push(`${t('pos.changeLabel')}: ${money(res.order.changeGivenSatang)}`);
       }
 
       const shouldKickDrawer =
@@ -1501,10 +1751,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           cashierName: currentUser.displayName,
           taxMode,
           lines: cartSnapshotLines,
-          subtotalSatang: snapshotSubtotal,
-          discountSatang: snapshotDiscount,
-          netBeforeTaxSatang: snapshotNet,
-          taxSatang: snapshotTax,
+          subtotalSatang: res.order.subtotalSatang ?? snapshotSubtotal,
+          discountSatang:
+            Math.max(0, (res.order.discountSatang ?? snapshotDiscount) - (res.order.cashRoundingDiscountSatang ?? 0)),
+          cashRoundingDiscountSatang: res.order.cashRoundingDiscountSatang,
+          netBeforeTaxSatang: res.order.netBeforeTaxSatang,
+          taxSatang: res.order.taxSatang,
           totalSatang: res.order.totalSatang,
           paymentSummaryLines,
           kickCashDrawer: shouldKickDrawer,
@@ -1547,12 +1799,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         changeGivenSatang: res.order.changeGivenSatang ?? 0,
         paymentLabel:
           method === 'SPLIT'
-            ? `แยกจ่าย (เงินสด + ${splitSecondMethod === 'PROMPTPAY_QR' ? 'Thai QR' : 'บัตร EDC'})`
+            ? `${t('pos.splitTab')} (${t('pos.cashTab')} + ${splitSecondMethod === 'PROMPTPAY_QR' ? qrMethodLabel : t('pos.cardTab')})`
             : method === 'PROMPTPAY_QR'
-              ? 'Thai QR PromptPay'
+              ? qrMethodLabel
               : method === 'CARD'
-                ? 'บัตรเครดิต / EDC'
-                : 'เงินสด (Cash)',
+                ? t('pos.cardTab')
+                : t('pos.cashTab'),
         spoolStatus: res.spoolResult.status,
       });
 
@@ -1573,10 +1825,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
       const changeText =
         res.order.changeGivenSatang && res.order.changeGivenSatang > 0
-          ? ` · เงินทอน ฿${formatSatangToThbString(res.order.changeGivenSatang)}`
+          ? ` · ${t('pos.changeLabel')} ${money(res.order.changeGivenSatang)}`
           : '';
       onToast(
-        `${instantExactCash ? '[F12 เงินสดด่วน] ' : ''}บันทึกการขายสำเร็จ ${res.order.abbTaxInvoiceNo}${changeText}`,
+        `${instantExactCash ? '[F12] ' : ''}${pick('บันทึกการขายสำเร็จ', 'ບັນທຶກການຂາຍສຳເລັດ', 'Sale completed')} ${res.order.abbTaxInvoiceNo}${changeText}`,
         res.spoolResult.status === 'PRINTED_IMMEDIATELY' ? 'success' : 'warn'
       );
     } catch (err) {
@@ -1629,11 +1881,17 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             matched.payments && matched.payments.length > 0
               ? matched.payments.map(
                   (p) =>
-                    `${p.paymentMethod}: ฿${formatSatangToThbString(p.amountSatang)}${
+                    `${p.paymentMethod === 'PROMPTPAY_QR' ? qrMethodLabel : p.paymentMethod}: ${money(p.amountSatang)}${
                       p.slipTransRefLast4 ? ` (Ref *${p.slipTransRefLast4})` : ''
                     }`
                 )
-              : [`${matched.paymentSummaryLabel ?? matched.paymentMethod}: ฿${formatSatangToThbString(matched.totalSatang)}`];
+              : [`${matched.paymentSummaryLabel ?? matched.paymentMethod}: ${money(matched.totalSatang)}`];
+          if (matched.fxTender) {
+            paymentLines.push(formatFxTenderReceiptLine(matched.fxTender, receiptLocale));
+          }
+          if (matched.changeGivenSatang && matched.changeGivenSatang > 0) {
+            paymentLines.push(`${t('pos.changeLabel')}: ${money(matched.changeGivenSatang)}`);
+          }
           const printed = await dispatch203DpiThaiCanvasPrint({
             salesOrderId: matched.salesOrderId,
             receiptNumber: matched.receiptNumber,
@@ -1644,7 +1902,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             lines: matched.lines.map((l) => ({
               itemName: l.itemName,
               qtyText: formatMilliUnitsToQtyString(l.quantityMilli, l.unitName),
-              totalText: `฿${formatSatangToThbString(l.lineTotalSatang)}`,
+              totalText: money(l.lineTotalSatang),
               ...(l.modifiers.length > 0
                 ? { modifiersText: l.modifiers.map((m) => m.name).join(', ') }
                 : {}),
@@ -1683,9 +1941,41 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     }
   };
 
+  const fxTenderEnabled = isLaos && fiscal.fxRates.enabled;
+  const activeForeignCurrency: 'THB' | 'USD' | null =
+    fxTenderEnabled && (cashTenderCurrency === 'THB' || cashTenderCurrency === 'USD')
+      ? cashTenderCurrency
+      : null;
+  const activeFxRateWholeLak = activeForeignCurrency
+    ? getFxRateForCurrency(fiscal.fxRates, activeForeignCurrency)
+    : 1;
+
+  const handleSelectCashTenderCurrency = (nextCurr: CashTenderCurrencyCode) => {
+    setCashTenderCurrency(nextCurr);
+    if (nextCurr === 'THB' || nextCurr === 'USD') {
+      const rate = getFxRateForCurrency(fiscal.fxRates, nextCurr);
+      const reqForeign = baseLakMinorToRequiredForeignMinor(
+        cartSummary.cashPayableTotalSatang,
+        rate
+      );
+      setCashTenderedBahtInput(formatForeignAmountForInput(reqForeign, nextCurr));
+    } else {
+      setCashTenderedBahtInput(moneyInput(cartSummary.cashPayableTotalSatang));
+    }
+    setCashNumpadPristine(true);
+  };
+
   const handleCashNumpadPress = (key: string) => {
     if (key === 'EXACT') {
-      setCashTenderedBahtInput(formatSatangToThbString(cartSummary.totalSatang).replace(/,/g, ''));
+      if (activeForeignCurrency) {
+        const reqForeign = baseLakMinorToRequiredForeignMinor(
+          cartSummary.cashPayableTotalSatang,
+          activeFxRateWholeLak
+        );
+        setCashTenderedBahtInput(formatForeignAmountForInput(reqForeign, activeForeignCurrency));
+      } else {
+        setCashTenderedBahtInput(moneyInput(cartSummary.cashPayableTotalSatang));
+      }
       setCashNumpadPristine(false);
       return;
     }
@@ -1700,21 +1990,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       return;
     }
     if (cashNumpadPristine) {
-      setCashTenderedBahtInput(key === '.' ? '0.' : key === '00' ? '0' : key);
+      setCashTenderedBahtInput(
+        key === '.' ? '0.' : key === '00' || key === '000' ? '0' : key
+      );
       setCashNumpadPristine(false);
       return;
     }
+    const allowDecimal = activeForeignCurrency !== null || currencyCode !== 'LAK';
     setCashTenderedBahtInput((prev) => {
-      if (key === '.' && prev.includes('.')) return prev;
+      if (key === '.' && (!allowDecimal || prev.includes('.'))) return prev;
       if (prev.includes('.')) {
         const [, decimals = ''] = prev.split('.');
         if (decimals.length >= 2) return prev;
-        if (key === '00') {
+        if (key === '00' || key === '000') {
           return decimals.length === 1 ? `${prev}0` : prev;
         }
       }
       if (prev === '0' && key !== '.') {
-        return key === '00' ? '0' : key;
+        return key === '00' || key === '000' ? '0' : key;
       }
       return prev + key;
     });
@@ -1736,13 +2029,31 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     });
   }, [bootstrap.recentOrders, orderHistoryQuery, orderStatusFilter]);
 
-  const cashTenderedSatangPreview = useMemo(() => {
+  const cashTenderedForeignSatangPreview = useMemo(() => {
+    if (!activeForeignCurrency) return 0;
     try {
-      return parseDecimalStringToScaledInt(cashTenderedBahtInput || '0', 2);
+      return Math.max(0, parseDecimalStringToScaledInt(cashTenderedBahtInput || '0', 2));
     } catch {
       return 0;
     }
-  }, [cashTenderedBahtInput]);
+  }, [activeForeignCurrency, cashTenderedBahtInput]);
+
+  const cashTenderedSatangPreview = useMemo(() => {
+    try {
+      if (activeForeignCurrency) {
+        return foreignMinorToBaseLakMinor(cashTenderedForeignSatangPreview, activeFxRateWholeLak);
+      }
+      return parseMoney(cashTenderedBahtInput || '0');
+    } catch {
+      return 0;
+    }
+  }, [
+    activeForeignCurrency,
+    activeFxRateWholeLak,
+    cashTenderedBahtInput,
+    cashTenderedForeignSatangPreview,
+    parseMoney,
+  ]);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -1765,7 +2076,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 }`}
               >
                 <LayoutGrid className="h-4 w-4" />
-                <span>{bootstrap.profile === 'RETAIL' ? 'การ์ดรูปสินค้า' : 'การ์ดเมนู'}</span>
+                <span>{t('pos.tab.catalog')}</span>
                 {posSubView === 'STUDIO_CARDS' && (
                   <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                 )}
@@ -1782,7 +2093,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   }`}
                 >
                   <List className="h-4 w-4" />
-                  <span>ตารางสแกนด่วน</span>
+                  <span>{t('pos.tab.retailTable')}</span>
                   {posSubView === 'SCAN_LEDGER' && (
                     <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                   )}
@@ -1799,13 +2110,34 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 }`}
               >
                 <PauseCircle className="h-4 w-4" />
-                <span>บิลพักไว้</span>
+                <span>{t('pos.tab.heldBills')}</span>
                 {heldBills.length > 0 && (
                   <span className="rounded-[48px] bg-primary px-2 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
                     {heldBills.length}
                   </span>
                 )}
                 {posSubView === 'HELD_BILLS' && (
+                  <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                role="tab"
+                aria-selected={posSubView === 'QR_ORDERS'}
+                onClick={() => setPosSubView('QR_ORDERS')}
+                className={`relative flex h-12 items-center gap-2 px-3 font-google-display text-[15px] font-medium tracking-[0.25px] whitespace-nowrap ${UI_INTERACTION.focusButton} ${
+                  posSubView === 'QR_ORDERS' ? 'text-ink' : 'text-ink-muted hover:text-ink'
+                }`}
+              >
+                <QrCode className="h-4 w-4" />
+                <span>{pick('ออเดอร์ QR', 'ອໍເດີ QR', 'QR Orders')}</span>
+                {pendingQrOrdersCount > 0 && (
+                  <span className="rounded-[48px] bg-primary px-2 py-0.5 text-[11px] font-medium text-white tabular-nums-google">
+                    {pendingQrOrdersCount}
+                  </span>
+                )}
+                {posSubView === 'QR_ORDERS' && (
                   <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                 )}
               </button>
@@ -1820,7 +2152,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 }`}
               >
                 <History className="h-4 w-4" />
-                <span>ใบเสร็จย้อนหลัง ({bootstrap.recentOrders.length})</span>
+                <span>{t('pos.tab.history')} ({bootstrap.recentOrders.length})</span>
                 {posSubView === 'ORDER_HISTORY' && (
                   <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                 )}
@@ -1829,7 +2161,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
             {/* Pre-Scan Quantity Multiplier Pills (F4) */}
             <div className="flex flex-wrap items-center gap-1.5 pb-2 sm:pb-0">
-              <span className="text-xs text-ink-muted mr-1">ตัวคูณสแกน (F4):</span>
+              <span className="text-xs text-ink-muted mr-1">{t('pos.qtyMultiplier')}</span>
               {MULTIPLIER_PRESETS.map((mult) => {
                 const active = scanMultiplier === mult;
                 return (
@@ -1877,14 +2209,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     }
                   }
                 }}
-                placeholder="ยิงบาร์โค้ด หรือพิมพ์ชื่อสินค้า / SKU... (กด F2)"
+                placeholder={t('pos.searchPlaceholder')}
                 className={`h-[50px] w-full rounded-[48px] border border-hairline bg-canvas pl-12 pr-32 sm:pr-48 text-[15px] sm:text-[16px] text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
               <div className="absolute right-2 flex items-center gap-1.5 sm:gap-2">
                 {searchQuery && (
                   <button
                     type="button"
-                    aria-label="ล้างคำค้นหา"
+                    aria-label="Clear search"
                     onClick={() => setSearchQuery('')}
                     className={`flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
                   >
@@ -1892,11 +2224,17 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   </button>
                 )}
                 <span
-                  title="จำนวนครั้งที่ระบบลบตัวอักษรภาษาไทยตัวแรกที่หลุดจากปืนบาร์โค้ดอัตโนมัติ"
+                  title={pick(
+                    'จำนวนครั้งที่ระบบกันคีย์ไทย/ลาวหลุดจากปืนบาร์โค้ดอัตโนมัติ',
+                    'ຈຳນວນຄັ້ງທີ່ລະບົບປ້ອງກັນຄີລາວ/ໄທຫຼຸດຈາກເຄື່ອງສະແກນ',
+                    'Keyboard layout interference rollback count'
+                  )}
                   className="rounded-[48px] border border-hairline bg-surface-1 px-2.5 sm:px-3 py-1 text-xs text-ink-muted tabular-nums-google"
                 >
-                  <span className="hidden sm:inline">กันคีย์ไทย </span>
-                  <span className="sm:hidden">TH </span>
+                  <span className="hidden sm:inline">
+                    {pick('กันคีย์ไทย/ลาว ', 'ກັນຄີລາວ/ໄທ ', 'Layout Guard ')}
+                  </span>
+                  <span className="sm:hidden">{countryCode} </span>
                   {rollbackCount}
                 </span>
               </div>
@@ -2011,8 +2349,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     </div>
 
                     <div className="px-6 pb-5 pt-2 flex items-center justify-between w-full">
-                      <span className="font-google-display text-[24px] font-normal tracking-[-0.25px] text-ink tabular-nums-google">
-                        ฿{formatSatangToThbString(item.priceSatang)}
+                      <span className="font-google-display text-[22px] sm:text-[24px] font-normal tracking-[-0.25px] text-ink tabular-nums-google">
+                        {money(item.priceSatang)}
                         {item.isWeightedScale && (
                           <span className="text-sm text-ink-muted ml-1">/ {item.unitName}</span>
                         )}
@@ -2053,10 +2391,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => onScanBarcodeString('2510045225009', 1)}
+                    onClick={() =>
+                      onScanBarcodeString(isLaos ? '2500123015004' : '2510045225009', 1)
+                    }
                     className={`min-h-[38px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                   >
-                    + จำลองป้ายฝังราคา ฿225 (Prefix 25)
+                    {isLaos
+                      ? '+ ທົດລອງປ້າຍຝັງລາຄາ 150,000 ₭ (Prefix 25)'
+                      : '+ จำลองป้ายฝังราคา ฿225 (Prefix 25)'}
                   </button>
                 </div>
               )}
@@ -2145,7 +2487,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                               : formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}
                           </td>
                           <td className="py-3.5 px-5 text-right font-google-display text-[18px] font-normal text-ink tabular-nums-google">
-                            ฿{formatSatangToThbString(item.priceSatang)}
+                            {money(item.priceSatang)}
                           </td>
                           <td className="py-3.5 px-5 text-right">
                             <button
@@ -2233,17 +2575,17 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
                     <div className="flex flex-wrap items-center gap-3">
                       <div className="text-right mr-2">
-                        <div className="text-xs text-ink-muted">ยอดสุทธิ</div>
+                        <div className="text-xs text-ink-muted">{t('pos.netPayable')}</div>
                         <div className="font-google-display text-[24px] font-normal text-ink tabular-nums-google">
-                          ฿{formatSatangToThbString(h.totalSatang)}
+                          {money(h.totalSatang)}
                         </div>
                       </div>
                       <button
                         type="button"
                         onClick={() =>
                           setConfirmAction({
-                            title: `ลบบิลที่พักไว้ "${h.referenceLabel}"?`,
-                            description: `บิลนี้มีสินค้า ${h.cart.length} รายการ (฿${formatSatangToThbString(h.totalSatang)}) หากลบแล้วจะไม่สามารถกู้คืนได้`,
+                            title: `${pick('ลบบิลที่พักไว้', 'ລຶບບິນພັກໄວ້', 'Delete held bill')} "${h.referenceLabel}"?`,
+                            description: `${h.cart.length} ${t('pos.itemsUnit')} (${money(h.totalSatang)})`,
                             confirmLabel: 'ยืนยันลบบิลที่พัก',
                             tone: 'danger',
                             onConfirm: async () => {
@@ -2276,6 +2618,30 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               </div>
             )}
           </div>
+        )}
+
+        {/* ================================================================== */}
+        {/* SUB-VIEW 3B: LOCAL LAN QR TABLE ORDERING INBOX                      */}
+        {/* ================================================================== */}
+        {posSubView === 'QR_ORDERS' && (
+          <QrOrderingInboxPanel
+            outletId={outletId}
+            bootstrap={bootstrap}
+            guestOrders={qrGuestOrders}
+            tableSessions={qrTableSessions}
+            qrStatus={qrStatus}
+            syncing={syncingQrOrders}
+            onRefreshOrders={() => refreshQrGuestOrders(false)}
+            onOpenTableQrModal={() => setTableQrModalOpen(true)}
+            onAcceptedOrder={async () => {
+              await Promise.all([
+                refreshQrGuestOrders(false),
+                refreshServerHeldBills(),
+                onRefreshState(),
+              ]);
+            }}
+            onToast={onToast}
+          />
         )}
 
         {/* ================================================================== */}
@@ -2403,22 +2769,27 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                               .join(', ')}
                           </div>
                           <div className="text-xs text-ink-muted">
-                            โดย {ord.cashierName} ·{' '}
-                            {new Date(ord.createdAt).toLocaleTimeString('th-TH')}
+                            {ord.cashierName} · {dateTime(ord.createdAt)}
                           </div>
                           {ord.status === 'VOIDED' && ord.voidReason && (
                             <div className="text-[11px] text-ink mt-0.5">
-                              เหตุผลยกเลิก: {ord.voidReason}
+                              {pick('เหตุผลยกเลิก', 'ເຫດຜົນຍົກເລີກ', 'Void reason')}: {ord.voidReason}
                             </div>
                           )}
                         </td>
                         <td className="py-3.5 px-5 text-xs text-ink-soft tabular-nums-google">
-                          <div>{ord.paymentSummaryLabel || ord.paymentMethod}</div>
+                          <div>
+                            {(ord.paymentSummaryLabel || ord.paymentMethod).replace(
+                              /PROMPTPAY_QR/g,
+                              qrMethodLabel
+                            )}
+                          </div>
                           {ord.payments && ord.payments.length > 1 ? (
                             <div className="text-[11px] text-ink-muted space-y-0.5 mt-0.5">
                               {ord.payments.map((p, idx) => (
                                 <div key={`${p.paymentMethod}-${idx}`}>
-                                  • {p.paymentMethod}: ฿{formatSatangToThbString(p.amountSatang)}
+                                  • {p.paymentMethod === 'PROMPTPAY_QR' ? qrMethodLabel : p.paymentMethod}:{' '}
+                                  {money(p.amountSatang)}
                                   {p.slipTransRefLast4 ? ` (Ref *${p.slipTransRefLast4})` : ''}
                                 </div>
                               ))}
@@ -2430,7 +2801,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           )}
                         </td>
                         <td className="py-3.5 px-5 text-right font-google-display text-[18px] text-ink tabular-nums-google">
-                          ฿{formatSatangToThbString(ord.totalSatang)}
+                          {money(ord.totalSatang)}
                         </td>
                         <td className="py-3.5 px-5 text-center">
                           <span
@@ -2493,7 +2864,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           <div className="bg-hero px-6 py-6 text-white">
             <div className="flex items-center justify-between text-xs text-white/75">
               <span className="font-google-display uppercase tracking-[0.5px] text-white/80">
-                ยอดชำระสุทธิ · {cartSummary.totalItemUnitsCount} รายการ
+                {t('pos.netPayable')} · {cartSummary.totalItemUnitsCount} {t('pos.itemsUnit')}
               </span>
               {lastPrintedReceipt && (
                 <button
@@ -2501,14 +2872,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   onClick={() => setReceiptModalOpen(true)}
                   className={`inline-flex items-center gap-1.5 rounded-[48px] border border-white/30 px-3 py-1 font-google-display text-xs text-white hover:border-white hover:bg-white/10 ${UI_INTERACTION.focusButton}`}
                 >
-                  <Printer className="h-3.5 w-3.5" /> ใบเสร็จล่าสุด
+                  <Printer className="h-3.5 w-3.5" /> {pick('ใบเสร็จล่าสุด', 'ໃບບິນຫຼ້າສຸດ', 'Last Receipt')}
                 </button>
               )}
             </div>
 
             {/* Canonical Google Display-LG: 48px, weight 400, -0.5px letter-spacing */}
-            <div className="mt-2 font-google-display text-[40px] sm:text-[48px] font-normal leading-[48px] sm:leading-[56px] tracking-[-0.5px] text-white tabular-nums-google">
-              ฿{formatSatangToThbString(cartSummary.totalSatang)}
+            <div className="mt-2 font-google-display text-[36px] sm:text-[44px] font-normal leading-[44px] sm:leading-[52px] tracking-[-0.5px] text-white tabular-nums-google">
+              {money(cartSummary.totalSatang)}
             </div>
 
             {/* Order Context Controls on Hero Band (Strictly Scoped to Active Shop Profile) */}
@@ -2561,14 +2932,15 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
               {lastCompletedSaleSummary.changeGivenSatang > 0 ? (
                 <div className="rounded-[4px] border border-primary/30 bg-canvas px-4 py-3 flex items-baseline justify-between gap-2">
-                  <span className="text-xs font-medium text-ink-soft">เงินทอนลูกค้า</span>
-                  <span className="font-google-display text-[32px] font-normal leading-none tracking-[-0.5px] text-primary-dark tabular-nums-google">
-                    ฿{formatSatangToThbString(lastCompletedSaleSummary.changeGivenSatang)}
+                  <span className="text-xs font-medium text-ink-soft">{t('pos.changeLabel')}</span>
+                  <span className="font-google-display text-[28px] sm:text-[32px] font-normal leading-none tracking-[-0.5px] text-primary-dark tabular-nums-google">
+                    {money(lastCompletedSaleSummary.changeGivenSatang)}
                   </span>
                 </div>
               ) : (
                 <div className="text-xs text-ink-soft tabular-nums-google">
-                  รับชำระครบถ้วน ฿{formatSatangToThbString(lastCompletedSaleSummary.totalSatang)} ({lastCompletedSaleSummary.paymentLabel}) · ไม่ต้องทอนเงิน
+                  {pick('รับชำระครบถ้วน', 'ຮັບຊຳລະຄົບຖ້ວນ', 'Paid in full')}{' '}
+                  {money(lastCompletedSaleSummary.totalSatang)} ({lastCompletedSaleSummary.paymentLabel})
                 </div>
               )}
 
@@ -2591,10 +2963,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <div className="py-16 px-6 text-center">
                 <ScanBarcode className="h-9 w-9 text-ink-muted mx-auto mb-2.5" />
                 <p className="font-google-display text-[18px] font-normal text-ink">
-                  พร้อมรับรายการขายใหม่
+                  {t('pos.readyForOrder')}
                 </p>
                 <p className="text-sm text-ink-muted mt-1">
-                  แตะเลือกสินค้าด้านซ้าย หรือยิงบาร์โค้ดเข้าสู่รายการขายทันที
+                  {t('pos.readyForOrderHint')}
                 </p>
               </div>
             ) : (
@@ -2636,7 +3008,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                               >
                                 {m.name}
                                 {m.priceDeltaSatang > 0
-                                  ? ` +฿${formatSatangToThbString(m.priceDeltaSatang)}`
+                                  ? ` +${money(m.priceDeltaSatang)}`
                                   : ''}
                               </span>
                             ))}
@@ -2663,10 +3035,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
                       <div className="text-right shrink-0 tabular-nums-google">
                         <div className="font-google-display text-[18px] font-normal text-ink">
-                          ฿{formatSatangToThbString(line.lineTotalSatang)}
+                          {money(line.lineTotalSatang)}
                         </div>
                         <div className="text-xs text-ink-muted">
-                          @฿{formatSatangToThbString(line.effectiveUnitSatang)}/{line.unitName}
+                          @{money(line.effectiveUnitSatang)}/{line.unitName}
                         </div>
                       </div>
                     </div>
@@ -2799,26 +3171,26 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           <div className="p-4 bg-canvas border-t border-hairline space-y-4">
             <div className="rounded-[8px] bg-primary-soft p-4 space-y-2.5 text-sm text-ink">
               <div className="flex items-center justify-between">
-                <span className="text-ink-soft">ยอดรวมสินค้า (Subtotal)</span>
+                <span className="text-ink-soft">{t('pos.subtotal')}</span>
                 <span className="font-medium tabular-nums-google">
-                  ฿{formatSatangToThbString(cartSummary.subtotalSatang)}
+                  {money(cartSummary.subtotalSatang)}
                 </span>
               </div>
 
-              {/* Discount Row with Baht / Percent Toggle */}
+              {/* Discount Row with Currency / Percent Toggle */}
               <div className="flex items-center justify-between gap-2">
                 <label
                   htmlFor={`${uid}-discount`}
                   className="text-ink-soft flex items-center gap-1.5"
                 >
                   <Tag className="h-3.5 w-3.5 text-primary-dark" />
-                  ส่วนลด (F9)
+                  {t('pos.discount')}
                 </label>
                 <div className="flex items-center gap-1.5">
                   <div className="inline-flex rounded-[48px] border border-hairline bg-canvas p-0.5">
                     <button
                       type="button"
-                      aria-label="ส่วนลดเป็นบาท"
+                      aria-label={fiscal.currencySymbol}
                       onClick={() => setDiscountMode('BAHT')}
                       className={`min-h-[38px] min-w-[44px] rounded-[48px] px-3 text-xs font-medium ${UI_INTERACTION.focusButton} ${
                         discountMode === 'BAHT'
@@ -2826,11 +3198,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           : 'text-ink-muted hover:text-ink'
                       }`}
                     >
-                      ฿
+                      {fiscal.currencySymbol}
                     </button>
                     <button
                       type="button"
-                      aria-label="ส่วนลดเป็นเปอร์เซ็นต์"
+                      aria-label="%"
                       onClick={() => setDiscountMode('PERCENT')}
                       className={`min-h-[38px] min-w-[44px] rounded-[48px] px-3 text-xs font-medium ${UI_INTERACTION.focusButton} ${
                         discountMode === 'PERCENT'
@@ -2845,31 +3217,46 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     id={`${uid}-discount`}
                     ref={discountInputRef}
                     type="text"
-                    aria-label="ส่วนลดท้ายบิล"
+                    aria-label={t('pos.discount')}
                     value={discountInput}
                     onChange={(e) => setDiscountInput(e.target.value)}
-                    className={`h-[44px] w-24 rounded-[4px] border border-hairline bg-canvas px-2.5 text-right text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
+                    className={`h-[44px] w-28 rounded-[4px] border border-hairline bg-canvas px-2.5 text-right text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                   />
                 </div>
               </div>
 
-              {/* Tax Mode & VAT 7% Readout */}
+              {/* Dynamic Country Tax Mode & VAT Readout */}
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-primary/15 text-xs text-ink-soft">
                 <select
-                  aria-label="โหมดภาษีมูลค่าเพิ่ม"
+                  aria-label="Tax Mode"
                   value={taxMode}
                   onChange={(e) => setTaxMode(e.target.value as TaxMode)}
                   className={`rounded-[4px] border border-hairline bg-canvas px-2 py-1 text-xs text-ink ${UI_INTERACTION.focusSelect}`}
                 >
-                  <option value="INCLUSIVE">VAT 7% รวมในราคา</option>
-                  <option value="EXCLUSIVE">VAT 7% แยกนอก</option>
-                  <option value="NONE">ยกเว้น VAT (0%)</option>
+                  <option value="INCLUSIVE">
+                    {vatDisplayName} {t('pos.taxMode.INCLUSIVE')}
+                  </option>
+                  <option value="EXCLUSIVE">
+                    {vatDisplayName} {t('pos.taxMode.EXCLUSIVE')}
+                  </option>
+                  <option value="NONE">{t('pos.taxMode.NONE')}</option>
                 </select>
                 <span className="tabular-nums-google">
-                  ฐาน ฿{formatSatangToThbString(cartSummary.netBeforeTaxSatang)} · VAT ฿
-                  {formatSatangToThbString(cartSummary.taxSatang)}
+                  Net {money(cartSummary.netBeforeTaxSatang)} · {vatDisplayName}{' '}
+                  {money(cartSummary.taxSatang)}
                 </span>
               </div>
+              {isLaos && cartSummary.cashRoundingDiscountSatang > 0 && (
+                <div className="flex items-center justify-between text-xs text-primary-dark pt-0.5">
+                  <span>
+                    {t('pos.cashRounding')} ({fiscal.cashRoundingStepMajor.toLocaleString('en-US')} ₭)
+                  </span>
+                  <span className="tabular-nums-google font-medium">
+                    -{money(cartSummary.cashRoundingDiscountSatang)} →{' '}
+                    {money(cartSummary.cashPayableTotalSatang)}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* 4. CANONICAL 48px PILL CTA DOCK (`button-primary` #1a73e8 + `button-secondary` #ffffff) */}
@@ -2882,7 +3269,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               >
                 <Banknote className="h-5 w-5 shrink-0" />
                 <span>
-                  ชำระเงิน / แยกจ่าย · ฿{formatSatangToThbString(cartSummary.totalSatang)} (F10)
+                  {t('pos.payButton')} · {money(cartSummary.totalSatang)} (F10)
                 </span>
               </button>
 
@@ -2894,7 +3281,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-primary bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
                   <Banknote className="h-4 w-4 shrink-0" />
-                  <span>รับเงินสดด่วน (F12)</span>
+                  <span>{t('pos.quickCash')}</span>
                 </button>
 
                 <button
@@ -2904,7 +3291,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                 >
                   <Layers className="h-4 w-4 text-primary shrink-0" />
-                  <span>แยกจ่าย (เงินสด + QR/บัตร)</span>
+                  <span>{t('pos.splitPay')}</span>
                 </button>
               </div>
 
@@ -2916,7 +3303,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
                   <QrCode className="h-4 w-4 shrink-0" />
-                  <span>Thai QR</span>
+                  <span>{isLaos ? 'LAOQR' : 'Thai QR'}</span>
                 </button>
 
                 <button
@@ -2925,7 +3312,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
                   <PauseCircle className="h-4 w-4 shrink-0" />
-                  <span>พักบิล {heldBills.length > 0 ? `(${heldBills.length})` : '(F8)'}</span>
+                  <span>
+                    {t('pos.holdBill').replace(' (F8)', '')}{' '}
+                    {heldBills.length > 0 ? `(${heldBills.length})` : '(F8)'}
+                  </span>
                 </button>
 
                 <button
@@ -2933,26 +3323,30 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   disabled={cart.length === 0}
                   onClick={() =>
                     setConfirmAction({
-                      title: 'ล้างรายการสินค้าทั้งหมดในบิล?',
-                      description: `มีสินค้า ${cartSummary.totalItemUnitsCount} รายการในบิลปัจจุบัน (ยอด ฿${formatSatangToThbString(cartSummary.totalSatang)}) หากล้างแล้วจะไม่สามารถกู้คืนได้`,
-                      confirmLabel: 'ยืนยันล้างบิล',
+                      title: pick('ล้างรายการสินค้าทั้งหมดในบิล?', 'ລ້າງລາຍການສິນຄ້າທັງໝົດໃນບິນ?', 'Clear entire bill?'),
+                      description: `${cartSummary.totalItemUnitsCount} ${t('pos.itemsUnit')} (${money(cartSummary.totalSatang)})`,
+                      confirmLabel: t('common.confirm'),
                       tone: 'danger',
                       onConfirm: () => {
                         setCart([]);
                         setDiscountInput('0');
-                        onToast('ล้างรายการในตะกร้าเรียบร้อยแล้ว', 'warn');
+                        onToast(pick('ล้างรายการในตะกร้าเรียบร้อยแล้ว', 'ລ້າງລາຍການໃນກະຕ່າແລ້ວ', 'Cart cleared'), 'warn');
                       },
                     })
                   }
                   className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
                   <Trash2 className="h-4 w-4 shrink-0" />
-                  <span>ล้างบิล</span>
+                  <span>{t('pos.clearCart')}</span>
                 </button>
               </div>
               {cart.length > 0 && cartSummary.totalSatang <= 0 && (
                 <p className="rounded-[4px] border border-hairline bg-surface-1 px-3 py-2 text-xs text-ink-soft">
-                  ยอดชำระสุทธิเป็น ฿0.00 (ส่วนลดเต็มจำนวน) — ปิดการขายด้วยปุ่มเงินสด ฿0.00 เท่านั้น (ไม่รองรับ Thai QR หรือแยกจ่าย)
+                  {pick(
+                    `ยอดชำระสุทธิเป็น ${money(0)} — ปิดการขายด้วยปุ่มเงินสดเท่านั้น`,
+                    `ຍອດຊຳລະສຸດທິເປັນ ${money(0)} — ປິດການຂາຍດ້ວຍປຸ່ມເງິນສົດເທົ່ານັ້ນ`,
+                    `Net total is ${money(0)} — complete via Cash only`
+                  )}
                 </p>
               )}
             </div>
@@ -3043,10 +3437,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           </div>
                           <div className={`text-xs mt-1 tabular-nums-google ${active ? 'text-primary-dark font-medium' : 'text-primary'}`}>
                             {mod.priceDeltaSatang > 0
-                              ? `+฿${formatSatangToThbString(mod.priceDeltaSatang)}`
+                              ? `+${money(mod.priceDeltaSatang)}`
                               : mod.priceDeltaSatang < 0
-                                ? `-฿${formatSatangToThbString(Math.abs(mod.priceDeltaSatang))}`
-                                : 'ไม่เพิ่มราคา'}
+                                ? `-${money(Math.abs(mod.priceDeltaSatang))}`
+                                : pick('ไม่เพิ่มราคา', 'ບໍ່ເພີ່ມລາຄາ', 'Free')}
                           </div>
                         </button>
                       );
@@ -3160,7 +3554,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 }}
                 className={`h-[50px] rounded-[48px] bg-primary px-8 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                {editingModifierCartKey ? 'บันทึกการแก้ไขตัวเลือก · ฿' : 'เพิ่มลงรายการขาย · ฿'}
+                {editingModifierCartKey
+                  ? pick('บันทึกการแก้ไขตัวเลือก · ', 'ບັນທຶກຕົວເລືອກ · ', 'Save Modifiers · ')
+                  : pick('เพิ่มลงรายการขาย · ', 'ເພີ່ມລົງບິນ · ', 'Add to Order · ')}
                 {(() => {
                   const modDelta = draftModIds.reduce(
                     (s, id) => s + (modifiersById.get(id)?.priceDeltaSatang ?? 0),
@@ -3178,7 +3574,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       SCALE_MILLI
                     )
                   );
-                  return formatSatangToThbString(lineTotal);
+                  return money(lineTotal);
                 })()}
               </button>
             </div>
@@ -3192,39 +3588,39 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       <ModalDialog
         open={checkoutModalOpen}
         onClose={() => setCheckoutModalOpen(false)}
-        ariaLabel="หน้าต่างรับชำระเงิน"
+        ariaLabel={pick('หน้าต่างรับชำระเงิน', 'ໜ້າຕ່າງຮັບຊຳລະເງິນ', 'Checkout Dialog')}
         maxWidthClass="max-w-4xl"
       >
         {/* Top Bar */}
         <div className="flex items-center justify-between border-b border-hairline px-4 sm:px-6 h-16 shrink-0 gap-3">
-          <div className="flex items-center gap-4 sm:gap-5 h-full overflow-x-auto" role="tablist" aria-label="ช่องทางการรับชำระเงิน">
+          <div className="flex items-center gap-4 sm:gap-5 h-full overflow-x-auto" role="tablist" aria-label={pick('ช่องทางการรับชำระเงิน', 'ຊ່ອງທາງການຊຳລະເງິນ', 'Payment Methods')}>
             {[
-              { id: 'CASH' as const, label: 'เงินสด (Cash + RJ11)', icon: Banknote },
-              { id: 'PROMPTPAY_QR' as const, label: 'Thai QR PromptPay', icon: QrCode },
-              { id: 'CARD' as const, label: 'บัตรเครดิต / EDC', icon: CreditCard },
-              { id: 'SPLIT' as const, label: 'แยกจ่าย (เงินสด + QR/บัตร)', icon: Layers },
-            ].map((t) => {
-              const Icon = t.icon;
-              const active = paymentTab === t.id;
+              { id: 'CASH' as const, label: t('pos.cashTab'), icon: Banknote },
+              { id: 'PROMPTPAY_QR' as const, label: qrMethodLabel, icon: QrCode },
+              { id: 'CARD' as const, label: t('pos.cardTab'), icon: CreditCard },
+              { id: 'SPLIT' as const, label: t('pos.splitTab'), icon: Layers },
+            ].map((tabItem) => {
+              const Icon = tabItem.icon;
+              const active = paymentTab === tabItem.id;
               const tabDisabled =
                 cartSummary.totalSatang <= 0 &&
-                (t.id === 'PROMPTPAY_QR' || t.id === 'SPLIT');
+                (tabItem.id === 'PROMPTPAY_QR' || tabItem.id === 'SPLIT');
               return (
                 <button
-                  key={t.id}
+                  key={tabItem.id}
                   type="button"
                   role="tab"
                   disabled={tabDisabled}
                   aria-selected={active}
                   onClick={() => {
                     if (tabDisabled) return;
-                    setPaymentTab(t.id);
+                    setPaymentTab(tabItem.id);
                     setSlipVerificationModal(null);
                     clearPromptPayQrState();
-                    if (t.id === 'PROMPTPAY_QR' && cartSummary.totalSatang > 0) {
+                    if (tabItem.id === 'PROMPTPAY_QR' && cartSummary.totalSatang > 0) {
                       void loadPromptPayQr();
                     } else if (
-                      t.id === 'SPLIT' &&
+                      tabItem.id === 'SPLIT' &&
                       splitSecondMethod === 'PROMPTPAY_QR' &&
                       splitRemainingSatang > 0 &&
                       cartSummary.totalSatang > 0
@@ -3237,7 +3633,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   }`}
                 >
                   <Icon className={`h-4 w-4 ${active ? 'text-primary' : ''}`} />
-                  <span>{t.label}</span>
+                  <span>{tabItem.label}</span>
                   {active && (
                     <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                   )}
@@ -3248,7 +3644,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
           <button
             type="button"
-            aria-label="ปิดหน้าต่างรับชำระเงิน"
+            aria-label={t('common.close')}
             onClick={() => setCheckoutModalOpen(false)}
             className={`flex h-10 w-10 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink shrink-0 ${UI_INTERACTION.focusButton}`}
           >
@@ -3262,37 +3658,66 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             <div>
               <div className="bg-hero p-6 text-white">
                 <div className="text-xs uppercase tracking-[0.5px] text-white/75">
-                  ยอดที่ต้องชำระสุทธิ
+                  {t('pos.netPayable')}
                 </div>
                 <div className="mt-1 font-google-display text-[36px] sm:text-[44px] font-normal leading-[44px] sm:leading-[52px] tracking-[-0.5px] tabular-nums-google">
-                  ฿{formatSatangToThbString(cartSummary.totalSatang)}
+                  {money(
+                    paymentTab === 'CASH'
+                      ? cartSummary.cashPayableTotalSatang
+                      : cartSummary.totalSatang
+                  )}
                 </div>
+                {paymentTab === 'CASH' && cartSummary.cashRoundingDiscountSatang > 0 && (
+                  <div className="mt-2 inline-flex items-center rounded-[48px] border border-white/25 px-2.5 py-0.5 text-[11px] text-white/90 tabular-nums-google">
+                    {t('pos.cashRounding')}: -{money(cartSummary.cashRoundingDiscountSatang)}
+                  </div>
+                )}
               </div>
 
               <div className="p-6 space-y-2.5 text-sm">
                 <div className="flex justify-between text-ink-muted">
-                  <span>จำนวนสินค้า</span>
+                  <span>{pick('จำนวนสินค้า', 'ຈຳນວນສິນຄ້າ', 'Items')}</span>
                   <span className="text-ink tabular-nums-google">
-                    {cartSummary.totalItemUnitsCount} รายการ
+                    {cartSummary.totalItemUnitsCount} {t('pos.itemsUnit')}
                   </span>
                 </div>
                 <div className="flex justify-between text-ink-muted">
-                  <span>มูลค่าก่อนภาษี</span>
+                  <span>{pick('มูลค่าก่อนภาษี', 'ມູນຄ່າກ່ອນອາກອນ', 'Net Before Tax')}</span>
                   <span className="text-ink tabular-nums-google">
-                    ฿{formatSatangToThbString(cartSummary.netBeforeTaxSatang)}
+                    {money(
+                      paymentTab === 'CASH'
+                        ? cartSummary.cashNetBeforeTaxSatang
+                        : cartSummary.netBeforeTaxSatang
+                    )}
                   </span>
                 </div>
                 <div className="flex justify-between text-ink-muted">
-                  <span>ภาษีมูลค่าเพิ่ม 7%</span>
+                  <span>
+                    {taxMode === 'NONE'
+                      ? pick('ภาษี (ยกเว้น 0%)', 'ອາກອນ (ຍົກເວັ້ນ 0%)', 'Tax (Exempt 0%)')
+                      : vatDisplayName}
+                  </span>
                   <span className="text-ink tabular-nums-google">
-                    ฿{formatSatangToThbString(cartSummary.taxSatang)}
+                    {money(
+                      paymentTab === 'CASH'
+                        ? cartSummary.cashTaxSatang
+                        : cartSummary.taxSatang
+                    )}
                   </span>
                 </div>
                 {cartSummary.discountSatang > 0 && (
                   <div className="flex justify-between text-primary-hover font-medium">
-                    <span>ส่วนลดท้ายบิล</span>
+                    <span>{pick('ส่วนลดท้ายบิล', 'ສ່ວນຫຼຸດທ້າຍບິນ', 'Order Discount')}</span>
                     <span className="tabular-nums-google">
-                      -฿{formatSatangToThbString(cartSummary.discountSatang)}
+                      -{money(cartSummary.discountSatang)}
+                    </span>
+                  </div>
+                )}
+                {paymentTab === 'CASH' && cartSummary.cashRoundingDiscountSatang > 0 && (
+                  <div className="flex justify-between text-primary-hover font-medium">
+                    <span>{t('pos.cashRounding')}</span>
+                    <span className="tabular-nums-google">
+                      -{money(cartSummary.cashRoundingDiscountSatang)}
                     </span>
                   </div>
                 )}
@@ -3301,11 +3726,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
             {paymentTab === 'CASH' && (
               <div className="p-6 border-t border-hairline bg-canvas">
-                <div className="text-xs text-ink-muted">เงินทอนลูกค้า (Change Due)</div>
+                <div className="text-xs text-ink-muted">
+                  {t('pos.changeLabel')} (Change Due)
+                </div>
                 <div className="mt-1 font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-primary tabular-nums-google">
-                  ฿
-                  {formatSatangToThbString(
-                    Math.max(0, cashTenderedSatangPreview - cartSummary.totalSatang)
+                  {money(
+                    Math.max(0, cashTenderedSatangPreview - cartSummary.cashPayableTotalSatang)
                   )}
                 </div>
               </div>
@@ -3314,17 +3740,20 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             {paymentTab === 'SPLIT' && (
               <div className="p-6 border-t border-hairline bg-canvas space-y-2 text-sm">
                 <div className="flex justify-between">
-                  <span className="text-ink-muted">ส่วนที่ 1 (เงินสด)</span>
+                  <span className="text-ink-muted">
+                    {pick('ส่วนที่ 1 (เงินสด)', 'ສ່ວນທີ 1 (ເງິນສົດ)', 'Part 1 (Cash)')}
+                  </span>
                   <span className="font-google-display font-medium text-ink tabular-nums-google">
-                    ฿{formatSatangToThbString(splitCashSatang)}
+                    {money(splitCashSatang)}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-ink-muted">
-                    ส่วนที่ 2 ({splitSecondMethod === 'PROMPTPAY_QR' ? 'Thai QR' : 'บัตร EDC'})
+                    {pick('ส่วนที่ 2', 'ສ່ວນທີ 2', 'Part 2')} (
+                    {splitSecondMethod === 'PROMPTPAY_QR' ? qrMethodLabel : t('pos.cardTab')})
                   </span>
                   <span className="font-google-display text-lg font-medium text-primary tabular-nums-google">
-                    ฿{formatSatangToThbString(splitRemainingSatang)}
+                    {money(splitRemainingSatang)}
                   </span>
                 </div>
               </div>
@@ -3335,9 +3764,51 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
           <div className="md:col-span-7 p-6 bg-canvas">
             {paymentTab === 'CASH' && (
               <div className="space-y-4">
+                {fxTenderEnabled && (
+                  <div className="space-y-1.5">
+                    <div className="text-xs font-medium text-ink-muted">
+                      {t('fx.tenderCurrencyLabel')}
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(
+                        [
+                          { id: 'LAK' as const, label: 'LAK ₭', sub: pick('กีบลาว (หลัก)', 'ກີບລາວ (ຫຼັກ)', 'Base LAK') },
+                          {
+                            id: 'THB' as const,
+                            label: 'THB ฿',
+                            sub: `1 = ${fiscal.fxRates.thbToLakRate.toLocaleString('en-US')} ₭`,
+                          },
+                          {
+                            id: 'USD' as const,
+                            label: 'USD $',
+                            sub: `1 = ${fiscal.fxRates.usdToLakRate.toLocaleString('en-US')} ₭`,
+                          },
+                        ] as const
+                      ).map((curOpt) => {
+                        const active = cashTenderCurrency === curOpt.id;
+                        return (
+                          <button
+                            key={curOpt.id}
+                            type="button"
+                            onClick={() => handleSelectCashTenderCurrency(curOpt.id)}
+                            className={`rounded-[4px] border px-3 py-2 text-left ${UI_INTERACTION.focusButton} ${
+                              active
+                                ? 'border-primary bg-primary-soft text-primary-dark'
+                                : 'border-hairline bg-surface-1 text-ink hover:border-primary'
+                            }`}
+                          >
+                            <div className="font-google-display text-xs font-medium">{curOpt.label}</div>
+                            <div className="text-[10px] text-ink-muted tabular-nums-google">{curOpt.sub}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 <div>
                   <label htmlFor={`${uid}-cash-tendered`} className="block text-xs font-medium text-ink-muted mb-1.5">
-                    รับเงินสดจากลูกค้า (บาท)
+                    {t('pos.receivedCash')} ({activeForeignCurrency ?? currencyCode})
                   </label>
                   <input
                     id={`${uid}-cash-tendered`}
@@ -3349,19 +3820,49 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     }}
                     className={`h-14 w-full rounded-[4px] border border-hairline bg-canvas px-4 font-google-display text-[28px] font-normal text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                   />
+                  {activeForeignCurrency && (
+                    <div className="mt-1.5 flex items-center justify-between rounded-[4px] border border-hairline bg-surface-1 px-3 py-1.5 text-xs tabular-nums-google">
+                      <span className="text-ink-muted">
+                        {t('fx.convertedLakLabel')} (@ {activeFxRateWholeLak.toLocaleString('en-US')} ₭):
+                      </span>
+                      <span className="font-google-display font-medium text-ink">
+                        {formatForeignMoney(cashTenderedForeignSatangPreview, activeForeignCurrency)} ={' '}
+                        {money(cashTenderedSatangPreview)}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
-                {/* Quick Thai Banknotes */}
+                {/* Quick Banknotes (Country & Foreign-Currency Aware) */}
                 <div className="flex flex-wrap gap-2">
-                  {[
-                    {
-                      label: 'รับเงินพอดี',
-                      val: formatSatangToThbString(cartSummary.totalSatang).replace(/,/g, ''),
-                    },
-                    { label: '฿100', val: '100.00' },
-                    { label: '฿500', val: '500.00' },
-                    { label: '฿1,000', val: '1000.00' },
-                  ].map((b) => (
+                  {(activeForeignCurrency
+                    ? [
+                        {
+                          label: `${t('pos.exactAmount')} (${activeForeignCurrency})`,
+                          val: formatForeignAmountForInput(
+                            baseLakMinorToRequiredForeignMinor(
+                              cartSummary.cashPayableTotalSatang,
+                              activeFxRateWholeLak
+                            ),
+                            activeForeignCurrency
+                          ),
+                        },
+                        ...getForeignQuickCashButtons(activeForeignCurrency).map((btn) => ({
+                          label: btn.label,
+                          val: formatForeignAmountForInput(btn.satang, activeForeignCurrency),
+                        })),
+                      ]
+                    : [
+                        {
+                          label: t('pos.exactAmount'),
+                          val: moneyInput(cartSummary.cashPayableTotalSatang),
+                        },
+                        ...getQuickCashTenderButtonsForCountry(countryCode).map((btn) => ({
+                          label: money(btn.satang),
+                          val: moneyInput(btn.satang),
+                        })),
+                      ]
+                  ).map((b) => (
                     <button
                       key={b.label}
                       type="button"
@@ -3376,7 +3877,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   ))}
                 </div>
 
-                {/* 4x4 Full Touchscreen Cash Numpad with Decimal (.) and 00 */}
+                {/* 4x4 Full Touchscreen Cash Numpad (`000` for native LAK, `.` for THB / USD) */}
                 <div className="grid grid-cols-4 gap-2">
                   {[
                     '7',
@@ -3392,7 +3893,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     '3',
                     'EXACT',
                     '0',
-                    '.',
+                    !activeForeignCurrency && currencyCode === 'LAK' ? '000' : '.',
                     '00',
                   ].map((k) => (
                     <button
@@ -3400,14 +3901,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       type="button"
                       aria-label={
                         k === 'BACKSPACE'
-                          ? 'ลบตัวเลขสุดท้าย'
+                          ? pick('ลบตัวเลขสุดท้าย', 'ລຶບຕົວເລກສຸດທ້າຍ', 'Backspace')
                           : k === 'CLEAR'
-                            ? 'ล้างจำนวนเงินสด'
+                            ? pick('ล้างจำนวนเงินสด', 'ລ້າງຈຳນວນເງິນ', 'Clear amount')
                             : k === 'EXACT'
-                              ? 'รับเงินพอดีกับยอดสุทธิ'
+                              ? t('pos.exactAmount')
                               : k === '.'
-                                ? 'จุดทศนิยมสตางค์'
-                                : `ป้อนเลข ${k}`
+                                ? pick('จุดทศนิยม', 'ຈຸດທົດສະນິຍົມ', 'Decimal point')
+                                : `${pick('ป้อนเลข', 'ປ້ອນເລກ', 'Enter')} ${k}`
                       }
                       onClick={() => handleCashNumpadPress(k)}
                       className={`flex h-12 items-center justify-center rounded-[4px] border border-hairline font-google-display text-[18px] font-normal hover:border-primary ${UI_INTERACTION.focusButton} ${
@@ -3421,9 +3922,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       {k === 'BACKSPACE' ? (
                         <Delete className="h-5 w-5 text-ink-muted" />
                       ) : k === 'CLEAR' ? (
-                        <span className="text-xs font-medium text-ink-muted">ล้างค่า</span>
+                        <span className="text-xs font-medium text-ink-muted">
+                          {pick('ล้างค่า', 'ລ້າງຄ່າ', 'Clear')}
+                        </span>
                       ) : k === 'EXACT' ? (
-                        <span className="text-xs font-medium">พอดี</span>
+                        <span className="text-xs font-medium">{t('pos.exactAmount')}</span>
                       ) : (
                         k
                       )}
@@ -3434,14 +3937,15 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 <button
                   type="button"
                   disabled={
-                    processingCheckout || cashTenderedSatangPreview < cartSummary.totalSatang
+                    processingCheckout ||
+                    cashTenderedSatangPreview < cartSummary.cashPayableTotalSatang
                   }
                   onClick={() => void executeFinalCheckout('CASH')}
                   className={`flex h-[50px] w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-6 font-google-display text-[15px] sm:text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                 >
                   {processingCheckout
-                    ? 'กำลังบันทึกบิลและสั่งพิมพ์ใบเสร็จ...'
-                    : 'ยืนยันรับเงินสด · เปิดลิ้นชัก & พิมพ์ใบกำกับภาษี ABB'}
+                    ? pick('กำลังบันทึกบิลและสั่งพิมพ์ใบเสร็จ...', 'ກຳລັງບັນທຶກບິນ ແລະ ພິມໃບບິນ...', 'Saving & printing receipt...')
+                    : t('pos.confirmPayCash')}
                 </button>
               </div>
             )}
@@ -3451,17 +3955,25 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 {cartSummary.totalSatang <= 0 ? (
                   <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 text-center space-y-3">
                     <p className="text-sm font-medium text-ink">
-                      ยอดชำระสุทธิเป็น ฿0.00 ไม่สามารถสร้าง Thai QR PromptPay ได้
+                      {pick(
+                        `ยอดชำระสุทธิเป็น ${money(0)} ไม่สามารถสร้าง ${qrMethodLabel} ได้`,
+                        `ຍອດຊຳລະສຸດທິເປັນ ${money(0)} ບໍ່ສາມາດສ້າງ ${qrMethodLabel} ໄດ້`,
+                        `Total is ${money(0)}; cannot generate ${qrMethodLabel}`
+                      )}
                     </p>
                     <p className="text-xs text-ink-muted">
-                      กรุณาสลับไปที่แท็บ &ldquo;เงินสด&rdquo; เพื่อปิดบิลยอด ฿0.00
+                      {pick(
+                        `กรุณาสลับไปที่แท็บเงินสดเพื่อปิดบิลยอด ${money(0)}`,
+                        `ກະລຸນາສະຫຼັບໄປແຖບເງິນສົດເພື່ອປິດບິນຍອດ ${money(0)}`,
+                        `Please switch to Cash tab to complete ${money(0)} order`
+                      )}
                     </p>
                     <button
                       type="button"
                       onClick={() => setPaymentTab('CASH')}
                       className={`h-[44px] rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                     >
-                      สลับไปรับเงินสด ฿0.00
+                      {t('pos.cashTab')} ({money(0)})
                     </button>
                   </div>
                 ) : (
@@ -3470,20 +3982,36 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   {qrDataUrl ? (
                     <img
                       src={qrDataUrl}
-                      alt="Thai QR PromptPay Dynamic Code"
+                      alt={`${qrMethodLabel} Dynamic Code`}
                       className="h-44 w-44 rounded-[4px] border border-hairline shrink-0"
                     />
                   ) : (
                     <div className="h-44 w-44 rounded-[4px] border border-hairline bg-surface-1 flex items-center justify-center text-xs text-ink-muted shrink-0">
-                      กำลังสร้าง QR...
+                      {pick('กำลังสร้าง QR...', 'ກຳລັງສ້າງ QR...', 'Generating QR...')}
                     </div>
                   )}
                   <div className="space-y-1.5 text-sm">
                     <div className="font-google-display text-[18px] text-ink">
-                      สแกนจ่ายพร้อมเพย์ (Offline EMVCo Dynamic QR)
+                      {isLaos
+                        ? pick(
+                            'สแกนจ่าย LAOQR / BCEL OnePay (Dynamic QR)',
+                            'ສະແກນຈ່າຍ LAOQR / BCEL OnePay (Dynamic QR)',
+                            'Scan LAOQR / BCEL OnePay (Dynamic QR)'
+                          )
+                        : pick(
+                            'สแกนจ่ายพร้อมเพย์ (Offline EMVCo Dynamic QR)',
+                            'ສະແກນຈ່າຍ PromptPay (EMVCo Dynamic QR)',
+                            'Scan Thai QR PromptPay (Dynamic QR)'
+                          )}
                     </div>
                     <p className="text-xs text-ink-muted">
-                      ล็อกยอดเงินตรงตามบิลอัตโนมัติ คำนวณรหัสตรวจสอบ CRC16 ({qrCrcHex}) โดยไม่ต้องพึ่งอินเทอร์เน็ต
+                      {isLaos
+                        ? pick(
+                            `ล็อกยอด ${money(cartSummary.totalSatang)} อัตโนมัติ (Tag 53=418 LAK · Tag 58=LA · CRC16 ${qrCrcHex}) ทำงานออฟไลน์ 100%`,
+                            `ລັອກຍອດ ${money(cartSummary.totalSatang)} ອັດຕະໂນມັດ (Tag 53=418 LAK · CRC16 ${qrCrcHex}) ໃຊ້ງານອອບໄລນ໌ 100%`,
+                            `Amount locked at ${money(cartSummary.totalSatang)} (EMVCo 418 LAK · CRC16 ${qrCrcHex}) — 100% offline.`
+                          )
+                        : `ล็อกยอดเงินตรงตามบิลอัตโนมัติ คำนวณรหัสตรวจสอบ CRC16 (${qrCrcHex}) โดยไม่ต้องพึ่งอินเทอร์เน็ต`}
                     </p>
                     {qrPayloadText && (
                       <p className="text-[11px] text-ink-muted break-all line-clamp-2">
@@ -3494,8 +4022,37 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 </div>
 
                 <div className="space-y-2.5">
+                  {isLaos && (
+                    <div>
+                      <label htmlFor={`${uid}-lao-bank`} className="block text-xs font-medium text-ink-muted mb-1">
+                        {t('pos.laoSlipBankLabel')}
+                      </label>
+                      <select
+                        id={`${uid}-lao-bank`}
+                        value={laoSenderBankCode}
+                        onChange={(e) => {
+                          setLaoSenderBankCode(e.target.value);
+                          setSlipVerificationModal(null);
+                        }}
+                        className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-xs text-ink ${UI_INTERACTION.focusSelect}`}
+                      >
+                        {LAO_BANKS.map((bank) => (
+                          <option key={bank.code} value={bank.code}>
+                            {bank.code} — {locale === 'lo' ? bank.displayNameLao : locale === 'en' ? bank.displayNameEn : bank.displayNameThai}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
                   <label htmlFor={`${uid}-slip-miniqr`} className="block text-xs font-medium text-ink">
-                    ขั้นตอนป้องกันสลิปปลอม: ยิงปืนสแกน 2D ที่ Mini-QR บนสลิปลูกค้าได้ทันที (ระบบตรวจให้อัตโนมัติ)
+                    {isLaos
+                      ? pick(
+                          'ตรวจสลิปโอนเงินป้องกันใช้ซ้ำ: สแกนหรือกรอกเลข Ref / Ticket สลิปลูกค้า (SHA-256 Deduplication)',
+                          'ກວດສອບສະລິບປ້ອງກັນການໂອນຊ້ຳ: ສະແກນ ຫຼື ປ້ອນເລກ Ref / Ticket ຈາກສະລິບລູກຄ້າ',
+                          'Anti-duplicate slip check: scan or type customer transfer Ticket / Ref ID'
+                        )
+                      : 'ขั้นตอนป้องกันสลิปปลอม: ยิงปืนสแกน 2D ที่ Mini-QR บนสลิปลูกค้าได้ทันที (ระบบตรวจให้อัตโนมัติ)'}
                   </label>
                   <input
                     id={`${uid}-slip-miniqr`}
@@ -3506,11 +4063,15 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       setSlipMiniQrInput(e.target.value);
                       setSlipVerificationModal(null);
                     }}
-                    placeholder="ยิงปืนสแกน 2D บนสลิปโอนเงินลูกค้าทันทีโดยไม่ต้องคลิกช่องนี้..."
+                    placeholder={
+                      isLaos
+                        ? t('pos.laoSlipRefPlaceholder')
+                        : 'ยิงปืนสแกน 2D บนสลิปโอนเงินลูกค้าทันทีโดยไม่ต้องคลิกช่องนี้...'
+                    }
                     className={`h-11 w-full rounded-[4px] border border-hairline px-3.5 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                   />
 
-                  {simulationModeEnabled && (
+                  {simulationModeEnabled && !isLaos && (
                     <div className="flex flex-wrap gap-2">
                       {SLIP_PRESETS.map((p) => (
                         <button
@@ -3547,28 +4108,51 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         onClick={() => void handleVerifySlipStep1()}
                         className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                       >
-                        ตรวจสอบโครงสร้างสลิป BOT Mini-QR (Step 1)
+                        {isLaos
+                          ? `${t('pos.verifySlipBtn')} LAOQR (Step 1)`
+                          : 'ตรวจสอบโครงสร้างสลิป BOT Mini-QR (Step 1)'}
                       </button>
+
+                      {isLaos && fiscal.laoQrVerificationPolicy === 'VISUAL_CONFIRM_ALLOWED' && (
+                        <button
+                          type="button"
+                          disabled={processingCheckout || cartSummary.totalSatang <= 0}
+                          onClick={() => void executeFinalCheckout('PROMPTPAY_QR', undefined)}
+                          className={`h-[44px] w-full rounded-[48px] border border-primary bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+                        >
+                          {t('pos.visualConfirmOnePay')}
+                        </button>
+                      )}
                     </>
                   ) : (
                     <div className="rounded-[8px] bg-primary-soft p-4 space-y-3">
                       <div className="flex items-center justify-between">
                         <span className="inline-flex items-center gap-1.5 font-google-display text-sm font-medium text-primary-dark">
                           <CheckCircle2 className="h-4 w-4" />
-                          สลิปถูกต้องและไม่เคยถูกใช้ซ้ำ
+                          {pick(
+                            'สลิปถูกต้องและไม่เคยถูกใช้ซ้ำ',
+                            'ສະລິບຖືກຕ້ອງ ແລະ ບໍ່ເຄີຍຖືກໃຊ້ຊ້ຳ',
+                            'Slip valid and not previously used'
+                          )}
                         </span>
                         <span className="text-xs font-medium text-ink tabular-nums-google">
                           Ref *{slipVerificationModal.transRefLast4}
                         </span>
                       </div>
                       <div className="rounded-[4px] border border-hairline bg-canvas p-3">
-                        <div className="text-xs text-ink-muted">ธนาคารต้นทาง</div>
+                        <div className="text-xs text-ink-muted">
+                          {pick('ธนาคารต้นทาง', 'ທະນາຄານຕົ້ນທາງ', 'Sender Bank')}
+                        </div>
                         <div className="font-google-display text-[18px] text-ink">
                           {slipVerificationModal.bankDisplayNameThai}
                         </div>
                         <div className="mt-1.5 text-xs text-ink-soft flex items-center gap-1.5">
                           <AlertTriangle className="h-4 w-4 text-primary shrink-0" />
-                          โปรดตรวจยอดเงินบนสลิปลูกค้าให้ตรงกับ{' '}
+                          {pick(
+                            'โปรดตรวจยอดเงินบนสลิปลูกค้าให้ตรงกับ',
+                            'ກະລຸນາກວດຍອດເງິນເທິງສະລິບໃຫ້ກົງກັບ',
+                            'Verify slip amount matches'
+                          )}{' '}
                           <strong>{slipVerificationModal.expectedAmountFormatted}</strong>
                         </div>
                       </div>
@@ -3580,7 +4164,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         }
                         className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] sm:text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                       >
-                        ยืนยันยอดเงินตรงกัน · ปิดการขาย &amp; พิมพ์ใบเสร็จ (Step 2)
+                        {t('pos.confirmPayQr')}
                       </button>
                     </div>
                   )}
@@ -3595,14 +4179,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 <Layers className="h-10 w-10 text-primary mx-auto" />
                 <div>
                   <div className="font-google-display text-[20px] text-ink">
-                    รับชำระผ่านเครื่องรูดบัตร EDC
+                    {pick('รับชำระผ่านเครื่องรูดบัตร EDC', 'ຮັບຊຳລະຜ່ານເຄື່ອງຮູດບັດ EDC', 'Card / EDC Terminal Payment')}
                   </div>
                   <p className="text-sm text-ink-muted mt-1">
-                    ตรวจสอบสลิปอนุมัติจากเครื่อง EDC ยอด{' '}
-                    <strong className="text-ink">
-                      ฿{formatSatangToThbString(cartSummary.totalSatang)}
-                    </strong>{' '}
-                    ก่อนกดยืนยัน
+                    {pick('ตรวจสอบสลิปอนุมัติจากเครื่อง EDC ยอด', 'ກວດສອບສະລິບອະນຸມັດຈາກເຄື່ອງ EDC ຍອດ', 'Verify EDC approval slip for')}{' '}
+                    <strong className="text-ink">{money(cartSummary.totalSatang)}</strong>{' '}
+                    {pick('ก่อนกดยืนยัน', 'ກ່ອນກົດຢືນຢັນ', 'before confirming')}
                   </p>
                 </div>
                 <button
@@ -3611,7 +4193,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   onClick={() => void executeFinalCheckout('CARD')}
                   className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                 >
-                  ยืนยันรับชำระบัตรเครดิต &amp; พิมพ์ใบเสร็จ ABB
+                  {t('pos.confirmPayCard')}
                 </button>
               </div>
             )}
@@ -3621,24 +4203,25 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 {cartSummary.totalSatang <= 0 ? (
                   <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 text-center space-y-3">
                     <p className="text-sm font-medium text-ink">
-                      ยอดชำระสุทธิเป็น ฿0.00 ไม่สามารถใช้โหมดแยกจ่ายได้
-                    </p>
-                    <p className="text-xs text-ink-muted">
-                      กรุณาสลับไปที่แท็บ &ldquo;เงินสด&rdquo; เพื่อปิดบิลยอด ฿0.00
+                      {pick(
+                        `ยอดชำระสุทธิเป็น ${money(0)} ไม่สามารถใช้โหมดแยกจ่ายได้`,
+                        `ຍອດຊຳລະສຸດທິເປັນ ${money(0)} ບໍ່ສາມາດໃຊ້ໂໝດແຍກຈ່າຍໄດ້`,
+                        `Total is ${money(0)}; cannot use split payment`
+                      )}
                     </p>
                     <button
                       type="button"
                       onClick={() => setPaymentTab('CASH')}
                       className={`h-[44px] rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                     >
-                      สลับไปรับเงินสด ฿0.00
+                      {t('pos.cashTab')} ({money(0)})
                     </button>
                   </div>
                 ) : (
                   <>
                 <div>
                   <label htmlFor={`${uid}-split-cash`} className="block text-xs font-medium text-ink-muted mb-1.5">
-                    ส่วนที่ 1: ยอดรับเงินสด (บาท)
+                    {pick('ส่วนที่ 1: ยอดรับเงินสด', 'ສ່ວນທີ 1: ຍອດຮັບເງິນສົດ', 'Part 1: Cash Amount')} ({currencyCode})
                   </label>
                   <div className="flex flex-col sm:flex-row gap-2">
                     <input
@@ -3658,17 +4241,18 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         onClick={() => void loadPromptPayQr(splitRemainingSatang)}
                         className={`min-h-[44px] rounded-[48px] border border-primary bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:bg-surface-1 whitespace-nowrap ${UI_INTERACTION.focusButton}`}
                       >
-                        อัปเดต QR ยอดคงเหลือ
+                        {pick('อัปเดต QR ยอดคงเหลือ', 'ອັບເດດ QR ຍອດທີ່ເຫຼືອ', 'Refresh Remainder QR')}
                       </button>
                     )}
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {[
-                      { label: '฿50', satang: 5_000 },
-                      { label: '฿100', satang: 10_000 },
-                      { label: '฿200', satang: 20_000 },
+                      ...getSplitCashQuickPresetsForCountry(countryCode).map((p) => ({
+                        label: money(p.satang),
+                        satang: p.satang,
+                      })),
                       {
-                        label: 'ครึ่งบิล',
+                        label: t('pos.halfBill'),
                         satang: Math.floor(cartSummary.totalSatang / 200) * 100,
                       },
                     ]
@@ -3678,9 +4262,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           key={preset.label}
                           type="button"
                           onClick={() => {
-                            setSplitCashBahtInput(
-                              formatSatangToThbString(preset.satang).replace(/,/g, '')
-                            );
+                            setSplitCashBahtInput(moneyInput(preset.satang));
                             setSlipVerificationModal(null);
                             const rem = Math.max(0, cartSummary.totalSatang - preset.satang);
                             if (splitSecondMethod === 'PROMPTPAY_QR' && rem > 0) {
@@ -3698,8 +4280,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 <div className="border-t border-hairline pt-3 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs font-medium text-ink-muted">
-                      ส่วนที่ 2: ชำระยอดคงเหลือ ฿{formatSatangToThbString(splitRemainingSatang)}{' '}
-                      ด้วย
+                      {pick('ส่วนที่ 2: ชำระยอดคงเหลือ', 'ສ່ວນທີ 2: ຊຳລະຍອດທີ່ເຫຼືອ', 'Part 2: Pay remainder')}{' '}
+                      {money(splitRemainingSatang)}{' '}
+                      {pick('ด้วย', 'ດ້ວຍ', 'via')}
                     </span>
                     <div className="flex gap-2">
                       <button
@@ -3717,7 +4300,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
                         }`}
                       >
-                        Thai QR PromptPay
+                        {qrMethodLabel}
                       </button>
                       <button
                         type="button"
@@ -3732,7 +4315,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
                         }`}
                       >
-                        บัตรเครดิต / EDC
+                        {t('pos.cardTab')}
                       </button>
                     </div>
                   </div>
@@ -3743,51 +4326,94 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         {qrDataUrl ? (
                           <img
                             src={qrDataUrl}
-                            alt="Split PromptPay QR"
+                            alt={`Split ${qrMethodLabel}`}
                             className="h-28 w-28 rounded-[4px] border border-hairline shrink-0"
                           />
                         ) : (
                           <div className="h-28 w-28 rounded-[4px] border border-hairline bg-surface-1 flex items-center justify-center text-[11px] text-ink-muted shrink-0">
-                            กดอัปเดต QR
+                            {pick('กดอัปเดต QR', 'ກົດອັບເດດ QR', 'Refresh QR')}
                           </div>
                         )}
                         <div className="text-xs space-y-1">
                           <div className="font-google-display text-sm font-medium text-ink">
-                            Thai QR ยอดส่วนที่ 2: ฿{formatSatangToThbString(splitRemainingSatang)}
+                            {qrMethodLabel}: {money(splitRemainingSatang)}
                           </div>
                           <p className="text-ink-muted">
-                            สแกน Mini-QR บนสลิปลูกค้าเพื่อป้องกันสลิปซ้ำ หรือกดตรวจสลิป Step 1
+                            {isLaos
+                              ? pick(
+                                  'สแกนหรือกรอกเลข Ref สลิปสำหรับยอดโอนส่วนที่ 2',
+                                  'ສະແກນ ຫຼື ປ້ອນເລກ Ref ສະລິບສຳລັບຍອດໂອນສ່ວນທີ 2',
+                                  'Scan or enter transfer Ref for Part 2'
+                                )
+                              : 'สแกน Mini-QR บนสลิปลูกค้าเพื่อป้องกันสลิปซ้ำ หรือกดตรวจสลิป Step 1'}
                           </p>
                         </div>
                       </div>
 
+                      {isLaos && (
+                        <select
+                          aria-label={t('pos.laoSlipBankLabel')}
+                          value={laoSenderBankCode}
+                          onChange={(e) => {
+                            setLaoSenderBankCode(e.target.value);
+                            setSlipVerificationModal(null);
+                          }}
+                          className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-xs text-ink ${UI_INTERACTION.focusSelect}`}
+                        >
+                          {LAO_BANKS.map((bank) => (
+                            <option key={bank.code} value={bank.code}>
+                              {bank.code} — {locale === 'lo' ? bank.displayNameLao : locale === 'en' ? bank.displayNameEn : bank.displayNameThai}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+
                       <input
                         type="text"
                         data-scanner-slip-allow="true"
-                        aria-label="ข้อมูล BOT Mini-QR สำหรับส่วนที่ 2"
+                        aria-label={pick('ข้อมูลสลิปสำหรับส่วนที่ 2', 'ຂໍ້ມູນສະລິບສ່ວນທີ 2', 'Part 2 Slip Ref')}
                         value={slipMiniQrInput}
                         onChange={(e) => {
                           setSlipMiniQrInput(e.target.value);
                           setSlipVerificationModal(null);
                         }}
-                        placeholder="ยิงปืน 2D สแกนสลิปส่วนที่ 2 ได้ทันที..."
+                        placeholder={
+                          isLaos
+                            ? t('pos.laoSlipRefPlaceholder')
+                            : 'ยิงปืน 2D สแกนสลิปส่วนที่ 2 ได้ทันที...'
+                        }
                         className={`h-10 w-full rounded-[4px] border border-hairline px-3 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                       />
 
                       {!slipVerificationModal?.valid ? (
-                        <button
-                          type="button"
-                          disabled={
-                            processingCheckout ||
-                            splitCashSatang <= 0 ||
-                            splitRemainingSatang <= 0
-                          }
-                          onClick={() => void handleVerifySlipStep1(splitRemainingSatang)}
-                          className={`h-[48px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
-                        >
-                          ตรวจสลิป BOT Mini-QR (ยอด ฿
-                          {formatSatangToThbString(splitRemainingSatang)})
-                        </button>
+                        <div className="space-y-2">
+                          <button
+                            type="button"
+                            disabled={
+                              processingCheckout ||
+                              splitCashSatang <= 0 ||
+                              splitRemainingSatang <= 0
+                            }
+                            onClick={() => void handleVerifySlipStep1(splitRemainingSatang)}
+                            className={`h-[48px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                          >
+                            {t('pos.verifySlipBtn')} ({money(splitRemainingSatang)})
+                          </button>
+                          {isLaos && fiscal.laoQrVerificationPolicy === 'VISUAL_CONFIRM_ALLOWED' && (
+                            <button
+                              type="button"
+                              disabled={
+                                processingCheckout ||
+                                splitCashSatang <= 0 ||
+                                splitRemainingSatang <= 0
+                              }
+                              onClick={() => void executeFinalCheckout('SPLIT', undefined)}
+                              className={`h-[42px] w-full rounded-[48px] border border-primary bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
+                            >
+                              {t('pos.visualConfirmOnePay')}
+                            </button>
+                          )}
+                        </div>
                       ) : (
                         <button
                           type="button"
@@ -3801,7 +4427,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           }
                           className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                         >
-                          ยืนยันแยกจ่าย (เงินสด + Thai QR) · เปิดลิ้นชัก &amp; พิมพ์ใบเสร็จ
+                          {pick(
+                            `ยืนยันแยกจ่าย (เงินสด + ${qrMethodLabel}) · เปิดลิ้นชัก & พิมพ์ใบเสร็จ`,
+                            `ຢືນຢັນແຍກຈ່າຍ (ເງິນສົດ + ${qrMethodLabel}) · ພິມໃບບິນ`,
+                            `Confirm Split (Cash + ${qrMethodLabel}) & Print`
+                          )}
                         </button>
                       )}
                     </div>
@@ -3817,7 +4447,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         onClick={() => void executeFinalCheckout('SPLIT')}
                         className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-[15px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                       >
-                        ยืนยันแยกจ่าย (เงินสด + บัตร EDC) · เปิดลิ้นชัก &amp; พิมพ์ใบเสร็จ
+                        {pick(
+                          'ยืนยันแยกจ่าย (เงินสด + บัตร EDC) · เปิดลิ้นชัก & พิมพ์ใบเสร็จ',
+                          'ຢືນຢັນແຍກຈ່າຍ (ເງິນສົດ + ບັດ EDC) · ພິມໃບບິນ',
+                          'Confirm Split (Cash + Card) & Print'
+                        )}
                       </button>
                     )}
                   </div>
@@ -3843,7 +4477,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             <div className="flex items-center justify-between border-b border-hairline px-5 py-4 shrink-0">
               <div>
                 <h3 id={`${uid}-receipt-title`} className="font-google-display text-[18px] font-normal text-ink">
-                  ใบเสร็จรับเงิน / ใบกำกับภาษีอย่างย่อ ({printPaperWidthMm}mm)
+                  {pick(
+                    `ใบเสร็จรับเงิน / ใบกำกับภาษีอย่างย่อ (${printPaperWidthMm}mm)`,
+                    `ໃບຮັບເງິນ / ໃບເກັບເງິນ (${printPaperWidthMm}mm)`,
+                    `Receipt / Tax Invoice (${printPaperWidthMm}mm)`
+                  )}
                 </h3>
                 <p className="text-xs text-ink-muted">
                   {lastPrintedReceipt.spoolStatus === 'PRINTED_IMMEDIATELY'
@@ -3876,7 +4514,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       : 'text-ink-muted hover:text-ink'
                   }`}
                 >
-                  ฟอนต์ไทย 203-DPI (1-Bit)
+                  {pick('ฟอนต์ 203-DPI (1-Bit)', 'ຟອນ 203-DPI (1-Bit)', '203-DPI Raster (1-Bit)')}
                 </button>
                 <button
                   type="button"
@@ -3989,6 +4627,17 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         currentUser={currentUser}
         onClose={() => setVoidTargetOrder(null)}
         onVoidAuthorized={handleAuthorizedVoidOrder}
+      />
+
+      <TableQrSlipModal
+        open={tableQrModalOpen}
+        outletId={outletId}
+        bootstrap={bootstrap}
+        currentUser={currentUser}
+        tableSessions={qrTableSessions}
+        onClose={() => setTableQrModalOpen(false)}
+        onSessionsChanged={() => refreshQrGuestOrders(false)}
+        onToast={onToast}
       />
 
       <ConfirmDialog

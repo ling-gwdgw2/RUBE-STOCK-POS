@@ -33,9 +33,9 @@
     --glue-grey-0: #ffffff;   /* canvas */
     --glue-hero-bg: #000000;  /* hero-bg */
 
-    /* Canonical Two-Typeface Split with Offline Windows Thai/Latin Fallbacks */
-    --font-google-sans: "Leelawadee UI", "Segoe UI", "Google Sans", "Product Sans", "Manrope", "Noto Sans Thai", "Tahoma", Arial, Helvetica, sans-serif;
-    --font-google-text: "Leelawadee UI", "Segoe UI", "Google Sans Text", "Inter", "Noto Sans Thai", "Tahoma", Arial, Helvetica, sans-serif;
+    /* Canonical Two-Typeface Split with Bundled Offline Noto Sans Lao + Windows Thai/Lao/Latin Fallbacks */
+    --font-google-sans: "Noto Sans Lao", "Leelawadee UI", "Phetsarath OT", "Saysettha OT", "Segoe UI", "Google Sans", "Product Sans", "Manrope", "Noto Sans Thai", "Tahoma", Arial, Helvetica, sans-serif;
+    --font-google-text: "Noto Sans Lao", "Leelawadee UI", "Phetsarath OT", "Saysettha OT", "Segoe UI", "Google Sans Text", "Inter", "Noto Sans Thai", "Tahoma", Arial, Helvetica, sans-serif;
 
     font-family: var(--font-google-text);
     color-scheme: light;

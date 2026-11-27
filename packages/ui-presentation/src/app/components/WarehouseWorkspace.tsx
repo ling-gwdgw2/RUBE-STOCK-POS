@@ -25,13 +25,13 @@ import {
   X,
 } from 'lucide-react';
 import {
-  formatMicroBahtToThbString,
   formatMilliUnitsToQtyString,
-  formatSatangToThbString,
   parseDecimalStringToScaledInt,
 } from '../../../../shared-contracts/src/fixed-point.ts';
+import { formatMicroUnitCostForInput } from '../../../../shared-contracts/src/currency.ts';
 import { PhysicalScannerStreamBuffer } from '../../hooks/usePhysicalScanner.ts';
 import { posTransport, resolveBackendAssetUrl } from '../api/pos-transport.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type {
   BootstrapPayload,
   CatalogVariantDetailDto,
@@ -78,6 +78,18 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   onToast,
 }) => {
   const uid = useId();
+  const {
+    countryCode,
+    currencyCode,
+    dateTime,
+    money,
+    moneyInput,
+    parseMoney,
+    unitCost,
+    t,
+    pick,
+  } = useI18n();
+  const isLaos = countryCode === 'LA';
   const [subTab, setSubTab] = useState<WmsSubTab>('CATALOG');
   const [catalogSearch, setCatalogSearch] = useState('');
   const [warehouseScanInput, setWarehouseScanInput] = useState('');
@@ -124,8 +136,8 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     getDefaultCategoryForProfile(bootstrap.categories, bootstrap.profile)?.id ?? 'CAT-RETAIL'
   );
   const [prodUnit, setProdUnit] = useState(getProfileMeta(bootstrap.profile).defaultUnit);
-  const [prodPriceBaht, setProdPriceBaht] = useState('45.00');
-  const [prodCostBaht, setProdCostBaht] = useState('22.0000');
+  const [prodPriceBaht, setProdPriceBaht] = useState(() => (isLaos ? '35000' : '45.00'));
+  const [prodCostBaht, setProdCostBaht] = useState(() => (isLaos ? '18000' : '22.0000'));
   const [prodInitStock, setProdInitStock] = useState('20.000');
   const [prodLowStock, setProdLowStock] = useState('5.000');
   const [prodIsComposite, setProdIsComposite] = useState(false);
@@ -167,11 +179,11 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       description: string;
       amountBahtInput: string;
     }>
-  >([
+  >(() => [
     {
       costType: 'FREIGHT',
-      description: 'ค่าขนส่งห้องเย็น (Cold-Chain Freight)',
-      amountBahtInput: '250.00',
+      description: isLaos ? 'ຄ່າຂົນສົ່ງ (Cold-Chain Freight)' : 'ค่าขนส่งห้องเย็น (Cold-Chain Freight)',
+      amountBahtInput: isLaos ? '50000' : '250.00',
     },
   ]);
   const [poPreviewLines, setPoPreviewLines] = useState<
@@ -215,7 +227,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     bootstrap.modifierGroups[0]?.id ?? 'GRP-TOPPING'
   );
   const [modItemName, setModItemName] = useState('');
-  const [modPriceDeltaBaht, setModPriceDeltaBaht] = useState('15.00');
+  const [modPriceDeltaBaht, setModPriceDeltaBaht] = useState(() => (isLaos ? '5000' : '15.00'));
   const [modMode, setModMode] = useState<'FIXED_QTY_DELTA' | 'ROLE_SCALE_BPS'>('FIXED_QTY_DELTA');
   const [modCompVariantId, setModCompVariantId] = useState('VAR-RAW-BOBA');
   const [modQtyDeltaInput, setModQtyDeltaInput] = useState('40.000');
@@ -260,7 +272,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             {
               variantId: first.id,
               qtyInput: '10.000',
-              unitCostBahtInput: formatMicroBahtToThbString(first.defaultPurchaseCostMicroBaht).replace(/,/g, ''),
+              unitCostBahtInput: formatMicroUnitCostForInput(first.defaultPurchaseCostMicroBaht, currencyCode),
             },
           ];
         }
@@ -284,6 +296,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     bootstrap.catalogDetailed,
     bootstrap.modifierGroups,
     bootstrap.suppliers,
+    currencyCode,
     modCompVariantId,
     modTargetGroupId,
     poLines.length,
@@ -390,8 +403,8 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       setProdBarcode(cleanBarcode);
       setProdCategoryId(defaultCat?.id ?? bootstrap.categories[0]?.id ?? 'CAT-RETAIL');
       setProdUnit(getProfileMeta(bootstrap.profile).defaultUnit);
-      setProdPriceBaht('55.00');
-      setProdCostBaht('25.0000');
+      setProdPriceBaht(isLaos ? '35000' : '55.00');
+      setProdCostBaht(isLaos ? '18000' : '25.0000');
       setProdInitStock('20.000');
       setProdLowStock('5.000');
       setProdIsComposite(false);
@@ -405,30 +418,33 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       setProductModalOpen(true);
       window.setTimeout(() => prodNameInputRef.current?.focus(), 60);
     },
-    [bootstrap.categories, bootstrap.profile]
+    [bootstrap.categories, bootstrap.profile, isLaos]
   );
 
-  const openEditProductModal = useCallback((v: CatalogVariantDetailDto) => {
-    setEditingVariantId(v.id);
-    setProdName(v.itemName);
-    setProdSku(v.sku);
-    setProdBarcode(v.barcode ?? '');
-    setProdCategoryId(v.categoryId ?? 'CAT-RETAIL');
-    setProdUnit(v.unitName);
-    setProdPriceBaht(formatSatangToThbString(v.priceSatang).replace(/,/g, ''));
-    setProdCostBaht(formatMicroBahtToThbString(v.averageCostMicroBaht).replace(/,/g, ''));
-    setProdInitStock('0');
-    setProdLowStock(formatMilliUnitsToQtyString(v.lowStockThresholdMilli));
-    setProdIsComposite(v.isComposite);
-    setProdUseProduction(v.useProduction);
-    setProdIsScale(v.isWeightedScale);
-    setProdActive(v.active);
-    setProdImagePreviewUrl(resolveBackendAssetUrl(v.imageUrl));
-    setProdImagePendingDataUrl(undefined);
-    setInlineCatOpen(false);
-    setInlineCatName('');
-    setProductModalOpen(true);
-  }, []);
+  const openEditProductModal = useCallback(
+    (v: CatalogVariantDetailDto) => {
+      setEditingVariantId(v.id);
+      setProdName(v.itemName);
+      setProdSku(v.sku);
+      setProdBarcode(v.barcode ?? '');
+      setProdCategoryId(v.categoryId ?? 'CAT-RETAIL');
+      setProdUnit(v.unitName);
+      setProdPriceBaht(moneyInput(v.priceSatang));
+      setProdCostBaht(formatMicroUnitCostForInput(v.averageCostMicroBaht, currencyCode));
+      setProdInitStock('0');
+      setProdLowStock(formatMilliUnitsToQtyString(v.lowStockThresholdMilli));
+      setProdIsComposite(v.isComposite);
+      setProdUseProduction(v.useProduction);
+      setProdIsScale(v.isWeightedScale);
+      setProdActive(v.active);
+      setProdImagePreviewUrl(resolveBackendAssetUrl(v.imageUrl));
+      setProdImagePendingDataUrl(undefined);
+      setInlineCatOpen(false);
+      setInlineCatName('');
+      setProductModalOpen(true);
+    },
+    [currencyCode, moneyInput]
+  );
 
   const handleWarehouseBarcodeLookupOrCreate = useCallback(
     (rawCode: string) => {
@@ -598,7 +614,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   const handleSaveProduct = async () => {
     setBusy(true);
     try {
-      const priceSatang = parseDecimalStringToScaledInt(prodPriceBaht, 2);
+      const priceSatang = parseMoney(prodPriceBaht);
       const defaultPurchaseCostMicroBaht = parseDecimalStringToScaledInt(prodCostBaht, 6);
       const initialStockMilli = parseDecimalStringToScaledInt(prodInitStock || '0', 3);
       const lowStockThresholdMilli = parseDecimalStringToScaledInt(prodLowStock || '0', 3);
@@ -763,7 +779,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       .map((c) => ({
         costType: c.costType,
         description: c.description,
-        amountSatang: parseDecimalStringToScaledInt(c.amountBahtInput || '0', 2),
+        amountSatang: parseMoney(c.amountBahtInput || '0'),
       }))
       .filter((c) => c.amountSatang > 0);
     return { items, landedCosts };
@@ -823,7 +839,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       });
       await onRefreshState();
       onToast(
-        `ต้ม/ผลิตชุดเตรียมขายสำเร็จ (+${formatMilliUnitsToQtyString(res.builtQtyMilli)} · ต้นทุนล็อต ฿${formatMicroBahtToThbString(res.batchUnitCostMicroBaht)})`,
+        `${pick('ต้ม/ผลิตชุดเตรียมขายสำเร็จ', 'ຜະລິດຊຸດກຽມຂາຍສຳເລັດ', 'Prep batch built')} (+${formatMilliUnitsToQtyString(res.builtQtyMilli)} · MAC ${unitCost(res.batchUnitCostMicroBaht)})`,
         'success'
       );
     } catch (err) {
@@ -853,7 +869,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       setStocktakeInputs({});
       await onRefreshState();
       onToast(
-        `บันทึกใบตรวจนับสต็อก ${res.countNumber} สำเร็จ (ผลต่างรวม ฿${formatSatangToThbString(res.totalVarianceSatang)})`,
+        `${pick('บันทึกใบตรวจนับสต็อก', 'ບັນທຶກໃບກວດນັບສະຕັອກ', 'Saved stocktake')} ${res.countNumber} (${pick('ผลต่างรวม', 'ຜົນຕ່າງລວມ', 'Variance')} ${money(res.totalVarianceSatang)})`,
         'success'
       );
     } catch (err) {
@@ -969,39 +985,39 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   });
 
   const visibleWarehouseTabs = [
-    { id: 'CATALOG' as const, label: 'ทะเบียนสินค้า & คลัง', icon: Boxes, visible: true },
+    { id: 'CATALOG' as const, label: t('wms.tab.catalog'), icon: Boxes, visible: true },
     {
       id: 'CATEGORIES' as const,
-      label: bootstrap.profile === 'HOSPITALITY' ? 'หมวดหมู่เมนู/วัตถุดิบ' : 'หมวดหมู่สินค้า',
+      label: t('wms.tab.categories'),
       icon: Tag,
       visible: true,
     },
     {
       id: 'MODIFIERS' as const,
-      label: 'ตัวเลือกเสริม (Modifiers)',
+      label: t('wms.tab.modifiers'),
       icon: SlidersHorizontal,
       visible: bootstrap.profile !== 'RETAIL',
     },
-    { id: 'PO_LANDED' as const, label: 'รับของ PO & ค่าขนส่ง', icon: Truck, visible: true },
+    { id: 'PO_LANDED' as const, label: t('wms.tab.po'), icon: Truck, visible: true },
     {
       id: 'PREP_BUILD' as const,
-      label: 'ผลิตเตรียมขาย (Prep)',
+      label: t('wms.tab.prep'),
       icon: Factory,
       visible: bootstrap.profile !== 'RETAIL',
     },
     {
       id: 'STOCKTAKE_TRANSFER' as const,
-      label: 'ตรวจนับ & โอนสาขา',
+      label: t('wms.tab.stocktake'),
       icon: ArrowLeftRight,
       visible: true,
     },
     {
       id: 'LEDGER' as const,
-      label: 'สมุดบัญชีสต็อก',
+      label: t('wms.tab.ledger'),
       icon: FileSpreadsheet,
       visible: true,
     },
-  ].filter((t) => t.visible);
+  ].filter((tab) => tab.visible);
 
   return (
     <div className="space-y-6">
@@ -1043,7 +1059,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             className={`mb-2 sm:mb-0 flex h-[44px] items-center gap-2 rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
           >
             <PackagePlus className="h-4 w-4" />
-            <span>{profileMeta.newItemButtonLabel}</span>
+            <span>{t('wms.addProduct')}</span>
           </button>
         </div>
       </div>
@@ -1265,10 +1281,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                         )}
                       </td>
                       <td className="py-3 px-4 text-right text-ink-muted tabular-nums-google">
-                        ฿{formatMicroBahtToThbString(v.averageCostMicroBaht)}
+                        {unitCost(v.averageCostMicroBaht)}
                       </td>
                       <td className="py-3 px-4 text-right font-medium text-primary-hover tabular-nums-google">
-                        {v.priceSatang > 0 ? `฿${formatSatangToThbString(v.priceSatang)}` : '—'}
+                        {v.priceSatang > 0 ? money(v.priceSatang) : '—'}
                       </td>
                       <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
                         <button
@@ -1544,7 +1560,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     </div>
                     <div>
                       <label htmlFor={`${uid}-mod-price`} className="block text-ink-muted mb-1">
-                        ราคาบวกเพิ่ม (บาท)
+                        {pick('ราคาบวกเพิ่ม', 'ລາຄາບວກເພີ່ມ', 'Price Delta')} ({currencyCode})
                       </label>
                       <input
                         id={`${uid}-mod-price`}
@@ -1699,10 +1715,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           <div className="font-medium text-ink">{mod.name}</div>
                           <div className="text-[11px] tabular-nums-google text-primary-hover mt-0.5">
                             {mod.priceDeltaSatang > 0
-                              ? `+฿${formatSatangToThbString(mod.priceDeltaSatang)}`
+                              ? `+${money(mod.priceDeltaSatang)}`
                               : mod.priceDeltaSatang < 0
-                                ? `-฿${formatSatangToThbString(Math.abs(mod.priceDeltaSatang))}`
-                                : 'ไม่บวกราคา'}{' '}
+                                ? `-${money(Math.abs(mod.priceDeltaSatang))}`
+                                : pick('ไม่บวกราคา', 'ບໍ່ບວກລາຄາ', 'No charge')}{' '}
                             ·{' '}
                             <span className="text-ink-muted">
                               {mod.modifierMode === 'ROLE_SCALE_BPS'
@@ -1775,8 +1791,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                         variantId: purchasableVariants[0]?.id ?? '',
                         qtyInput: '10.000',
                         unitCostBahtInput: purchasableVariants[0]
-                          ? formatMicroBahtToThbString(purchasableVariants[0].defaultPurchaseCostMicroBaht).replace(/,/g, '')
-                          : '10.0000',
+                          ? formatMicroUnitCostForInput(purchasableVariants[0].defaultPurchaseCostMicroBaht, currencyCode)
+                          : isLaos
+                            ? '10000'
+                            : '10.0000',
                       },
                     ])
                   }
@@ -1868,14 +1886,18 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             <div className="space-y-2.5 pt-3 border-t border-hairline">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-medium text-ink-muted">
-                  ค่าใช้จ่ายแฝงในการนำเข้า/ขนส่ง (Landed Costs — บาท)
+                  {pick('ค่าใช้จ่ายแฝงในการนำเข้า/ขนส่ง', 'ຄ່າໃຊ້ຈ່າຍແຝງໃນການຂົນສົ່ງ', 'Landed Costs')} ({currencyCode})
                 </span>
                 <button
                   type="button"
                   onClick={() =>
                     setPoLandedCosts((prev) => [
                       ...prev,
-                      { costType: 'HANDLING', description: 'ค่ายกของ/แช่เย็น', amountBahtInput: '100.00' },
+                      {
+                        costType: 'HANDLING',
+                        description: isLaos ? 'ຄ່າຈັດການ/ແຊ່ເຢັນ' : 'ค่ายกของ/แช่เย็น',
+                        amountBahtInput: isLaos ? '20000' : '100.00',
+                      },
                     ])
                   }
                   className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1 text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 flex items-center gap-1 ${UI_INTERACTION.focusButton}`}
@@ -1973,16 +1995,15 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     >
                       <div className="font-medium text-ink">{p.itemName}</div>
                       <div className="flex justify-between text-ink-muted tabular-nums-google">
-                        <span>ต้นทุนสุทธิรวมค่าขนส่ง/หน่วย:</span>
+                        <span>{pick('ต้นทุนสุทธิรวมค่าขนส่ง/หน่วย:', 'ຕົ້ນທຶນສຸດທິລວມຄ່າຂົນສົ່ງ/ໜ່ວຍ:', 'Effective Unit Cost:')}</span>
                         <span className="font-medium text-ink">
-                          ฿{formatMicroBahtToThbString(p.effectiveUnitCostMicroBaht)}
+                          {unitCost(p.effectiveUnitCostMicroBaht)}
                         </span>
                       </div>
                       <div className="flex justify-between text-ink-muted tabular-nums-google">
-                        <span>MAC เดิม → MAC ใหม่:</span>
+                        <span>{pick('MAC เดิม → MAC ใหม่:', 'MAC ເກົ່າ → MAC ໃໝ່:', 'MAC Before → After:')}</span>
                         <span className="font-medium text-primary-hover">
-                          ฿{formatMicroBahtToThbString(p.macBeforeMicroBaht)} → ฿
-                          {formatMicroBahtToThbString(p.macAfterMicroBaht)}
+                          {unitCost(p.macBeforeMicroBaht)} → {unitCost(p.macAfterMicroBaht)}
                         </span>
                       </div>
                     </div>
@@ -2014,10 +2035,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                       </div>
                       <div className="text-right tabular-nums-google">
                         <div className="font-medium text-ink">
-                          ฿{formatSatangToThbString(po.grandTotalSatang)}
+                          {money(po.grandTotalSatang)}
                         </div>
                         <div className="text-[11px] text-primary-hover">
-                          ค่าขนส่ง ฿{formatSatangToThbString(po.totalLandedCostSatang)}
+                          {pick('ค่าขนส่ง', 'ຄ່າຂົນສົ່ງ', 'Landed')} {money(po.totalLandedCostSatang)}
                         </div>
                       </div>
                     </div>
@@ -2380,7 +2401,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     <tr key={row.id} className="hover:bg-surface-1 transition-colors duration-150">
                       <td className="py-2.5 px-4 tabular-nums-google">
                         <div className="text-ink">
-                          {new Date(row.createdAt).toLocaleString('th-TH')}
+                          {dateTime(row.createdAt)}
                         </div>
                         <div className="text-[11px] text-ink-muted">
                           {row.referenceType} · {row.referenceId} · โดย {row.performedByName}
@@ -2416,7 +2437,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                       </strong>
                     </td>
                     <td className="py-2.5 px-4 text-right text-ink-muted tabular-nums-google">
-                      ฿{formatMicroBahtToThbString(row.unitCostMicroBaht)}
+                      {unitCost(row.unitCostMicroBaht)}
                     </td>
                   </tr>
                 ))
@@ -2656,7 +2677,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           </div>
           <div>
             <label htmlFor={`${uid}-prod-price`} className="block text-primary-hover font-medium mb-1">
-              ราคาขายหน้าร้าน (บาท)
+              {pick('ราคาขายหน้าร้าน', 'ລາຄາຂາຍໜ້າຮ້ານ', 'Selling Price')} ({currencyCode})
             </label>
             <input
               id={`${uid}-prod-price`}
@@ -2668,7 +2689,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           </div>
           <div>
             <label htmlFor={`${uid}-prod-cost`} className="block text-ink-muted mb-1">
-              ต้นทุนซื้อตั้งต้นต่อหน่วย (บาท)
+              {pick('ต้นทุนซื้อตั้งต้นต่อหน่วย', 'ຕົ້ນທຶນຊື້ຕໍ່ໜ່ວຍ', 'Default Unit Cost')} ({currencyCode})
             </label>
             <input
               id={`${uid}-prod-cost`}

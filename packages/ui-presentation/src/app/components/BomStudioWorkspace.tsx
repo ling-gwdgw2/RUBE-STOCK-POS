@@ -1,14 +1,13 @@
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { GitBranch, Layers, Plus, ShieldAlert, Sparkles, Trash2 } from 'lucide-react';
 import {
-  formatMicroBahtToThbString,
   formatMilliUnitsToQtyString,
-  formatSatangToThbString,
   parseDecimalStringToScaledInt,
   roundDivBigInt,
   SCALE_BASIS_POINTS,
 } from '../../../../shared-contracts/src/fixed-point.ts';
 import { posTransport } from '../api/pos-transport.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type { BootstrapPayload, ComponentRole, StaffUserDto } from '../types.ts';
 import { canEditBomRecipes } from '../utils/rbac.ts';
 import { ConfirmDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
@@ -40,6 +39,7 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
   onRefreshState,
   onToast,
 }) => {
+  const { money, unitCost } = useI18n();
   const canEdit = canEditBomRecipes(currentUser.role);
   const compositeVariants = useMemo(
     () => bootstrap.catalogDetailed.filter((v) => v.isComposite),
@@ -448,13 +448,13 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
             <div>
               <div className="text-xs text-white/70">ราคาขายรวม</div>
               <div className="mt-1 font-google-display text-[26px] font-normal leading-[32px] tracking-[-0.25px] text-white tabular-nums-google">
-                ฿{formatSatangToThbString(sellingSatang)}
+                {money(sellingSatang)}
               </div>
             </div>
             <div>
               <div className="text-xs text-white/70">ต้นทุนสูตร (COGS)</div>
               <div className="mt-1 font-google-display text-[26px] font-normal leading-[32px] tracking-[-0.25px] text-white tabular-nums-google">
-                ฿{formatMicroBahtToThbString(totalCogsMicroBaht)}
+                {unitCost(totalCogsMicroBaht)}
               </div>
             </div>
             <div>
@@ -526,7 +526,7 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
                           {v?.itemName ?? d.variantId}
                         </div>
                         <div className="text-[11px] text-ink-muted tabular-nums-google">
-                          {d.transactionType} · MAC ฿{formatMicroBahtToThbString(d.unitCostMicroBaht)}
+                          {d.transactionType} · MAC {unitCost(d.unitCostMicroBaht)}
                         </div>
                       </div>
                       <div className="text-right tabular-nums-google">
@@ -534,7 +534,7 @@ export const BomStudioWorkspace: React.FC<BomStudioWorkspaceProps> = ({
                           {formatMilliUnitsToQtyString(d.quantityChangeMilli, v?.unitName ?? '')}
                         </div>
                         <div className="text-[11px] text-primary-hover">
-                          ทุน ฿{formatMicroBahtToThbString(d.lineCogsMicroBaht)}
+                          ทุน {unitCost(d.lineCogsMicroBaht)}
                         </div>
                       </div>
                     </div>

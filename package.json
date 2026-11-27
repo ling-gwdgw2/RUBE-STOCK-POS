@@ -19,7 +19,9 @@
     "build:ui": "vite build --config packages/ui-presentation/vite.config.mjs",
     "tauri:dev": "cargo run --manifest-path src-tauri/Cargo.toml",
     "tauri:build": "npx tauri build",
-    "test": "node --test tests/property-invariants/accounting-invariants.test.ts tests/e2e-integration/phase0-assembly.test.ts tests/e2e-integration/phase1-warehouse-assembly.test.ts tests/e2e-integration/phase2-pos-assembly.test.ts tests/e2e-integration/phase3-cluster-resilience-assembly.test.ts tests/e2e-integration/phase4-security-chaos-soak-assembly.test.ts tests/e2e-integration/phase5-production-release-assembly.test.ts tests/e2e-integration/section6-hil-assembly-checklist.test.ts tests/e2e-integration/phase6-interactive-ui-server.test.ts",
+    "test": "node --test tests/property-invariants/accounting-invariants.test.ts tests/e2e-integration/phase0-assembly.test.ts tests/e2e-integration/phase1-warehouse-assembly.test.ts tests/e2e-integration/phase2-pos-assembly.test.ts tests/e2e-integration/phase3-cluster-resilience-assembly.test.ts tests/e2e-integration/phase4-security-chaos-soak-assembly.test.ts tests/e2e-integration/phase5-production-release-assembly.test.ts tests/e2e-integration/section6-hil-assembly-checklist.test.ts tests/e2e-integration/phase6-interactive-ui-server.test.ts tests/e2e-integration/phase7-lao-country-support.test.ts tests/e2e-integration/phase8-local-qr-ordering.test.ts",
+    "test:lao": "node --test tests/e2e-integration/phase7-lao-country-support.test.ts",
+    "test:qr": "node --test tests/e2e-integration/phase8-local-qr-ordering.test.ts",
     "test:invariants": "node --test tests/property-invariants/accounting-invariants.test.ts",
     "test:phase0": "node --test tests/e2e-integration/phase0-assembly.test.ts",
     "test:phase1": "node --test tests/e2e-integration/phase1-warehouse-assembly.test.ts",
@@ -34,6 +36,7 @@
     "verify:pr-gatekeeping": "node scripts/verify-pr-gatekeeping.mjs"
   },
   "devDependencies": {
+    "@fontsource/noto-sans-lao": "^5.3.0",
     "@tailwindcss/vite": "^4.0.14",
     "@types/qrcode": "^1.5.5",
     "@types/react": "^19.0.10",

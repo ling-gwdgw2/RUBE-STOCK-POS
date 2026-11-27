@@ -34,9 +34,13 @@ import {
 import { LanClusterCoordinator } from '../../../cluster-gateway/src/lan-cluster-coordinator.ts';
 import { LocalIpcBridge } from '../../../cluster-gateway/src/local-ipc-bridge.ts';
 import {
+  buildSampleStaticLaoQrTemplate,
+  buildTwoPhaseLaoSlipConfirmationModal,
   buildTwoPhaseSlipConfirmationModal,
   commitVerifiedBotSlipHash,
+  generateOfflineLaoQrDynamicQr,
   generateOfflinePromptPayDynamicQr,
+  validateLaoQrStaticTemplate,
 } from '../../../hal-drivers/src/payment/mod.ts';
 import {
   buildEscPosWireJobFrom1BitBitmap,
@@ -49,15 +53,27 @@ import {
 } from '../../../hal-drivers/src/printer/mod.ts';
 import { UpsPowerHidMonitor } from '../../../hal-drivers/src/ups/mod.ts';
 import {
-  computeVatSatang,
-  formatMicroBahtToThbString,
   formatMilliUnitsToQtyString,
-  formatSatangToThbString,
   roundDivBigInt,
   SCALE_BASIS_POINTS,
   SCALE_MILLI,
   type TaxMode,
 } from '../../../shared-contracts/src/fixed-point.ts';
+import {
+  type CashRoundingStepMajor,
+  type CountryCode,
+  type FiscalConfigDto,
+  type ForeignTenderCurrencyCode,
+  type FxRatesConfigDto,
+  type LaoQrVerificationPolicy,
+  type LocaleCode,
+  computeOrderFinancialTotals,
+  formatForeignMoney,
+  formatFxTenderReceiptLine,
+  formatMicroUnitCost,
+  formatMoney,
+  formatVatRatePercent,
+} from '../../../shared-contracts/src/currency.ts';
 import type {
   BomEdgeDto,
   BusinessProfile,
@@ -67,6 +83,8 @@ import type {
   UserRole,
 } from '../../../shared-contracts/src/ipc-commands.ts';
 import { resolveProfileFeatureFlags } from '../profiles/profile-config.ts';
+import type { QrOrderingConfigDto } from '../../../shared-contracts/src/qr-ordering.ts';
+import { GuestQrOrderingServer } from './guest-qr-server.ts';
 import { PosTerminalViewController } from '../views/pos-terminal/PosTerminalView.ts';
 import { FinancialAndBackupReportViewController } from '../views/reports/FinancialAndBackupReportView.ts';
 import { SystemSecurityAndProfileViewController } from '../views/settings/SystemSecurityAndProfileView.ts';
@@ -135,12 +153,17 @@ export interface RubePosInteractiveServerOptions {
    * Lockout duration in milliseconds after 5 consecutive failed PIN attempts (defaults to 30,000 ms).
    */
   pinLockoutDurationMs?: number | undefined;
+  /**
+   * Optional per-IP rate limit (orders/minute) for the isolated Guest LAN Server (default 10).
+   */
+  guestQrRateLimitPerMinute?: number | undefined;
 }
 
 export class RubePosInteractiveAppServer {
   public readonly engine: SqliteReadWritePoolEngine;
   public readonly clusterCoordinator: LanClusterCoordinator;
   public readonly ipc: LocalIpcBridge;
+  public readonly guestQrServer: GuestQrOrderingServer;
   public readonly posController: PosTerminalViewController;
   public readonly reportsController: FinancialAndBackupReportViewController;
   public readonly securityController: SystemSecurityAndProfileViewController;
@@ -206,6 +229,15 @@ export class RubePosInteractiveAppServer {
       terminalId: 'POS-TERM-01',
     });
     this.ipc = new LocalIpcBridge(this.engine, this.clusterCoordinator);
+    this.guestQrServer = new GuestQrOrderingServer({
+      ipc: this.ipc,
+      outletId: 'OUTLET-HQ',
+      productImagesDir: this.productImagesDir,
+      getProductImagesMap: () => this.getProductImagesMap(),
+      ...(options.guestQrRateLimitPerMinute !== undefined
+        ? { rateLimitMaxOrdersPerMinute: options.guestQrRateLimitPerMinute }
+        : {}),
+    });
     this.posController = new PosTerminalViewController(this.ipc, 'OUTLET-HQ', 'POS-TERM-01');
     this.reportsController = new FinancialAndBackupReportViewController(this.ipc);
     this.securityController = new SystemSecurityAndProfileViewController(this.ipc);
@@ -1184,8 +1216,10 @@ export class RubePosInteractiveAppServer {
       selectedModifierIds?: string[] | undefined;
     }>,
     discountSatang: number,
-    taxMode: TaxMode
+    taxMode: TaxMode,
+    options?: { applyCashRounding?: boolean | undefined }
   ) {
+    const fiscal = this.ipc.getFiscalConfig();
     const modifiersMap = new Map(this.ipc.listModifiers().map((m) => [m.id, m]));
     let subtotalSatang = 0;
 
@@ -1208,86 +1242,119 @@ export class RubePosInteractiveAppServer {
         : Math.max(0, baseLinePriceSatang + modifiersTotalSatang);
       subtotalSatang += lineTotalSatang;
       const modsJoined = mods.map((m) => m.name).join(', ');
+      const defaultUnit = fiscal.countryCode === 'LA' ? 'ອັນ' : 'ชิ้น';
       return {
         itemName: line.itemName ?? line.variantId,
         quantityFormatted: formatMilliUnitsToQtyString(
           line.quantityMilli,
-          line.unitName ?? 'ชิ้น'
+          line.unitName ?? defaultUnit
         ),
-        lineTotalFormatted: `฿${formatSatangToThbString(lineTotalSatang)}`,
+        lineTotalFormatted: formatMoney(lineTotalSatang, fiscal.currencyCode),
         ...(modsJoined ? { modifiersText: modsJoined } : {}),
       };
     });
 
-    const afterDiscount = Math.max(0, subtotalSatang - Math.max(0, discountSatang));
-    const taxSatang = computeVatSatang(afterDiscount, 700, taxMode);
-    const netBeforeTaxSatang = taxMode === 'INCLUSIVE' ? afterDiscount - taxSatang : afterDiscount;
-    const totalSatang = taxMode === 'EXCLUSIVE' ? afterDiscount + taxSatang : afterDiscount;
+    const financials = computeOrderFinancialTotals({
+      subtotalSatang,
+      discountSatang: Math.max(0, discountSatang),
+      vatRateBps: fiscal.vatRateBps,
+      taxMode,
+      currencyCode: fiscal.currencyCode,
+      applyCashRounding: Boolean(options?.applyCashRounding),
+      cashRoundingStepMajor: fiscal.cashRoundingStepMajor,
+    });
 
     return {
-      subtotalSatang,
-      taxSatang,
-      netBeforeTaxSatang,
-      totalSatang,
+      subtotalSatang: financials.subtotalSatang,
+      discountSatang: financials.effectiveDiscountSatang,
+      cashRoundingDiscountSatang: financials.cashRoundingDiscountSatang,
+      taxSatang: financials.taxSatang,
+      netBeforeTaxSatang: financials.netBeforeTaxSatang,
+      totalSatang: financials.totalSatang,
       formattedLines,
+      fiscal,
     };
   }
 
   private formatZReportForUi(z: ShiftZReportDto) {
-    const thb = (satang: number) => `฿${formatSatangToThbString(satang)}`;
+    const fiscal = this.ipc.getFiscalConfig();
+    const money = (satang: number) => formatMoney(satang, fiscal.currencyCode);
     return {
       ...z,
-      openingCashFormatted: thb(z.openingCashSatang),
-      grossSalesFormatted: thb(z.grossSalesSatang),
-      discountsFormatted: thb(z.discountTotalSatang),
-      netBeforeTaxFormatted: thb(z.netBeforeTaxSatang),
-      vat7PercentFormatted: thb(z.vatTotalSatang),
-      netSalesTotalFormatted: thb(z.netSalesTotalSatang),
-      cashSalesFormatted: thb(z.cashSalesSatang),
-      promptPaySalesFormatted: thb(z.promptPayQrSalesSatang),
-      cardSalesFormatted: thb(z.cardSalesSatang),
-      voucherSalesFormatted: thb(z.voucherSalesSatang),
-      paidInFormatted: thb(z.paidInSatang),
-      paidOutFormatted: thb(z.paidOutSatang),
-      cashDropFormatted: thb(z.cashDropSatang),
-      voidedTotalFormatted: thb(z.voidedTotalSatang),
-      expectedDrawerCashFormatted: thb(z.expectedCashSatang),
-      countedDrawerCashFormatted: z.countedCashSatang === null ? null : thb(z.countedCashSatang),
-      cashVarianceFormatted: z.cashVarianceSatang === null ? null : thb(z.cashVarianceSatang),
+      openingCashFormatted: money(z.openingCashSatang),
+      grossSalesFormatted: money(z.grossSalesSatang),
+      discountsFormatted: money(z.discountTotalSatang),
+      netBeforeTaxFormatted: money(z.netBeforeTaxSatang),
+      vat7PercentFormatted: money(z.vatTotalSatang),
+      netSalesTotalFormatted: money(z.netSalesTotalSatang),
+      cashSalesFormatted: money(z.cashSalesSatang),
+      promptPaySalesFormatted: money(z.promptPayQrSalesSatang),
+      cardSalesFormatted: money(z.cardSalesSatang),
+      voucherSalesFormatted: money(z.voucherSalesSatang),
+      paidInFormatted: money(z.paidInSatang),
+      paidOutFormatted: money(z.paidOutSatang),
+      cashDropFormatted: money(z.cashDropSatang),
+      voidedTotalFormatted: money(z.voidedTotalSatang),
+      expectedDrawerCashFormatted: money(z.expectedCashSatang),
+      countedDrawerCashFormatted: z.countedCashSatang === null ? null : money(z.countedCashSatang),
+      cashVarianceFormatted: z.cashVarianceSatang === null ? null : money(z.cashVarianceSatang),
+      ...(z.fxCashSummary
+        ? {
+            fxCashSummaryFormatted: {
+              ...z.fxCashSummary,
+              thbCollectedFormatted: formatForeignMoney(z.fxCashSummary.thbCollectedSatang, 'THB'),
+              thbEquivalentFormatted: money(z.fxCashSummary.thbEquivalentBaseSatang),
+              usdCollectedFormatted: formatForeignMoney(z.fxCashSummary.usdCollectedSatang, 'USD'),
+              usdEquivalentFormatted: money(z.fxCashSummary.usdEquivalentBaseSatang),
+              totalForeignEquivalentFormatted: money(
+                z.fxCashSummary.totalForeignEquivalentBaseSatang
+              ),
+              expectedNativeBaseCashFormatted: money(
+                z.fxCashSummary.expectedNativeBaseCashInDrawerSatang
+              ),
+            },
+          }
+        : {}),
     };
   }
 
   private formatAbbReportForUi(abb: AbbSalesTaxReportDto) {
-    const thb = (satang: number) => `฿${formatSatangToThbString(satang)}`;
+    const fiscal = this.ipc.getFiscalConfig();
+    const money = (satang: number) => formatMoney(satang, fiscal.currencyCode);
     return {
       ...abb,
-      totalTaxableBaseFormatted: thb(abb.totalNetBeforeTaxSatang),
-      totalVatFormatted: thb(abb.totalVatSatang),
-      totalGrossFormatted: thb(abb.totalGrossAmountSatang),
+      totalTaxableBaseFormatted: money(abb.totalNetBeforeTaxSatang),
+      totalVatFormatted: money(abb.totalVatSatang),
+      totalGrossFormatted: money(abb.totalGrossAmountSatang),
       invoices: abb.invoices.map((inv) => ({
         ...inv,
-        netBeforeTaxFormatted: thb(inv.netBeforeTaxSatang),
-        taxFormatted: thb(inv.taxSatang),
-        totalFormatted: thb(inv.totalSatang),
+        netBeforeTaxFormatted: money(inv.netBeforeTaxSatang),
+        taxFormatted: money(inv.taxSatang),
+        totalFormatted: money(inv.totalSatang),
       })),
     };
   }
 
   private formatValuationReportForUi(val: InventoryValuationReportDto) {
+    const fiscal = this.ipc.getFiscalConfig();
     return {
       ...val,
-      totalWarehouseValuationFormatted: `฿${formatSatangToThbString(val.totalWarehouseValuationSatang)}`,
+      totalWarehouseValuationFormatted: formatMoney(
+        val.totalWarehouseValuationSatang,
+        fiscal.currencyCode
+      ),
       lines: val.lines.map((l) => ({
         ...l,
         stockFormatted: formatMilliUnitsToQtyString(l.inStockMilli, l.unitName),
-        macFormatted: `฿${formatMicroBahtToThbString(l.averageCostMicroBaht)}`,
-        valuationFormatted: `฿${formatSatangToThbString(l.totalValuationSatang)}`,
+        macFormatted: formatMicroUnitCost(l.averageCostMicroBaht, fiscal.currencyCode),
+        valuationFormatted: formatMoney(l.totalValuationSatang, fiscal.currencyCode),
       })),
     };
   }
 
   private formatMarginReportForUi(m: MenuGrossMarginReportDto) {
-    const thb = (satang: number) => `฿${formatSatangToThbString(satang)}`;
+    const fiscal = this.ipc.getFiscalConfig();
+    const money = (satang: number) => formatMoney(satang, fiscal.currencyCode);
     const totalGpBps =
       m.totalRevenueSatang > 0
         ? Number(
@@ -1299,16 +1366,16 @@ export class RubePosInteractiveAppServer {
         : 0;
     return {
       ...m,
-      totalRevenueFormatted: thb(m.totalRevenueSatang),
-      totalCogsFormatted: thb(m.totalCogsSatang),
-      totalGrossProfitFormatted: thb(m.totalGrossProfitSatang),
+      totalRevenueFormatted: money(m.totalRevenueSatang),
+      totalCogsFormatted: money(m.totalCogsSatang),
+      totalGrossProfitFormatted: money(m.totalGrossProfitSatang),
       totalGrossMarginPercentFormatted: `${(totalGpBps / 100).toFixed(2)}%`,
       lines: m.lines.map((l) => ({
         ...l,
         soldQtyFormatted: formatMilliUnitsToQtyString(l.soldQtyMilli),
-        revenueFormatted: thb(l.grossRevenueSatang),
-        cogsFormatted: thb(l.totalCogsSatang),
-        grossProfitFormatted: thb(l.grossProfitSatang),
+        revenueFormatted: money(l.grossRevenueSatang),
+        cogsFormatted: money(l.totalCogsSatang),
+        grossProfitFormatted: money(l.grossProfitSatang),
         grossMarginPercentFormatted: `${(l.grossMarginBasisPoints / 100).toFixed(2)}%`,
       })),
     };
@@ -1579,17 +1646,20 @@ export class RubePosInteractiveAppServer {
         const isCurrentlyOnboarded = this.ipc.isSystemOnboarded();
         const isPreviewWizard = this.forceWizardPreview && isCurrentlyOnboarded;
         if ((this.requireFirstRunWizard && !isCurrentlyOnboarded) || this.forceWizardPreview) {
+          const previewFiscalConfig = this.ipc.getFiscalConfig();
           const previewStoreSettings = isCurrentlyOnboarded
             ? this.ipc.getStoreIdentitySettings('OUTLET-HQ')
             : {
                 outletId: 'OUTLET-HQ',
                 outletCode: 'HQ-01',
                 storeName: '',
+                storeAddress: '',
                 taxId: '',
                 branchCode: '00000',
                 rdPosRegNo: '',
                 promptPayId: '',
                 businessProfile: 'HYBRID' as BusinessProfile,
+                fiscalConfig: previewFiscalConfig,
               };
           const previewProfile = previewStoreSettings.businessProfile;
           this.sendJson(res, 200, {
@@ -1597,6 +1667,7 @@ export class RubePosInteractiveAppServer {
             isSessionAuthenticated: Boolean(sessionUser) || !this.enforceApiSessionAuth,
             isPreviewWizard,
             profile: previewProfile,
+            fiscalConfig: previewFiscalConfig,
             featureFlags: resolveProfileFeatureFlags(previewProfile),
             activeShift: null,
             catalog: [],
@@ -1643,10 +1714,15 @@ export class RubePosInteractiveAppServer {
           const { profile, featureFlags } =
             this.securityController.getActiveProfileWithFeatureFlags();
           const rawSettings = this.ipc.getStoreIdentitySettings(outletId);
+          const lockedFiscal = this.ipc.getFiscalConfig();
           this.sendJson(res, 200, {
             onboarded: true,
             isSessionAuthenticated: false,
             profile,
+            fiscalConfig: {
+              ...lockedFiscal,
+              laoQrStaticTemplate: lockedFiscal.laoQrStaticTemplate ? 'CONFIGURED' : '',
+            },
             featureFlags,
             activeShift: null,
             catalog: [],
@@ -1720,6 +1796,11 @@ export class RubePosInteractiveAppServer {
           : [];
         const staffUsers = this.ipc.listStaffUsers();
         const storeSettings = this.ipc.getStoreIdentitySettings(outletId);
+        const fiscalConfig = this.ipc.getFiscalConfig();
+        const qrOrderingConfig = this.ipc.getQrOrderingConfig();
+        const qrOrderingStatus = this.guestQrServer.getRuntimeStatus(qrOrderingConfig);
+        const qrGuestOrders = this.ipc.listGuestOrders(outletId);
+        const qrTableSessions = this.ipc.listTableQrSessions(outletId, qrOrderingStatus.baseUrl);
         const ledgerInvariant = this.ipc.verifyLedgerConservationInvariant(outletId);
         const upsBanner = this.upsMonitor.getActiveUiAlertBanner();
 
@@ -1727,6 +1808,7 @@ export class RubePosInteractiveAppServer {
           onboarded: true,
           isSessionAuthenticated: true,
           profile,
+          fiscalConfig,
           featureFlags,
           activeShift,
           catalog,
@@ -1745,6 +1827,10 @@ export class RubePosInteractiveAppServer {
           staffUsers,
           storeSettings,
           printerConfig: this.getPrinterConfig(),
+          qrOrderingConfig,
+          qrOrderingStatus,
+          qrGuestOrders,
+          qrTableSessions,
           usbBackupConfig: this.getUsbBackupConfigStatus(),
           usbBackups: this.listUsbBackupFiles(),
           ledgerInvariant,
@@ -2065,6 +2151,55 @@ export class RubePosInteractiveAppServer {
         return;
       }
 
+      if (method === 'POST' && url.pathname === '/api/pos/validate-laoqr-template') {
+        if (this.ipc.isSystemOnboarded()) {
+          this.requireRole(sessionUser, ['OWNER', 'MANAGER']);
+        }
+        const body = await this.readJsonBody<{
+          rawTemplate?: string;
+          generateSample?: boolean;
+          merchantName?: string;
+          merchantCity?: string;
+          previewAmountSatang?: number;
+        }>(req);
+
+        const candidateTemplate = body.generateSample
+          ? buildSampleStaticLaoQrTemplate(
+              body.merchantName || 'RUBE LAO SHOP',
+              body.merchantCity || 'VIENTIANE'
+            )
+          : String(body.rawTemplate ?? '').trim();
+
+        const validation = validateLaoQrStaticTemplate(candidateTemplate);
+        if (!validation.valid) {
+          this.sendJson(res, 200, {
+            valid: false,
+            errorReason: validation.errorReason ?? 'Invalid LAOQR template',
+          });
+          return;
+        }
+        const previewAmount =
+          body.previewAmountSatang && body.previewAmountSatang > 0
+            ? Number(body.previewAmountSatang)
+            : 3_500_000; // 35,000 LAK sample
+        const dynamicPreview = generateOfflineLaoQrDynamicQr(
+          validation.normalizedTemplate,
+          previewAmount
+        );
+        this.sendJson(res, 200, {
+          valid: true,
+          normalizedTemplate: validation.normalizedTemplate,
+          merchantAccountTag: validation.merchantAccountTag,
+          merchantName: validation.merchantName,
+          merchantCity: validation.merchantCity,
+          currencyNumeric: validation.currencyNumeric,
+          previewPayload: dynamicPreview.payload,
+          previewCrcHex: dynamicPreview.crcHex,
+          previewWholeLakAmount: dynamicPreview.wholeLakAmount,
+        });
+        return;
+      }
+
       if (method === 'POST' && url.pathname === '/api/pos/promptpay-qr') {
         await this.ensureSeededIfAppropriate();
         this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
@@ -2082,22 +2217,47 @@ export class RubePosInteractiveAppServer {
           }>;
         }>(req);
         const settings = this.ipc.getStoreIdentitySettings(body.outletId ?? 'OUTLET-HQ');
+        const fiscal = this.ipc.getFiscalConfig();
         const totals = this.computeCartTotals(
           body.lines ?? [],
           Number(body.discountSatang ?? 0),
-          body.taxMode ?? 'INCLUSIVE'
+          body.taxMode ?? fiscal.defaultTaxMode
         );
         const targetAmountSatang =
           body.overrideAmountSatang && body.overrideAmountSatang > 0
             ? Number(body.overrideAmountSatang)
             : totals.totalSatang;
 
+        if (fiscal.countryCode === 'LA') {
+          if (!fiscal.laoQrStaticTemplate) {
+            throw new Error(
+              'HTTP 422 ຍັງບໍ່ໄດ້ຕັ້ງຄ່າ LAOQR / BCEL OnePay ຂອງຮ້ານ — ກະລຸນານຳເຂົ້າ QR ໃນໜ້າຕັ້ງຄ່າລະບົບ (LAOQR static template not configured)'
+            );
+          }
+          const qr = generateOfflineLaoQrDynamicQr(
+            fiscal.laoQrStaticTemplate,
+            targetAmountSatang
+          );
+          this.sendJson(res, 200, {
+            payload: qr.payload,
+            crcHex: qr.crcHex,
+            qrScheme: 'LAOQR',
+            promptPayId: qr.merchantName || settings.storeName,
+            storeName: settings.storeName,
+            totalSatang: targetAmountSatang,
+            currencyCode: 'LAK',
+          });
+          return;
+        }
+
         const qr = generateOfflinePromptPayDynamicQr(settings.promptPayId, targetAmountSatang);
         this.sendJson(res, 200, {
           ...qr,
+          qrScheme: 'PROMPTPAY',
           promptPayId: settings.promptPayId,
           storeName: settings.storeName,
           totalSatang: targetAmountSatang,
+          currencyCode: 'THB',
         });
         return;
       }
@@ -2107,6 +2267,7 @@ export class RubePosInteractiveAppServer {
         this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
         const body = await this.readJsonBody<{
           miniQrRaw: string;
+          senderBankCode?: string;
           overrideAmountSatang?: number;
           taxMode?: TaxMode;
           discountSatang?: number;
@@ -2118,21 +2279,31 @@ export class RubePosInteractiveAppServer {
             selectedModifierIds?: string[];
           }>;
         }>(req);
+        const fiscal = this.ipc.getFiscalConfig();
         const totals = this.computeCartTotals(
           body.lines ?? [],
           Number(body.discountSatang ?? 0),
-          body.taxMode ?? 'INCLUSIVE'
+          body.taxMode ?? fiscal.defaultTaxMode
         );
         const expectedSatang =
           body.overrideAmountSatang && body.overrideAmountSatang > 0
             ? Number(body.overrideAmountSatang)
             : totals.totalSatang;
 
-        const modal = buildTwoPhaseSlipConfirmationModal(
-          String(body.miniQrRaw ?? ''),
-          expectedSatang,
-          this.usedSlipHashes
-        );
+        const modal =
+          fiscal.countryCode === 'LA'
+            ? buildTwoPhaseLaoSlipConfirmationModal(
+                String(body.miniQrRaw ?? ''),
+                String(body.senderBankCode ?? 'BCEL'),
+                expectedSatang,
+                this.usedSlipHashes,
+                fiscal.uiLocale
+              )
+            : buildTwoPhaseSlipConfirmationModal(
+                String(body.miniQrRaw ?? ''),
+                expectedSatang,
+                this.usedSlipHashes
+              );
 
         let isDuplicateInDb = false;
         if (modal.verification.validFormat && modal.verification.transRefSha256Hex) {
@@ -2151,15 +2322,23 @@ export class RubePosInteractiveAppServer {
 
         const isDuplicate = modal.verification.isDuplicate || isDuplicateInDb;
         const valid = modal.canProceedToStep2Confirm && !isDuplicateInDb;
-        const errorMessageThai = isDuplicateInDb
-          ? 'ตรวจพบการใช้สลิปโอนเงินซ้ำ! (Duplicate Slip Fraud Alert)'
-          : modal.verification.errorReason;
+        const dupMsg =
+          fiscal.uiLocale === 'lo'
+            ? 'ກວດພົບການໃຊ້ສະລິບໂອນເງິນຊ້ຳ! (Duplicate Slip Fraud Alert)'
+            : fiscal.uiLocale === 'en'
+              ? 'Duplicate transfer slip detected! (Duplicate Slip Fraud Alert)'
+              : 'ตรวจพบการใช้สลิปโอนเงินซ้ำ! (Duplicate Slip Fraud Alert)';
+        const errorMessageThai = isDuplicateInDb ? dupMsg : modal.verification.errorReason;
 
         this.sendJson(res, 200, {
           valid,
           ...(!valid
             ? {
-                errorCode: isDuplicate ? 'DUPLICATE_SLIP' : 'INVALID_BOT_QR',
+                errorCode: isDuplicate
+                  ? 'DUPLICATE_SLIP'
+                  : fiscal.countryCode === 'LA'
+                    ? 'INVALID_LAO_SLIP'
+                    : 'INVALID_BOT_QR',
                 errorMessageThai: errorMessageThai ?? 'ข้อมูลสลิปไม่ถูกต้อง',
               }
             : {}),
@@ -2183,11 +2362,15 @@ export class RubePosInteractiveAppServer {
           tableOrQueueNo?: string;
           paymentMethod: CheckoutOrderRequest['paymentMethod'];
           cashTenderedSatang?: number;
+          foreignTenderCurrency?: ForeignTenderCurrencyCode;
+          foreignTenderAmountSatang?: number;
           slipTransRefRaw?: string;
+          slipSenderBankCode?: string;
           splitPayments?: SplitPaymentLegInput[];
           taxMode?: TaxMode;
           discountSatang?: number;
           paperWidthPx?: 384 | 576;
+          skipKdsEnqueue?: boolean;
           lines: Array<{
             variantId: string;
             itemName?: string;
@@ -2206,9 +2389,14 @@ export class RubePosInteractiveAppServer {
           throw new Error('No active OPEN cashier shift found. Please open a shift before checkout.');
         }
 
-        const taxMode: TaxMode = body.taxMode ?? 'INCLUSIVE';
+        const fiscal = this.ipc.getFiscalConfig();
+        const taxMode: TaxMode = body.taxMode ?? fiscal.defaultTaxMode;
         const discountSatang = Number(body.discountSatang ?? 0);
-        const totals = this.computeCartTotals(body.lines ?? [], discountSatang, taxMode);
+        const hasSplit = Boolean(body.splitPayments && body.splitPayments.length > 0);
+        const isPureCash = !hasSplit && body.paymentMethod === 'CASH';
+        const totals = this.computeCartTotals(body.lines ?? [], discountSatang, taxMode, {
+          applyCashRounding: isPureCash,
+        });
         const checkoutLines = (body.lines ?? []).map((l) => ({
           variantId: l.variantId,
           quantityMilli: Number(l.quantityMilli),
@@ -2223,9 +2411,9 @@ export class RubePosInteractiveAppServer {
           typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim().length >= 8
             ? body.idempotencyKey.trim()
             : `IDEM-UI-${Date.now()}-${this.checkoutSequenceCounter++}`;
-        const hasSplit = Boolean(body.splitPayments && body.splitPayments.length > 0);
+        const hasForeignCashTender = isPureCash && Boolean(body.foreignTenderCurrency);
         const cashTendered =
-          !hasSplit && body.paymentMethod === 'CASH'
+          isPureCash && !hasForeignCashTender
             ? Math.max(totals.totalSatang, Number(body.cashTenderedSatang ?? totals.totalSatang))
             : undefined;
 
@@ -2241,8 +2429,18 @@ export class RubePosInteractiveAppServer {
           discountSatang,
           paymentMethod: body.paymentMethod,
           ...(cashTendered !== undefined ? { cashTenderedSatang: cashTendered } : {}),
+          ...(hasForeignCashTender && body.foreignTenderCurrency
+            ? {
+                foreignTenderCurrency: body.foreignTenderCurrency,
+                foreignTenderAmountSatang: Number(body.foreignTenderAmountSatang ?? 0),
+              }
+            : {}),
           ...(body.slipTransRefRaw !== undefined ? { slipTransRefRaw: body.slipTransRefRaw } : {}),
+          ...(body.slipSenderBankCode !== undefined
+            ? { slipSenderBankCode: body.slipSenderBankCode }
+            : {}),
           ...(hasSplit ? { splitPayments: body.splitPayments } : {}),
+          ...(body.skipKdsEnqueue ? { skipKdsEnqueue: true } : {}),
           lines: checkoutLines,
         });
 
@@ -2250,31 +2448,55 @@ export class RubePosInteractiveAppServer {
           commitVerifiedBotSlipHash(order.slipTransRefHash, this.usedSlipHashes);
         }
 
+        // Automatically expire/revoke any active Signed Table QR session when that table settles its bill
+        if (body.tableOrQueueNo && body.tableOrQueueNo.trim()) {
+          await this.ipc
+            .revokeTableQrSession({
+              outletId,
+              tableLabel: body.tableOrQueueNo.trim(),
+              actorUserId: sessionUser?.id ?? body.cashierId ?? 'USR-CASHIER-01',
+            })
+            .catch(() => {});
+        }
+
         const settings = this.ipc.getStoreIdentitySettings(outletId);
         const printerCfg = this.getPrinterConfig();
         const widthPx: 384 | 576 =
           body.paperWidthPx ?? (printerCfg.paperWidthMm === 58 ? 384 : 576);
         const hasCashLeg = order.payments.some((p) => p.paymentMethod === 'CASH');
+        const fmt = (satang: number) => formatMoney(satang, fiscal.currencyCode);
+        const vatPctLabel = formatVatRatePercent(fiscal.vatRateBps);
 
         const renderedJob = renderThaiReceiptAbbEscPosJob({
           storeName: settings.storeName,
+          storeAddress: fiscal.storeAddress,
           taxId: settings.taxId,
           branchCode: settings.branchCode,
           posRegNo: settings.rdPosRegNo,
           receiptNumber: order.receiptNumber,
           abbTaxInvoiceNo: order.abbTaxInvoiceNo,
+          countryCode: fiscal.countryCode,
+          receiptLocale: fiscal.receiptLocale,
+          vatRatePercentLabel: vatPctLabel,
+          taxMode: order.taxMode,
           lines: totals.formattedLines,
-          subtotalFormatted: `฿${formatSatangToThbString(order.subtotalSatang)}`,
-          discountFormatted: `฿${formatSatangToThbString(order.discountSatang)}`,
-          netBeforeTaxFormatted: `฿${formatSatangToThbString(order.netBeforeTaxSatang)}`,
-          taxFormatted: `฿${formatSatangToThbString(order.taxSatang)}`,
-          totalFormatted: `฿${formatSatangToThbString(order.totalSatang)}`,
+          subtotalFormatted: fmt(order.subtotalSatang),
+          discountFormatted: fmt(order.discountSatang),
+          ...(order.cashRoundingDiscountSatang && order.cashRoundingDiscountSatang > 0
+            ? { cashRoundingDiscountFormatted: fmt(order.cashRoundingDiscountSatang) }
+            : {}),
+          netBeforeTaxFormatted: fmt(order.netBeforeTaxSatang),
+          taxFormatted: fmt(order.taxSatang),
+          totalFormatted: fmt(order.totalSatang),
           paymentMethod: order.paymentMethod,
           ...(order.cashTenderedSatang !== null
-            ? { cashTenderedFormatted: `฿${formatSatangToThbString(order.cashTenderedSatang)}` }
+            ? { cashTenderedFormatted: fmt(order.cashTenderedSatang) }
             : {}),
           ...(order.changeGivenSatang !== null
-            ? { changeGivenFormatted: `฿${formatSatangToThbString(order.changeGivenSatang)}` }
+            ? { changeGivenFormatted: fmt(order.changeGivenSatang) }
+            : {}),
+          ...(order.fxTender
+            ? { fxTenderSummaryLine: formatFxTenderReceiptLine(order.fxTender, fiscal.receiptLocale) }
             : {}),
           ...(order.slipTransRefLast4 ? { slipRefLast4: order.slipTransRefLast4 } : {}),
           kickCashDrawer: hasCashLeg && printerCfg.autoKickDrawerOnCash,
@@ -2283,13 +2505,22 @@ export class RubePosInteractiveAppServer {
 
         // Append explicit split payment lines onto formattedTextLines when multiple legs exist
         if (order.payments.length > 1) {
+          const splitPrefix =
+            fiscal.receiptLocale === 'lo'
+              ? '  • ແຍກຈ່າຍ'
+              : fiscal.receiptLocale === 'en'
+                ? '  • Split'
+                : '  • แยกจ่าย';
           renderedJob.formattedTextLines.splice(
             renderedJob.formattedTextLines.length - 1,
             0,
-            ...order.payments.map(
-              (p) =>
-                `  • แยกจ่าย ${p.paymentMethod}: ฿${formatSatangToThbString(p.amountSatang)}${p.slipTransRefLast4 ? ` (Ref *${p.slipTransRefLast4})` : ''}`
-            )
+            ...order.payments.map((p) => {
+              const methodDisplay =
+                p.paymentMethod === 'PROMPTPAY_QR' && fiscal.countryCode === 'LA'
+                  ? 'LAOQR / OnePay'
+                  : p.paymentMethod;
+              return `${splitPrefix} ${methodDisplay}: ${fmt(p.amountSatang)}${p.slipTransRefLast4 ? ` (Ref *${p.slipTransRefLast4})` : ''}`;
+            })
           );
         }
 
@@ -2387,34 +2618,50 @@ export class RubePosInteractiveAppServer {
         }
 
         const settings = this.ipc.getStoreIdentitySettings(outletId);
+        const fiscal = this.ipc.getFiscalConfig();
         const printerCfg = this.getPrinterConfig();
+        const fmt = (satang: number) => formatMoney(satang, fiscal.currencyCode);
+        const copyTag =
+          fiscal.receiptLocale === 'lo'
+            ? '[ສຳເນົາ/REPRINT]'
+            : fiscal.receiptLocale === 'en'
+              ? '[COPY/REPRINT]'
+              : '[สำเนา/REPRINT]';
         const renderedJob = renderThaiReceiptAbbEscPosJob({
-          storeName: `${settings.storeName} [สำเนา/REPRINT]`,
+          storeName: `${settings.storeName} ${copyTag}`,
+          storeAddress: fiscal.storeAddress,
           taxId: settings.taxId,
           branchCode: settings.branchCode,
           posRegNo: settings.rdPosRegNo,
           receiptNumber: target.receiptNumber,
           abbTaxInvoiceNo: target.abbTaxInvoiceNo ?? '-',
+          countryCode: fiscal.countryCode,
+          receiptLocale: fiscal.receiptLocale,
+          vatRatePercentLabel: formatVatRatePercent(fiscal.vatRateBps),
+          taxMode: target.taxMode,
           lines: target.lines.map((l) => {
             const modsText = l.modifiers.map((m) => m.name).join(', ');
             return {
               itemName: l.itemName,
               quantityFormatted: formatMilliUnitsToQtyString(l.quantityMilli, l.unitName),
-              lineTotalFormatted: `฿${formatSatangToThbString(l.lineTotalSatang)}`,
+              lineTotalFormatted: fmt(l.lineTotalSatang),
               ...(modsText ? { modifiersText: modsText } : {}),
             };
           }),
-          subtotalFormatted: `฿${formatSatangToThbString(target.subtotalSatang)}`,
-          discountFormatted: `฿${formatSatangToThbString(target.discountSatang)}`,
-          netBeforeTaxFormatted: `฿${formatSatangToThbString(target.netBeforeTaxSatang)}`,
-          taxFormatted: `฿${formatSatangToThbString(target.taxSatang)}`,
-          totalFormatted: `฿${formatSatangToThbString(target.totalSatang)}`,
+          subtotalFormatted: fmt(target.subtotalSatang),
+          discountFormatted: fmt(target.discountSatang),
+          netBeforeTaxFormatted: fmt(target.netBeforeTaxSatang),
+          taxFormatted: fmt(target.taxSatang),
+          totalFormatted: fmt(target.totalSatang),
           paymentMethod: target.paymentMethod,
           ...(target.cashTenderedSatang !== null
-            ? { cashTenderedFormatted: `฿${formatSatangToThbString(target.cashTenderedSatang)}` }
+            ? { cashTenderedFormatted: fmt(target.cashTenderedSatang) }
             : {}),
           ...(target.changeGivenSatang !== null
-            ? { changeGivenFormatted: `฿${formatSatangToThbString(target.changeGivenSatang)}` }
+            ? { changeGivenFormatted: fmt(target.changeGivenSatang) }
+            : {}),
+          ...(target.fxTender
+            ? { fxTenderSummaryLine: formatFxTenderReceiptLine(target.fxTender, fiscal.receiptLocale) }
             : {}),
           ...(target.slipTransRefLast4 ? { slipRefLast4: target.slipTransRefLast4 } : {}),
           kickCashDrawer: false,
@@ -2422,12 +2669,18 @@ export class RubePosInteractiveAppServer {
         });
 
         if (target.payments && target.payments.length > 1) {
+          const splitPrefix =
+            fiscal.receiptLocale === 'lo'
+              ? '  • ແຍກຈ່າຍ'
+              : fiscal.receiptLocale === 'en'
+                ? '  • Split'
+                : '  • แยกจ่าย';
           renderedJob.formattedTextLines.splice(
             renderedJob.formattedTextLines.length - 1,
             0,
             ...target.payments.map(
               (p) =>
-                `  • แยกจ่าย ${p.paymentMethod}: ฿${formatSatangToThbString(p.amountSatang)}${p.slipTransRefLast4 ? ` (Ref *${p.slipTransRefLast4})` : ''}`
+                `${splitPrefix} ${p.paymentMethod === 'PROMPTPAY_QR' && fiscal.countryCode === 'LA' ? 'LAOQR / OnePay' : p.paymentMethod}: ${fmt(p.amountSatang)}${p.slipTransRefLast4 ? ` (Ref *${p.slipTransRefLast4})` : ''}`
             )
           );
         }
@@ -3278,17 +3531,61 @@ export class RubePosInteractiveAppServer {
         const body = await this.readJsonBody<{
           outletId?: string;
           storeName: string;
+          storeAddress?: string;
           taxId: string;
           branchCode: string;
           rdPosRegNo: string;
           promptPayId: string;
+          countryCode?: CountryCode;
+          uiLocale?: LocaleCode;
+          receiptLocale?: LocaleCode;
+          vatRateBps?: number;
+          defaultTaxMode?: TaxMode;
+          cashRoundingStepMajor?: CashRoundingStepMajor;
+          scalePriceEmbeddedMultiplier?: number;
+          laoQrStaticTemplate?: string;
+          laoQrVerificationPolicy?: LaoQrVerificationPolicy;
+          fxRates?: Partial<FxRatesConfigDto>;
           updatedByUserId?: string;
         }>(req);
         const storeSettings = await this.ipc.updateStoreIdentitySettings({
           ...body,
           updatedByUserId: sessionUser?.id ?? body.updatedByUserId ?? 'USR-OWNER-01',
         });
-        this.sendJson(res, 200, { storeSettings });
+        this.sendJson(res, 200, {
+          storeSettings,
+          fiscalConfig: this.ipc.getFiscalConfig(),
+        });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/settings/fiscal') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER']);
+        const body = await this.readJsonBody<
+          Partial<FiscalConfigDto> & { updatedByUserId?: string }
+        >(req);
+        const fiscalConfig = await this.ipc.updateFiscalConfig({
+          ...body,
+          updatedByUserId: sessionUser?.id ?? body.updatedByUserId ?? 'USR-OWNER-01',
+        });
+        this.sendJson(res, 200, { fiscalConfig });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/settings/locale') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER', 'WAREHOUSE', 'KITCHEN']);
+        const body = await this.readJsonBody<{
+          uiLocale: LocaleCode;
+          receiptLocale?: LocaleCode;
+        }>(req);
+        const fiscalConfig = await this.ipc.updateUiLocale({
+          uiLocale: body.uiLocale,
+          ...(body.receiptLocale !== undefined ? { receiptLocale: body.receiptLocale } : {}),
+          updatedByUserId: sessionUser?.id ?? 'USR-OWNER-01',
+        });
+        this.sendJson(res, 200, { fiscalConfig });
         return;
       }
 
@@ -3361,6 +3658,140 @@ export class RubePosInteractiveAppServer {
         return;
       }
 
+      // ----------------------------------------------------------------------
+      // 10. Local QR Table Ordering & Captive Portal Management (POS Port 4173)
+      // ----------------------------------------------------------------------
+      if (method === 'GET' && url.pathname === '/api/qr-ordering/config') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+        const outletId = url.searchParams.get('outletId') ?? 'OUTLET-HQ';
+        const config = this.ipc.getQrOrderingConfig();
+        const status = this.guestQrServer.getRuntimeStatus(config);
+        const tableSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
+        this.sendJson(res, 200, { config, status, tableSessions });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/qr-ordering/config') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER']);
+        const body = await this.readJsonBody<
+          Partial<QrOrderingConfigDto> & { outletId?: string }
+        >(req);
+        const outletId = body.outletId ?? 'OUTLET-HQ';
+        const config = await this.ipc.updateQrOrderingConfig({
+          ...body,
+          updatedByUserId: sessionUser?.id ?? 'USR-OWNER-01',
+        });
+        const status = await this.guestQrServer.syncWithConfig(config);
+        const tableSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
+        this.sendJson(res, 200, { ok: true, config, status, tableSessions });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/qr-ordering/table-session') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+        const body = await this.readJsonBody<{
+          outletId?: string;
+          tableLabel: string;
+          openedByName?: string;
+        }>(req);
+        const outletId = body.outletId ?? 'OUTLET-HQ';
+        const status = this.guestQrServer.getRuntimeStatus();
+        const session = await this.ipc.openTableQrSession({
+          outletId,
+          tableLabel: String(body.tableLabel ?? ''),
+          openedByName:
+            sessionUser?.displayName ?? body.openedByName ?? 'Staff',
+          baseUrl: status.baseUrl,
+          actorUserId: sessionUser?.id ?? 'USR-CASHIER-01',
+        });
+        const tableSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
+        this.sendJson(res, 200, { ok: true, session, tableSessions });
+        return;
+      }
+
+      if (method === 'DELETE' && url.pathname === '/api/qr-ordering/table-session') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+        const body = await this.readJsonBody<{
+          outletId?: string;
+          tableLabel: string;
+        }>(req);
+        const outletId = body.outletId ?? 'OUTLET-HQ';
+        const resRevoke = await this.ipc.revokeTableQrSession({
+          outletId,
+          tableLabel: String(body.tableLabel ?? ''),
+          actorUserId: sessionUser?.id ?? 'USR-CASHIER-01',
+        });
+        const status = this.guestQrServer.getRuntimeStatus();
+        const tableSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
+        this.sendJson(res, 200, { ok: true, revoked: resRevoke.revoked, tableSessions });
+        return;
+      }
+
+      if (method === 'GET' && url.pathname === '/api/qr-ordering/orders') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER', 'KITCHEN']);
+        const outletId = url.searchParams.get('outletId') ?? 'OUTLET-HQ';
+        const orders = this.ipc.listGuestOrders(outletId);
+        const pendingCount = orders.filter((o) => o.status === 'PENDING_CONFIRM').length;
+        const status = this.guestQrServer.getRuntimeStatus();
+        const tableSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
+        this.sendJson(res, 200, { orders, pendingCount, tableSessions, status });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/qr-ordering/orders/accept') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+        const body = await this.readJsonBody<{
+          outletId?: string;
+          guestOrderId: string;
+        }>(req);
+        const outletId = body.outletId ?? 'OUTLET-HQ';
+        await this.ensureActiveShiftOpen(outletId);
+        const accepted = await this.ipc.acceptGuestOrderToHeldBillAndKds({
+          outletId,
+          guestOrderId: String(body.guestOrderId ?? ''),
+          actorUserId: sessionUser?.id ?? 'USR-CASHIER-01',
+          actorDisplayName: sessionUser?.displayName ?? 'Cashier',
+        });
+        this.sendJson(res, 200, {
+          ok: true,
+          ...accepted,
+          orders: this.ipc.listGuestOrders(outletId),
+          heldBills: this.getHeldBillsForOutlet(outletId),
+          kdsTickets: this.ipc.listKitchenOrdersAllStations(outletId, false),
+        });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/qr-ordering/orders/reject') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+        const body = await this.readJsonBody<{
+          outletId?: string;
+          guestOrderId: string;
+          reason?: string;
+        }>(req);
+        const outletId = body.outletId ?? 'OUTLET-HQ';
+        const order = await this.ipc.rejectGuestOrder({
+          outletId,
+          guestOrderId: String(body.guestOrderId ?? ''),
+          reason: String(body.reason ?? ''),
+          actorUserId: sessionUser?.id ?? 'USR-CASHIER-01',
+          actorDisplayName: sessionUser?.displayName ?? 'Cashier',
+        });
+        this.sendJson(res, 200, {
+          ok: true,
+          order,
+          orders: this.ipc.listGuestOrders(outletId),
+        });
+        return;
+      }
+
       this.sendJson(res, 404, { error: `Route not found: ${method} ${url.pathname}` });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -3390,6 +3821,10 @@ export class RubePosInteractiveAppServer {
     try {
       await this.ensureSessionHmacSecretPersisted();
       await this.ensureActiveShiftOpen();
+      const qrCfg = this.ipc.getQrOrderingConfig();
+      if (qrCfg.enabled) {
+        await this.guestQrServer.syncWithConfig(qrCfg);
+      }
 
       return await new Promise<{ url: string; port: number }>((resolve, reject) => {
         const srv = http.createServer((req, res) => {
@@ -3422,6 +3857,7 @@ export class RubePosInteractiveAppServer {
   }
 
   public async stop(): Promise<void> {
+    await this.guestQrServer.stop().catch(() => {});
     if (this.server) {
       const srv = this.server;
       this.server = null;
