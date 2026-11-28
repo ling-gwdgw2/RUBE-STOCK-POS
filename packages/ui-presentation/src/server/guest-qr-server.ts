@@ -15,6 +15,7 @@ import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { LocaleCode } from '../../../shared-contracts/src/currency.ts';
 import type { LocalIpcBridge } from '../../../cluster-gateway/src/local-ipc-bridge.ts';
 import {
   normalizeGuestEntryChannel,
@@ -28,6 +29,7 @@ import {
   type QrOrderingRuntimeStatusDto,
 } from '../../../shared-contracts/src/qr-ordering.ts';
 import { renderGuestMenuHtml } from './guest-menu-html.ts';
+import { localizeServerMessage, resolveRequestLocale } from './server-error-i18n.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -646,17 +648,27 @@ export class GuestQrOrderingServer {
 
       // 8. Rate-Limited Guest Order Submission (Server-side Fixed-Point Price Re-Computation)
       if (method === 'POST' && pathname === '/api/guest/orders') {
+        const guestLocale = resolveRequestLocale(
+          req,
+          this.deps.ipc.getFiscalConfig().uiLocale,
+          url.searchParams.get('lang')
+        );
         if (this.deps.isWriteLockedByLowBattery?.()) {
           this.sendJson(res, 503, {
-            error: 'HTTP 503 Service Unavailable: ระบบสำรองไฟฉุกเฉินกำลังบันทึกข้อมูล งดรับออเดอร์ชั่วคราว',
+            error: localizeServerMessage(
+              'HTTP 503 Service Unavailable: ระบบสำรองไฟฉุกเฉินกำลังบันทึกข้อมูล งดรับออเดอร์ชั่วคราว',
+              guestLocale
+            ),
           });
           return;
         }
         const clientIp = req.socket.remoteAddress ?? 'unknown';
         if (!this.checkBucketLimit(this.rateBuckets, clientIp, this.rateLimitMaxPerMin)) {
           this.sendJson(res, 429, {
-            error:
+            error: localizeServerMessage(
               'HTTP 429 Too Many Requests: ส่งคำสั่งซื้อถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง',
+              guestLocale
+            ),
           });
           return;
         }
@@ -694,16 +706,27 @@ export class GuestQrOrderingServer {
 
       // 8.5 Rate-Limited Guest Service Call / Request Bill
       if (method === 'POST' && pathname === '/api/guest/service-call') {
+        const guestLocale = resolveRequestLocale(
+          req,
+          this.deps.ipc.getFiscalConfig().uiLocale,
+          url.searchParams.get('lang')
+        );
         if (this.deps.isWriteLockedByLowBattery?.()) {
           this.sendJson(res, 503, {
-            error: 'HTTP 503 Service Unavailable: ระบบสำรองไฟฉุกเฉิน งดรับคำขอชั่วคราว',
+            error: localizeServerMessage(
+              'HTTP 503 Service Unavailable: ระบบสำรองไฟฉุกเฉิน งดรับคำขอชั่วคราว',
+              guestLocale
+            ),
           });
           return;
         }
         const clientIp = req.socket.remoteAddress ?? 'unknown';
         if (!this.checkBucketLimit(this.callRateBuckets, clientIp, Math.max(4, this.rateLimitMaxPerMin))) {
           this.sendJson(res, 429, {
-            error: 'HTTP 429 Too Many Requests: กดเรียกพนักงานถี่เกินไป กรุณารอสักครู่',
+            error: localizeServerMessage(
+              'HTTP 429 Too Many Requests: กดเรียกพนักงานถี่เกินไป กรุณารอสักครู่',
+              guestLocale
+            ),
           });
           return;
         }
@@ -772,7 +795,15 @@ export class GuestQrOrderingServer {
                 : message.includes('503')
                   ? 503
                   : 400;
-      this.sendJson(res, statusCode, { error: message });
+      let fallbackLocale: LocaleCode = 'th';
+      try {
+        fallbackLocale = this.deps.ipc.getFiscalConfig().uiLocale;
+      } catch {
+        fallbackLocale = 'th';
+      }
+      const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const guestLocale = resolveRequestLocale(req, fallbackLocale, reqUrl.searchParams.get('lang'));
+      this.sendJson(res, statusCode, { error: localizeServerMessage(message, guestLocale) });
     }
   }
 }

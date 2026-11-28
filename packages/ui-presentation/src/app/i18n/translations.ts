@@ -220,7 +220,50 @@ export const UI_STRINGS = {
   'common.next': { th: 'ถัดไป', lo: 'ຕໍ່ໄປ', en: 'Next' },
   'common.back': { th: 'ย้อนกลับ', lo: 'ຍ້ອນກັບ', en: 'Back' },
 
-  // PIN Lock & Void
+  // PIN Lock & Void & App Shell Status
+  'app.windowTitle': {
+    th: 'RUBE-STOCK-POS v3.1 — ระบบขายหน้าร้านและคลังสินค้าอัจฉริยะ',
+    lo: 'RUBE-STOCK-POS v3.1 — ລະບົບຂາຍໜ້າຮ້ານ ແລະ ສາງສິນຄ້າອັດສະລິຍະ',
+    en: 'RUBE-STOCK-POS v3.1 — Unified Local-First Warehouse & POS System',
+  },
+  'nav.mainNavAria': { th: 'เมนูหลัก', lo: 'ເມນູຫຼັກ', en: 'Main navigation' },
+  'nav.mobileNavAria': { th: 'เมนูหลักมือถือ', lo: 'ເມນູຫຼັກມືຖື', en: 'Mobile navigation' },
+  'nav.languageLabel': { th: 'ภาษาหน้าจอ', lo: 'ພາສາໜ້າຈໍ', en: 'Display language' },
+  'nav.selectOutletAria': { th: 'เลือกสาขาประจำเครื่อง', lo: 'ເລືອກສາຂາປະຈຳເຄື່ອງ', en: 'Select active outlet' },
+  'nav.branchPrefix': { th: 'สาขา', lo: 'ສາຂາ', en: 'Branch' },
+  'nav.printQueue': { th: 'คิวพิมพ์', lo: 'ຄິວພິມ', en: 'Print Queue' },
+  'nav.openHilAria': { th: 'เปิดแผงจำลองฮาร์ดแวร์ HIL Bench', lo: 'ເປີດແຜງຈຳລອງຮາດແວ HIL Bench', en: 'Open HIL Hardware Simulator' },
+  'nav.lockTerminalTitle': { th: 'ล็อกหน้าจอเครื่องจุดขายทันที', lo: 'ລັອກໜ້າຈໍເຄື່ອງ POS ທັນທີ', en: 'Lock terminal immediately' },
+  'nav.lockedAria': {
+    th: 'หน้าจอถูกล็อก กรุณาปลดล็อกด้วยรหัส PIN',
+    lo: 'ໜ້າຈໍຖືກລັອກ ກະລຸນາປົດລັອກດ້ວຍລະຫັດ PIN',
+    en: 'Terminal locked — unlock with staff PIN',
+  },
+  'nav.lockedBannerTitle': {
+    th: 'หน้าจอเครื่องจุดขายถูกล็อกเพื่อความปลอดภัย',
+    lo: 'ໜ້າຈໍເຄື່ອງ POS ຖືກລັອກເພື່ອຄວາມປອດໄພ',
+    en: 'POS Terminal Locked for Security',
+  },
+  'nav.lockedBannerHint': {
+    th: 'กรุณายืนยันรหัส PIN พนักงานเพื่อปลดล็อกและเข้าถึงข้อมูลหน้าร้าน',
+    lo: 'ກະລຸນາຢືນຢັນລະຫັດ PIN ພະນັກງານເພື່ອປົດລັອກ ແລະ ເຂົ້າໃຊ້ລະບົບໜ້າຮ້ານ',
+    en: 'Enter a valid staff PIN to unlock and access POS operations.',
+  },
+  'nav.bootErrorTitle': {
+    th: 'ไม่สามารถเชื่อมต่อฐานข้อมูลท้องถิ่นได้',
+    lo: 'ບໍ່ສາມາດເຊື່ອມຕໍ່ຖານຂໍ້ມູນທ້ອງຖິ່ນໄດ້',
+    en: 'Unable to Connect to Local Database',
+  },
+  'nav.retryConnect': { th: 'ลองเชื่อมต่อใหม่', lo: 'ລອງເຊື່ອມຕໍ່ໃໝ່', en: 'Retry Connection' },
+  'nav.shiftOpenBadge': { th: 'กะเปิดอยู่', lo: 'ກະເປີດຢູ່', en: 'Shift Open' },
+  'toast.warnPrefix': { th: 'แจ้งเตือน:', lo: 'ແຈ້ງເຕືອນ:', en: 'Warning:' },
+  'toast.errorPrefix': { th: 'ข้อผิดพลาด:', lo: 'ຂໍ້ຜິດພາດ:', en: 'Error:' },
+  'toast.regionAria': { th: 'การแจ้งเตือนระบบ', lo: 'ການແຈ້ງເຕືອນລະບົບ', en: 'System notifications' },
+  'role.OWNER': { th: 'เจ้าของร้าน (Owner)', lo: 'ເຈົ້າຂອງຮ້ານ (Owner)', en: 'Owner' },
+  'role.MANAGER': { th: 'ผู้จัดการร้าน (Manager)', lo: 'ຜູ້ຈັດການຮ້ານ (Manager)', en: 'Manager' },
+  'role.CASHIER': { th: 'แคชเชียร์ (Cashier)', lo: 'ພະນັກງານຂາຍ (Cashier)', en: 'Cashier' },
+  'role.WAREHOUSE': { th: 'คลังสินค้า (Warehouse)', lo: 'ສາງສິນຄ້າ (Warehouse)', en: 'Warehouse' },
+  'role.KITCHEN': { th: 'ฝ่ายครัว/บาร์ (Kitchen)', lo: 'ຝ່າຍຄົວ/ບາ (Kitchen)', en: 'Kitchen' },
   'pin.title': { th: 'ปลดล็อกเครื่อง / สลับพนักงาน', lo: 'ປົດລັອກເຄື່ອງ / ປ່ຽນພະນັກງານ', en: 'Unlock Terminal / Switch Staff' },
   'pin.enterPin': { th: 'กรอกรหัส PIN 4–8 หลัก', lo: 'ປ້ອນລະຫັດ PIN 4–8 ຫຼັກ', en: 'Enter 4–8 digit PIN' },
   'pin.unlockBtn': { th: 'ยืนยันเข้าใช้งาน', lo: 'ຢືນຢັນເຂົ້າໃຊ້ງານ', en: 'Unlock & Sign In' },
@@ -239,9 +282,9 @@ export function pickLocaleText(
   locale: LocaleCode,
   thText: string,
   loText: string,
-  enText?: string
+  enText: string
 ): string {
   if (locale === 'lo') return loText;
-  if (locale === 'en') return enText ?? thText;
+  if (locale === 'en') return enText;
   return thText;
 }

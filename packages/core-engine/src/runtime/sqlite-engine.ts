@@ -47,6 +47,7 @@ import {
   type MilliUnit,
   type Satang,
   type TaxMode,
+  parseDecimalStringToScaledInt,
   roundDivBigInt,
   SCALE_BASIS_POINTS,
   SCALE_MILLI,
@@ -75,6 +76,7 @@ import {
   normalizeLaoQrVerificationPolicy,
   normalizeLocaleCode,
   normalizeScalePriceEmbeddedMultiplier,
+  parseMoneyInputToMinor,
 } from '../../../shared-contracts/src/currency.ts';
 import {
   type GuestEntryChannel,
@@ -101,6 +103,8 @@ import {
   type BusinessProfile,
   type CheckoutOrderRequest,
   type ComponentRole,
+  type HeldBillCartLineDto,
+  type HeldBillRecordDto,
   type ItemVariantDto,
   type ModifierDto,
   type PosShiftDto,
@@ -258,6 +262,7 @@ export interface CheckoutOrderResult {
   slipTransRefLast4: string | null;
   slipTransRefHash: string | null;
   kitchenOrderSequenceId: number | null;
+  settledHeldBillTableLabel?: string | null | undefined;
   lines: CheckoutOrderLineSummary[];
   stockDeductions: StockDeductionEntry[];
   createdAt: string;
@@ -1943,6 +1948,34 @@ export class SqliteReadWritePoolEngine {
         throw new Error(`Active OPEN shift required for checkout (shiftId=${request.shiftId})`);
       }
 
+      // 2.5. Validate Held Bill settlement constraints BEFORE inventory or ledger mutations
+      let settledHeldBillTableLabel: string | null = null;
+      const targetHeldBillId = request.heldBillId?.trim() || '';
+      if (targetHeldBillId) {
+        const currentHeldBills = this.readHeldBillsOnDb(db, request.outletId);
+        const heldBill = currentHeldBills.find((b) => b.id === targetHeldBillId);
+        if (!heldBill) {
+          throw new Error(
+            'HTTP 409 บิลพักที่ระบุถูกชำระเงินปิดบิลหรือถูกยกเลิกไปแล้ว'
+          );
+        }
+        if (
+          request.expectedHeldBillVersion !== undefined &&
+          Number(heldBill.version ?? 1) !== request.expectedHeldBillVersion
+        ) {
+          throw new Error(
+            'HTTP 409 บิลพักมีการอัปเดตรายการใหม่ (เช่น ออเดอร์ QR สั่งเพิ่ม) กรุณากดอัปเดตยอดล่าสุดก่อนรับชำระ'
+          );
+        }
+        const deficits = this.findHeldBillLineDeficits(heldBill.cart, request.lines);
+        if (deficits.length > 0) {
+          throw new Error(
+            `HTTP 403 Forbidden: ห้ามลบหรือลดรายการในบิลพักขณะชำระเงิน ต้องขออนุมัติ PIN ผู้จัดการก่อน (${deficits.join(', ')})`
+          );
+        }
+        settledHeldBillTableLabel = heldBill.referenceLabel;
+      }
+
       // 3. Load current Catalog, BOM edges, and Modifiers inside the transaction
       const deletedIds = this.readDeletedVariantIdSet(db);
       const catalogRows = db
@@ -2652,6 +2685,12 @@ export class SqliteReadWritePoolEngine {
         }
       }
 
+      if (targetHeldBillId) {
+        const currentHeldBills = this.readHeldBillsOnDb(db, request.outletId);
+        const nextHeldBills = currentHeldBills.filter((b) => b.id !== targetHeldBillId);
+        this.writeHeldBillsOnDb(db, request.outletId, nextHeldBills, request.cashierId);
+      }
+
       return {
         salesOrderId,
         idempotencyKey: request.idempotencyKey,
@@ -2692,6 +2731,7 @@ export class SqliteReadWritePoolEngine {
         slipTransRefLast4,
         slipTransRefHash,
         kitchenOrderSequenceId,
+        settledHeldBillTableLabel,
         lines: lineSummaries,
         stockDeductions: allDeductions,
         createdAt,
@@ -6842,36 +6882,813 @@ export class SqliteReadWritePoolEngine {
     return derived === order.status ? order : { ...order, status: derived };
   }
 
-  private mergeGuestOrderIntoHeldBillOnDb(
+  private readHeldBillsOnDb(db: DatabaseSync, outletId: string): HeldBillRecordDto[] {
+    const cfgKey = `held_bills_${outletId}`;
+    const row = db
+      .prepare(`SELECT value, is_protected, hmac_signature_hex FROM store_config WHERE key = ?`)
+      .get(cfgKey) as
+      | { value?: string; is_protected?: number; hmac_signature_hex?: string | null }
+      | undefined;
+    if (!row?.value) {
+      return [];
+    }
+    if (Number(row.is_protected ?? 0) === 1) {
+      if (!row.hmac_signature_hex) {
+        throw new Error(`Security Tamper Alert: Missing HMAC-SHA256 signature on '${cfgKey}'`);
+      }
+      const expectedHex = this.computeProtectedConfigHmacHex(cfgKey, row.value);
+      const actualBuf = Buffer.from(row.hmac_signature_hex, 'hex');
+      const expectedBuf = Buffer.from(expectedHex, 'hex');
+      if (
+        actualBuf.length === 0 ||
+        actualBuf.length !== expectedBuf.length ||
+        !timingSafeEqual(actualBuf, expectedBuf)
+      ) {
+        throw new Error(
+          `Security Tamper Alert: Held bills HMAC-SHA256 verification failed for '${cfgKey}'`
+        );
+      }
+    }
+    try {
+      const parsed = JSON.parse(row.value) as unknown;
+      return Array.isArray(parsed) ? (parsed as HeldBillRecordDto[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private writeHeldBillsOnDb(
     db: DatabaseSync,
     outletId: string,
-    guestOrder: GuestOrderRecordDto,
-    fiscal: FiscalConfigDto,
-    actorUserId: string,
-    actorDisplayName: string
-  ): string {
+    bills: HeldBillRecordDto[],
+    actorUserId: string
+  ): void {
     const cfgKey = `held_bills_${outletId}`;
-    const existingRow = db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(cfgKey) as
-      | { value?: string }
-      | undefined;
-    let heldBills: Array<Record<string, unknown>> = [];
-    if (existingRow?.value) {
-      try {
-        const parsed = JSON.parse(existingRow.value) as unknown;
-        if (Array.isArray(parsed)) {
-          heldBills = parsed as Array<Record<string, unknown>>;
-        }
-      } catch {
-        heldBills = [];
+    const trimmed = bills.slice(0, 100);
+    const serialized = JSON.stringify(trimmed);
+    const hmacHex = this.computeProtectedConfigHmacHex(cfgKey, serialized);
+    db.prepare(
+      `INSERT INTO store_config (key, value, is_protected, hmac_signature_hex, updated_by, updated_at)
+       VALUES (?, ?, 1, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         is_protected = 1,
+         hmac_signature_hex = excluded.hmac_signature_hex,
+         updated_by = excluded.updated_by,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+    ).run(cfgKey, serialized, hmacHex, actorUserId);
+  }
+
+  private buildHeldLineSignature(line: {
+    variantId: string;
+    selectedModifierIds?: readonly string[] | undefined;
+    overrideLineTotalSatang?: number | undefined;
+  }): string {
+    const sortedMods = [...(line.selectedModifierIds ?? [])].map((x) => String(x)).sort();
+    const ov =
+      typeof line.overrideLineTotalSatang === 'number' &&
+      Number.isSafeInteger(line.overrideLineTotalSatang) &&
+      line.overrideLineTotalSatang >= 0
+        ? String(line.overrideLineTotalSatang)
+        : '';
+    return `${String(line.variantId)}::${sortedMods.join(',')}::${ov}`;
+  }
+
+  private normalizeHeldCartLine(
+    raw: Partial<HeldBillCartLineDto> | Record<string, unknown>,
+    billId: string,
+    lockAll: boolean,
+    preserveShrinkFrom?: HeldBillCartLineDto | null
+  ): HeldBillCartLineDto {
+    const variantId = sanitizeGuestText(String(raw.variantId ?? ''), 80);
+    const selectedMods = Array.isArray(raw.selectedModifierIds)
+      ? raw.selectedModifierIds.map((id) => sanitizeGuestText(String(id), 80)).filter(Boolean).sort()
+      : [];
+    const quantityMilli = Math.max(1, Math.floor(Number(raw.quantityMilli ?? 1_000)));
+    const unitPriceSatang = Math.max(0, Math.floor(Number(raw.unitPriceSatang ?? 0)));
+    const overrideLineTotalSatang =
+      typeof raw.overrideLineTotalSatang === 'number' &&
+      Number.isSafeInteger(raw.overrideLineTotalSatang) &&
+      raw.overrideLineTotalSatang >= 0
+        ? raw.overrideLineTotalSatang
+        : undefined;
+    const isKds = raw.kdsDispatched === true;
+    const locked = lockAll ? true : Boolean(raw.heldLineLocked || isKds);
+    const rawLockedMin =
+      typeof raw.lockedMinQtyMilli === 'number' &&
+      Number.isSafeInteger(raw.lockedMinQtyMilli) &&
+      raw.lockedMinQtyMilli > 0
+        ? raw.lockedMinQtyMilli
+        : 0;
+    const prevMin = preserveShrinkFrom
+      ? Math.max(0, Number(preserveShrinkFrom.lockedMinQtyMilli ?? preserveShrinkFrom.quantityMilli))
+      : 0;
+    const lockedMinQtyMilli = locked
+      ? Math.max(quantityMilli, rawLockedMin, prevMin)
+      : undefined;
+
+    const rawCartKey = sanitizeGuestText(String(raw.cartKey ?? ''), 180);
+    const defaultCartKey = `${variantId}::${selectedMods.join(',')}`;
+    const guestNote =
+      typeof raw.guestNote === 'string' && raw.guestNote.trim()
+        ? sanitizeGuestText(raw.guestNote, 160)
+        : undefined;
+    const scaleBadgeText =
+      typeof raw.scaleBadgeText === 'string' && raw.scaleBadgeText.trim()
+        ? sanitizeGuestText(raw.scaleBadgeText, 80)
+        : undefined;
+
+    return {
+      cartKey: rawCartKey || defaultCartKey,
+      variantId,
+      itemName: sanitizeGuestText(String(raw.itemName ?? variantId), 120) || variantId,
+      variantName: sanitizeGuestText(String(raw.variantName ?? ''), 80),
+      sku: sanitizeGuestText(String(raw.sku ?? ''), 64),
+      unitName: sanitizeGuestText(String(raw.unitName ?? 'ชิ้น'), 32) || 'ชิ้น',
+      quantityMilli,
+      unitPriceSatang,
+      ...(overrideLineTotalSatang !== undefined ? { overrideLineTotalSatang } : {}),
+      selectedModifierIds: selectedMods,
+      isWeightedScale: Boolean(raw.isWeightedScale),
+      ...(scaleBadgeText !== undefined ? { scaleBadgeText } : {}),
+      ...(isKds ? { kdsDispatched: true } : {}),
+      ...(guestNote !== undefined ? { guestNote } : {}),
+      ...(locked ? { heldLineLocked: true } : {}),
+      ...(lockedMinQtyMilli !== undefined ? { lockedMinQtyMilli } : {}),
+      heldBillOriginId:
+        typeof raw.heldBillOriginId === 'string' && raw.heldBillOriginId.trim()
+          ? raw.heldBillOriginId.trim()
+          : billId,
+    };
+  }
+
+  private findHeldBillLineDeficits(
+    committedCart: ReadonlyArray<HeldBillCartLineDto>,
+    incomingLines: ReadonlyArray<{
+      variantId: string;
+      quantityMilli: number;
+      unitPriceSatang: number;
+      overrideLineTotalSatang?: number | undefined;
+      selectedModifierIds?: readonly string[] | undefined;
+      heldLineLocked?: boolean | undefined;
+      lockedMinQtyMilli?: number | undefined;
+      itemName?: string | undefined;
+    }>
+  ): string[] {
+    if (!Array.isArray(committedCart) || committedCart.length === 0) {
+      return [];
+    }
+    const requiredBySig = new Map<
+      string,
+      { itemName: string; requiredQtyMilli: number; minUnitPriceSatang: number }
+    >();
+    for (const prevLine of committedCart) {
+      if (prevLine.heldLineLocked === false) continue;
+      const committedQty = Math.max(
+        0,
+        Number(prevLine.lockedMinQtyMilli ?? prevLine.quantityMilli ?? 0)
+      );
+      if (committedQty <= 0) continue;
+      const sig = this.buildHeldLineSignature(prevLine);
+      const prevPrice = Math.max(0, Number(prevLine.unitPriceSatang ?? 0));
+      const existing = requiredBySig.get(sig);
+      if (existing) {
+        existing.requiredQtyMilli += committedQty;
+        existing.minUnitPriceSatang = Math.min(existing.minUnitPriceSatang, prevPrice);
+      } else {
+        requiredBySig.set(sig, {
+          itemName: String(prevLine.itemName ?? prevLine.variantId),
+          requiredQtyMilli: committedQty,
+          minUnitPriceSatang: prevPrice,
+        });
       }
     }
 
+    const incomingBySig = new Map<
+      string,
+      { totalQtyMilli: number; minUnitPriceSatang: number }
+    >();
+    for (const nextLine of incomingLines) {
+      const sig = this.buildHeldLineSignature(nextLine);
+      const qty = Math.max(0, Number(nextLine.quantityMilli ?? 0));
+      const price = Math.max(0, Number(nextLine.unitPriceSatang ?? 0));
+      const existing = incomingBySig.get(sig);
+      if (existing) {
+        existing.totalQtyMilli += qty;
+        existing.minUnitPriceSatang = Math.min(existing.minUnitPriceSatang, price);
+      } else {
+        incomingBySig.set(sig, {
+          totalQtyMilli: qty,
+          minUnitPriceSatang: price,
+        });
+      }
+    }
+
+    const deficits: string[] = [];
+    for (const [sig, req] of requiredBySig.entries()) {
+      const got = incomingBySig.get(sig);
+      const gotQty = got?.totalQtyMilli ?? 0;
+      if (gotQty < req.requiredQtyMilli) {
+        deficits.push(`${req.itemName} (${req.requiredQtyMilli} -> ${gotQty})`);
+      } else if (got && got.minUnitPriceSatang < req.minUnitPriceSatang) {
+        deficits.push(`${req.itemName} @${req.minUnitPriceSatang}->${got.minUnitPriceSatang}`);
+      }
+    }
+    return deficits;
+  }
+
+  private computeHeldBillTotalSatangOnDb(
+    db: DatabaseSync,
+    cart: ReadonlyArray<HeldBillCartLineDto>,
+    taxMode: TaxMode,
+    discountMode?: 'BAHT' | 'PERCENT' | undefined,
+    discountInput?: string | undefined
+  ): Satang {
+    const fiscal = this.getFiscalConfigOnDb(db);
     const modRows = db
       .prepare(`SELECT id, price_delta_satang AS priceDeltaSatang FROM modifiers`)
       .all() as Array<{ id: string; priceDeltaSatang: number }>;
     const modPriceMap = new Map<string, number>(
       modRows.map((m) => [String(m.id), Number(m.priceDeltaSatang)])
     );
+
+    let subtotalSatang = 0;
+    for (const item of cart) {
+      const qMilli = Math.max(1, Number(item.quantityMilli ?? 1_000));
+      const unitSatang = Math.max(0, Number(item.unitPriceSatang ?? 0));
+      const modIds = Array.isArray(item.selectedModifierIds) ? item.selectedModifierIds : [];
+      const modDeltas = modIds.map((id) => modPriceMap.get(id) ?? 0);
+      const override = item.overrideLineTotalSatang;
+      if (typeof override === 'number' && Number.isSafeInteger(override) && override >= 0) {
+        const modsTotal = modIds.reduce(
+          (sum, id) =>
+            sum +
+            Number(
+              roundDivBigInt(BigInt(qMilli) * BigInt(modPriceMap.get(id) ?? 0), SCALE_MILLI)
+            ),
+          0
+        );
+        subtotalSatang += Math.max(0, override + modsTotal);
+      } else {
+        const calc = computeGuestOrderLineSatang({
+          quantityMilli: qMilli,
+          unitPriceSatang: unitSatang,
+          modifierPriceDeltasSatang: modDeltas,
+        });
+        subtotalSatang += calc.lineTotalSatang;
+      }
+    }
+
+    let discountSatang = 0;
+    const rawDisc = (discountInput ?? '').trim();
+    if (rawDisc && rawDisc !== '0') {
+      try {
+        if (discountMode === 'PERCENT') {
+          const pctBps = Math.min(10_000, Math.max(0, parseDecimalStringToScaledInt(rawDisc, 2)));
+          discountSatang = Number(
+            roundDivBigInt(BigInt(subtotalSatang) * BigInt(pctBps), SCALE_BASIS_POINTS)
+          );
+        } else {
+          discountSatang = Math.min(
+            subtotalSatang,
+            Math.max(0, parseMoneyInputToMinor(rawDisc, fiscal.currencyCode))
+          );
+        }
+      } catch {
+        discountSatang = 0;
+      }
+    }
+
+    return computeOrderFinancialTotals({
+      subtotalSatang,
+      discountSatang,
+      vatRateBps: fiscal.vatRateBps,
+      taxMode,
+      currencyCode: fiscal.currencyCode,
+      applyCashRounding: false,
+      cashRoundingStepMajor: 0,
+    }).totalSatang;
+  }
+
+  private voidAndCleanupHeldBillOnDb(
+    db: DatabaseSync,
+    outletId: string,
+    heldBills: HeldBillRecordDto[],
+    targetIdx: number,
+    voidedByUserId: string,
+    voidReason: string
+  ): {
+    voidedBillId: string;
+    heldBills: HeldBillRecordDto[];
+    cancelledKdsOrderIds: string[];
+  } {
+    const target = heldBills[targetIdx]!;
+    const remaining = heldBills.filter((_, idx) => idx !== targetIdx);
+    this.writeHeldBillsOnDb(db, outletId, remaining, voidedByUserId);
+
+    const cleanReason = sanitizeGuestText(voidReason, 220) || 'ยกเลิกบิลพักจาก POS';
+    const kdsIdsSet = new Set<string>(
+      Array.isArray(target.linkedKdsSalesOrderIds) ? target.linkedKdsSalesOrderIds : []
+    );
+    const linkedGuestSet = new Set<string>(
+      Array.isArray(target.linkedGuestOrderIds) ? target.linkedGuestOrderIds : []
+    );
+
+    const qrOrders = this.readGuestOrdersOnDb(db, outletId);
+    let qrOrdersChanged = false;
+    const nowIso = new Date().toISOString();
+    const nextQrOrders = qrOrders.map((o) => {
+      const matched = o.heldBillId === target.id || linkedGuestSet.has(o.id);
+      if (matched && o.kdsSalesOrderId) {
+        kdsIdsSet.add(o.kdsSalesOrderId);
+      }
+      if (matched && o.status !== 'SETTLED' && o.status !== 'REJECTED') {
+        qrOrdersChanged = true;
+        return {
+          ...o,
+          status: 'REJECTED' as const,
+          rejectionReason: cleanReason,
+          updatedAtIso: nowIso,
+        };
+      }
+      return o;
+    });
+    if (qrOrdersChanged) {
+      this.writeGuestOrdersOnDb(db, outletId, nextQrOrders, voidedByUserId);
+    }
+
+    const cancelledKdsOrderIds = Array.from(kdsIdsSet);
+    if (cancelledKdsOrderIds.length > 0) {
+      const voidSoStmt = db.prepare(
+        `UPDATE sales_orders
+         SET status = 'VOIDED',
+             voided_by = ?,
+             void_reason = ?,
+             voided_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ? AND status = 'OPEN'`
+      );
+      const cancelKoStmt = db.prepare(
+        `UPDATE kitchen_orders
+         SET status = 'CANCELLED', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE sales_order_id = ? AND status != 'CANCELLED'`
+      );
+      for (const kdsSoId of cancelledKdsOrderIds) {
+        voidSoStmt.run(voidedByUserId, cleanReason, kdsSoId);
+        cancelKoStmt.run(kdsSoId);
+      }
+    }
+
+    const oldSummary = JSON.stringify({
+      table: target.referenceLabel,
+      totalSatang: target.totalSatang,
+      items: target.cart.map((c) => `${c.itemName}x${c.quantityMilli}`),
+    }).slice(0, 400);
+
+    db.prepare(
+      `INSERT INTO security_audit_logs (
+         event_type, actor_user_id, target_key, old_value_redacted, new_value_redacted
+       ) VALUES ('HELD_BILL_VOIDED', ?, ?, ?, ?)`
+    ).run(
+      voidedByUserId,
+      `${target.id} (${target.referenceLabel})`,
+      oldSummary,
+      `VOIDED:${cleanReason}`
+    );
+
+    return {
+      voidedBillId: target.id,
+      heldBills: remaining,
+      cancelledKdsOrderIds,
+    };
+  }
+
+  public listHeldBills(outletId = 'OUTLET-HQ'): HeldBillRecordDto[] {
+    return this.executeRead((db) => this.readHeldBillsOnDb(db, outletId));
+  }
+
+  public async upsertHeldBill(input: {
+    outletId?: string | undefined;
+    actorUserId?: string | undefined;
+    bill: Record<string, unknown>;
+    claimToken?: string | undefined;
+    keepClaim?: boolean | undefined;
+    authorizedByManagerId?: string | undefined;
+    voidReason?: string | undefined;
+  }): Promise<HeldBillRecordDto[]> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const actorUserId = input.actorUserId ?? 'USR-CASHIER-01';
+    const rawBill = input.bill ?? {};
+
+    return this.executeWriteImmediate((db) => {
+      const heldBills = this.readHeldBillsOnDb(db, outletId);
+      const rawId =
+        typeof rawBill.id === 'string'
+          ? rawBill.id.trim()
+          : rawBill.id !== undefined && rawBill.id !== null
+            ? String(rawBill.id).trim()
+            : '';
+      const billId = rawId || `HOLD-${Date.now()}-${randomBytes(3).toString('hex')}`;
+      const existingIdx = heldBills.findIndex((b) => b.id === billId);
+      const existingBill = existingIdx >= 0 ? heldBills[existingIdx]! : null;
+
+      if (existingBill?.activeClaimToken && input.claimToken && existingBill.activeClaimToken !== input.claimToken) {
+        throw new Error(
+          `HTTP 409 บิลพัก "${existingBill.referenceLabel}" กำลังถูกเรียกคิดเงินอยู่โดย ${existingBill.activeClaimedByName ?? 'เครื่องอื่น'}`
+        );
+      }
+
+      const rawCart = Array.isArray(rawBill.cart) ? rawBill.cart : [];
+      let allowAuthorizedShrink = false;
+      if (existingBill) {
+        const preliminaryLines = rawCart.map((item) =>
+          this.normalizeHeldCartLine(item as Record<string, unknown>, billId, true)
+        );
+        const deficits = this.findHeldBillLineDeficits(existingBill.cart, preliminaryLines);
+        if (deficits.length > 0) {
+          const cleanReason = sanitizeGuestText(input.voidReason ?? '', 220);
+          if (!input.authorizedByManagerId || !cleanReason) {
+            throw new Error(
+              `HTTP 403 Forbidden: ห้ามลบหรือลดรายการในบิลพักโดยไม่มีรหัสอนุมัติ PIN ผู้จัดการ (${deficits.join(', ')})`
+            );
+          }
+          allowAuthorizedShrink = true;
+          db.prepare(
+            `INSERT INTO security_audit_logs (
+               event_type, actor_user_id, target_key, old_value_redacted, new_value_redacted
+             ) VALUES ('HELD_BILL_ITEM_VOIDED', ?, ?, ?, ?)`
+          ).run(
+            input.authorizedByManagerId,
+            `${billId} (${existingBill.referenceLabel})`,
+            deficits.join('; ').slice(0, 400),
+            `AUTHORIZED:${cleanReason}`
+          );
+        }
+      }
+
+      const normalizedCart: HeldBillCartLineDto[] = rawCart.map((rawLine) => {
+        const obj = rawLine as Record<string, unknown>;
+        const matchedPrev = existingBill && !allowAuthorizedShrink
+          ? existingBill.cart.find(
+              (c) =>
+                c.cartKey === String(obj.cartKey ?? '') ||
+                this.buildHeldLineSignature(c) ===
+                  this.buildHeldLineSignature({
+                    variantId: String(obj.variantId ?? ''),
+                    selectedModifierIds: Array.isArray(obj.selectedModifierIds)
+                      ? (obj.selectedModifierIds as string[])
+                      : [],
+                    overrideLineTotalSatang:
+                      typeof obj.overrideLineTotalSatang === 'number'
+                        ? obj.overrideLineTotalSatang
+                        : undefined,
+                  })
+            )
+          : null;
+        const normalized = this.normalizeHeldCartLine(obj, billId, true, matchedPrev);
+        if (allowAuthorizedShrink) {
+          return {
+            ...normalized,
+            lockedMinQtyMilli: normalized.quantityMilli,
+          };
+        }
+        return normalized;
+      });
+
+      const orderTypeRaw = String(rawBill.orderType ?? existingBill?.orderType ?? 'DINE_IN');
+      const orderType: CheckoutOrderRequest['orderType'] =
+        orderTypeRaw === 'RETAIL' ||
+        orderTypeRaw === 'TAKEAWAY' ||
+        orderTypeRaw === 'DELIVERY'
+          ? orderTypeRaw
+          : 'DINE_IN';
+      const taxModeRaw = String(rawBill.taxMode ?? existingBill?.taxMode ?? 'INCLUSIVE');
+      const taxMode: TaxMode =
+        taxModeRaw === 'NONE' || taxModeRaw === 'EXCLUSIVE' ? taxModeRaw : 'INCLUSIVE';
+      const discountMode: 'BAHT' | 'PERCENT' | undefined =
+        rawBill.discountMode === 'PERCENT' || rawBill.discountMode === 'BAHT'
+          ? rawBill.discountMode
+          : existingBill?.discountMode;
+      const discountInput =
+        typeof rawBill.discountInput === 'string'
+          ? rawBill.discountInput
+          : existingBill?.discountInput;
+
+      const mergedGuestIds = Array.from(
+        new Set([
+          ...(existingBill?.linkedGuestOrderIds ?? []),
+          ...(Array.isArray(rawBill.linkedGuestOrderIds)
+            ? (rawBill.linkedGuestOrderIds as unknown[]).map((x) => String(x)).filter(Boolean)
+            : []),
+        ])
+      );
+      const mergedKdsIds = Array.from(
+        new Set([
+          ...(existingBill?.linkedKdsSalesOrderIds ?? []),
+          ...(Array.isArray(rawBill.linkedKdsSalesOrderIds)
+            ? (rawBill.linkedKdsSalesOrderIds as unknown[]).map((x) => String(x)).filter(Boolean)
+            : []),
+        ])
+      );
+
+      const recomputedTotalSatang =
+        normalizedCart.length > 0
+          ? this.computeHeldBillTotalSatangOnDb(
+              db,
+              normalizedCart,
+              taxMode,
+              discountMode,
+              discountInput
+            )
+          : Math.max(0, Math.floor(Number(rawBill.totalSatang ?? 0)));
+
+      const keepClaim = input.keepClaim === true && existingBill?.activeClaimToken;
+      const nextBill: HeldBillRecordDto = {
+        id: billId,
+        outletId,
+        referenceLabel:
+          sanitizeGuestText(rawBill.referenceLabel ?? existingBill?.referenceLabel ?? 'บิลพัก', 60) ||
+          'บิลพัก',
+        orderType,
+        taxMode,
+        ...(discountMode ? { discountMode } : {}),
+        ...(discountInput !== undefined ? { discountInput } : {}),
+        cart: normalizedCart,
+        totalSatang: recomputedTotalSatang,
+        heldByName:
+          sanitizeGuestText(rawBill.heldByName ?? existingBill?.heldByName ?? 'Staff', 60) || 'Staff',
+        heldAtIso:
+          typeof rawBill.heldAtIso === 'string' && rawBill.heldAtIso
+            ? rawBill.heldAtIso
+            : existingBill?.heldAtIso ?? new Date().toISOString(),
+        version: Number(existingBill?.version ?? 0) + 1,
+        ...(keepClaim
+          ? {
+              activeClaimToken: existingBill.activeClaimToken,
+              ...(existingBill.activeClaimedByUserId
+                ? { activeClaimedByUserId: existingBill.activeClaimedByUserId }
+                : {}),
+              ...(existingBill.activeClaimedByName
+                ? { activeClaimedByName: existingBill.activeClaimedByName }
+                : {}),
+              ...(existingBill.activeClaimedAtIso
+                ? { activeClaimedAtIso: existingBill.activeClaimedAtIso }
+                : {}),
+            }
+          : {}),
+        ...(mergedGuestIds.length > 0 ? { linkedGuestOrderIds: mergedGuestIds } : {}),
+        ...(mergedKdsIds.length > 0 ? { linkedKdsSalesOrderIds: mergedKdsIds } : {}),
+      };
+
+      const nextList = [nextBill, ...heldBills.filter((b) => b.id !== billId)];
+      this.writeHeldBillsOnDb(db, outletId, nextList, actorUserId);
+      return nextList;
+    });
+  }
+
+  public async claimHeldBill(input: {
+    outletId?: string | undefined;
+    id: string;
+    claimToken?: string | undefined;
+    claimedByUserId?: string | undefined;
+    claimedByName?: string | undefined;
+    forceTakeover?: boolean | undefined;
+  }): Promise<{ heldBill: HeldBillRecordDto; heldBills: HeldBillRecordDto[] }> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const targetId = String(input.id ?? '').trim();
+    const claimedByUserId = input.claimedByUserId ?? 'USR-CASHIER-01';
+    const claimedByName = sanitizeGuestText(input.claimedByName ?? 'Cashier', 60) || 'Cashier';
+    const claimToken =
+      sanitizeGuestText(input.claimToken ?? '', 80) || `CLAIM-${randomBytes(8).toString('hex')}`;
+
+    return this.executeWriteImmediate((db) => {
+      const heldBills = this.readHeldBillsOnDb(db, outletId);
+      const idx = heldBills.findIndex((b) => b.id === targetId);
+      if (idx < 0) {
+        throw new Error('HTTP 404 ไม่พบบิลพักที่ระบุ (อาจถูกชำระเงินหรือยกเลิกไปแล้ว)');
+      }
+      const target = heldBills[idx]!;
+      if (
+        target.activeClaimToken &&
+        target.activeClaimToken !== claimToken &&
+        input.forceTakeover !== true
+      ) {
+        throw new Error(
+          `HTTP 409 บิลพัก "${target.referenceLabel}" กำลังถูกเรียกคิดเงินอยู่โดย ${target.activeClaimedByName ?? 'เครื่องอื่น'}`
+        );
+      }
+
+      const claimedBill: HeldBillRecordDto = {
+        ...target,
+        cart: target.cart.map((c) => this.normalizeHeldCartLine(c, target.id, true)),
+        version: Number(target.version ?? 1),
+        activeClaimToken: claimToken,
+        activeClaimedByUserId: claimedByUserId,
+        activeClaimedByName: claimedByName,
+        activeClaimedAtIso: new Date().toISOString(),
+      };
+      const nextList = heldBills.map((b, i) => (i === idx ? claimedBill : b));
+      this.writeHeldBillsOnDb(db, outletId, nextList, claimedByUserId);
+      return { heldBill: claimedBill, heldBills: nextList };
+    });
+  }
+
+  public async releaseHeldBillClaim(input: {
+    outletId?: string | undefined;
+    id: string;
+    claimToken?: string | undefined;
+    actorUserId?: string | undefined;
+    force?: boolean | undefined;
+  }): Promise<HeldBillRecordDto[]> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const targetId = String(input.id ?? '').trim();
+    const actorUserId = input.actorUserId ?? 'USR-CASHIER-01';
+
+    return this.executeWriteImmediate((db) => {
+      const heldBills = this.readHeldBillsOnDb(db, outletId);
+      const idx = heldBills.findIndex((b) => b.id === targetId);
+      if (idx < 0) {
+        return heldBills;
+      }
+      const target = heldBills[idx]!;
+      if (
+        target.activeClaimToken &&
+        input.claimToken &&
+        target.activeClaimToken !== input.claimToken &&
+        input.force !== true
+      ) {
+        throw new Error(
+          `HTTP 409 บิลพัก "${target.referenceLabel}" ถูกเรียกใช้งานโดยเครื่องอื่นแล้ว`
+        );
+      }
+      if (!target.activeClaimToken) {
+        return heldBills;
+      }
+      const {
+        activeClaimToken: _omitTok,
+        activeClaimedByUserId: _omitUid,
+        activeClaimedByName: _omitName,
+        activeClaimedAtIso: _omitIso,
+        ...released
+      } = target;
+      const nextList = heldBills.map((b, i) => (i === idx ? released : b));
+      this.writeHeldBillsOnDb(db, outletId, nextList, actorUserId);
+      return nextList;
+    });
+  }
+
+  public async voidHeldBill(input: {
+    outletId?: string | undefined;
+    id: string;
+    voidedByUserId: string;
+    voidReason: string;
+  }): Promise<{
+    voidedBillId: string;
+    heldBills: HeldBillRecordDto[];
+    cancelledKdsOrderIds: string[];
+  }> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const targetId = String(input.id ?? '').trim();
+
+    return this.executeWriteImmediate((db) => {
+      const heldBills = this.readHeldBillsOnDb(db, outletId);
+      const idx = heldBills.findIndex((b) => b.id === targetId);
+      if (idx < 0) {
+        throw new Error('HTTP 404 ไม่พบบิลพักที่ต้องการยกเลิก');
+      }
+      return this.voidAndCleanupHeldBillOnDb(
+        db,
+        outletId,
+        heldBills,
+        idx,
+        input.voidedByUserId,
+        input.voidReason
+      );
+    });
+  }
+
+  public async voidHeldBillItem(input: {
+    outletId?: string | undefined;
+    id: string;
+    expectedVersion?: number | undefined;
+    targetCartKey: string;
+    nextQuantityMilli: number;
+    voidedByUserId: string;
+    voidReason: string;
+  }): Promise<{
+    heldBill: HeldBillRecordDto | null;
+    heldBills: HeldBillRecordDto[];
+    billVoidedCompletely: boolean;
+  }> {
+    const outletId = input.outletId ?? 'OUTLET-HQ';
+    const targetId = String(input.id ?? '').trim();
+    const cleanReason = sanitizeGuestText(input.voidReason, 220);
+    if (cleanReason.length < 2) {
+      throw new Error('HTTP 400 กรุณาระบุเหตุผลการลดหรือลบรายการในบิลพัก');
+    }
+
+    return this.executeWriteImmediate((db) => {
+      const heldBills = this.readHeldBillsOnDb(db, outletId);
+      const idx = heldBills.findIndex((b) => b.id === targetId);
+      if (idx < 0) {
+        throw new Error('HTTP 404 ไม่พบบิลพักที่ระบุ');
+      }
+      const bill = heldBills[idx]!;
+      if (input.expectedVersion !== undefined && Number(bill.version ?? 1) !== input.expectedVersion) {
+        throw new Error(
+          'HTTP 409 บิลพักมีการอัปเดตรายการใหม่ กรุณารีเฟรชบิลก่อนแก้ไข'
+        );
+      }
+
+      const lineIdx = bill.cart.findIndex((c) => c.cartKey === input.targetCartKey);
+      if (lineIdx < 0) {
+        throw new Error('HTTP 404 ไม่พบรายการสินค้าที่ต้องการลด/ลบในบิลพัก');
+      }
+      const targetLine = bill.cart[lineIdx]!;
+      const nextQty = Math.max(0, Math.floor(Number(input.nextQuantityMilli ?? 0)));
+      if (nextQty >= targetLine.quantityMilli) {
+        throw new Error('HTTP 400 จำนวนใหม่ต้องน้อยกว่าจำนวนเดิมในบิลพัก');
+      }
+
+      const nextCart: HeldBillCartLineDto[] = [];
+      for (let i = 0; i < bill.cart.length; i++) {
+        const line = bill.cart[i]!;
+        if (i !== lineIdx) {
+          nextCart.push(this.normalizeHeldCartLine(line, bill.id, true));
+          continue;
+        }
+        if (nextQty > 0) {
+          const { overrideLineTotalSatang: _omitOv, scaleBadgeText: _omitSb, ...rest } = line;
+          nextCart.push({
+            ...rest,
+            quantityMilli: nextQty,
+            heldLineLocked: true,
+            lockedMinQtyMilli: nextQty,
+            heldBillOriginId: bill.id,
+          });
+        }
+      }
+
+      if (nextCart.length === 0) {
+        const voided = this.voidAndCleanupHeldBillOnDb(
+          db,
+          outletId,
+          heldBills,
+          idx,
+          input.voidedByUserId,
+          cleanReason
+        );
+        return {
+          heldBill: null,
+          heldBills: voided.heldBills,
+          billVoidedCompletely: true,
+        };
+      }
+
+      const nextTotalSatang = this.computeHeldBillTotalSatangOnDb(
+        db,
+        nextCart,
+        bill.taxMode,
+        bill.discountMode,
+        bill.discountInput
+      );
+      const updatedBill: HeldBillRecordDto = {
+        ...bill,
+        cart: nextCart,
+        totalSatang: nextTotalSatang,
+        version: Number(bill.version ?? 1) + 1,
+      };
+      const nextList = heldBills.map((b, i) => (i === idx ? updatedBill : b));
+      this.writeHeldBillsOnDb(db, outletId, nextList, input.voidedByUserId);
+
+      db.prepare(
+        `INSERT INTO security_audit_logs (
+           event_type, actor_user_id, target_key, old_value_redacted, new_value_redacted
+         ) VALUES ('HELD_BILL_ITEM_VOIDED', ?, ?, ?, ?)`
+      ).run(
+        input.voidedByUserId,
+        `${bill.id} (${bill.referenceLabel})`,
+        `${targetLine.itemName} qty ${targetLine.quantityMilli} -> ${nextQty} (${bill.totalSatang} -> ${nextTotalSatang})`.slice(0, 400),
+        `AUTHORIZED:${cleanReason}`
+      );
+
+      return {
+        heldBill: updatedBill,
+        heldBills: nextList,
+        billVoidedCompletely: false,
+      };
+    });
+  }
+
+  private mergeGuestOrderIntoHeldBillOnDb(
+    db: DatabaseSync,
+    outletId: string,
+    guestOrder: GuestOrderRecordDto,
+    fiscal: FiscalConfigDto,
+    actorUserId: string,
+    actorDisplayName: string,
+    links?: { guestOrderId?: string | undefined; kdsSalesOrderId?: string | undefined }
+  ): string {
+    const heldBills = this.readHeldBillsOnDb(db, outletId);
 
     const targetLabelUpper = guestOrder.tableLabel.trim().toUpperCase();
     const existingIdx = heldBills.findIndex(
@@ -6880,24 +7697,28 @@ export class SqliteReadWritePoolEngine {
 
     const existingBill = existingIdx >= 0 ? heldBills[existingIdx]! : null;
     const heldBillId = existingBill
-      ? String(existingBill.id)
+      ? existingBill.id
       : `HOLD-QR-${Date.now()}-${randomBytes(3).toString('hex')}`;
-    const existingCart: Array<Record<string, unknown>> =
+    const existingCart: HeldBillCartLineDto[] =
       existingBill && Array.isArray(existingBill.cart)
-        ? [...(existingBill.cart as Array<Record<string, unknown>>)]
+        ? existingBill.cart.map((c) => this.normalizeHeldCartLine(c, heldBillId, true))
         : [];
 
     for (const line of guestOrder.lines) {
       const sortedMods = [...line.selectedModifierIds].sort();
       const noteTag = line.note ? `::note:${line.note}` : '';
       const cartKey = `${line.variantId}::${sortedMods.join(',')}${noteTag}::kds`;
-      const existingLineIdx = existingCart.findIndex((c) => String(c.cartKey ?? '') === cartKey);
+      const existingLineIdx = existingCart.findIndex((c) => c.cartKey === cartKey);
       if (existingLineIdx >= 0) {
         const prev = existingCart[existingLineIdx]!;
+        const nextQty = prev.quantityMilli + line.quantityMilli;
         existingCart[existingLineIdx] = {
           ...prev,
-          quantityMilli: Number(prev.quantityMilli ?? 0) + line.quantityMilli,
+          quantityMilli: nextQty,
           kdsDispatched: true,
+          heldLineLocked: true,
+          lockedMinQtyMilli: Math.max(prev.lockedMinQtyMilli ?? prev.quantityMilli, nextQty),
+          heldBillOriginId: heldBillId,
         };
       } else {
         existingCart.push({
@@ -6912,29 +7733,11 @@ export class SqliteReadWritePoolEngine {
           selectedModifierIds: sortedMods,
           isWeightedScale: false,
           kdsDispatched: true,
+          heldLineLocked: true,
+          lockedMinQtyMilli: line.quantityMilli,
+          heldBillOriginId: heldBillId,
           ...(line.note ? { guestNote: line.note } : {}),
         });
-      }
-    }
-
-    let mergedSubtotalSatang = 0;
-    for (const item of existingCart) {
-      const qMilli = Math.max(1, Number(item.quantityMilli ?? 1000));
-      const unitSatang = Math.max(0, Number(item.unitPriceSatang ?? 0));
-      const modIds = Array.isArray(item.selectedModifierIds)
-        ? (item.selectedModifierIds as unknown[]).map((x) => String(x))
-        : [];
-      const modDeltas = modIds.map((id) => modPriceMap.get(id) ?? 0);
-      const override = item.overrideLineTotalSatang;
-      if (typeof override === 'number' && Number.isSafeInteger(override) && override >= 0) {
-        mergedSubtotalSatang += override;
-      } else {
-        const calc = computeGuestOrderLineSatang({
-          quantityMilli: qMilli,
-          unitPriceSatang: unitSatang,
-          modifierPriceDeltasSatang: modDeltas,
-        });
-        mergedSubtotalSatang += calc.lineTotalSatang;
       }
     }
 
@@ -6946,17 +7749,28 @@ export class SqliteReadWritePoolEngine {
         ? existingBill.taxMode
         : fiscal.defaultTaxMode;
 
-    const totals = computeOrderFinancialTotals({
-      subtotalSatang: mergedSubtotalSatang,
-      discountSatang: 0,
-      vatRateBps: fiscal.vatRateBps,
-      taxMode: billTaxMode,
-      currencyCode: fiscal.currencyCode,
-      applyCashRounding: false,
-      cashRoundingStepMajor: 0,
-    });
+    const mergedTotalSatang = this.computeHeldBillTotalSatangOnDb(
+      db,
+      existingCart,
+      billTaxMode,
+      existingBill?.discountMode,
+      existingBill?.discountInput
+    );
 
-    const updatedBill: Record<string, unknown> = {
+    const linkedGuestOrderIds = Array.from(
+      new Set([
+        ...(existingBill?.linkedGuestOrderIds ?? []),
+        ...(links?.guestOrderId ? [links.guestOrderId] : [guestOrder.id]),
+      ])
+    );
+    const linkedKdsSalesOrderIds = Array.from(
+      new Set([
+        ...(existingBill?.linkedKdsSalesOrderIds ?? []),
+        ...(links?.kdsSalesOrderId ? [links.kdsSalesOrderId] : []),
+      ])
+    );
+
+    const updatedBill: HeldBillRecordDto = {
       ...(existingBill ?? {}),
       id: heldBillId,
       outletId,
@@ -6964,28 +7778,24 @@ export class SqliteReadWritePoolEngine {
       orderType: guestOrder.orderType,
       taxMode: billTaxMode,
       cart: existingCart,
-      totalSatang: totals.totalSatang,
+      totalSatang: mergedTotalSatang,
       heldByName: existingBill
         ? String(existingBill.heldByName ?? actorDisplayName)
         : `QR · ${actorDisplayName}`,
       heldAtIso: existingBill
         ? String(existingBill.heldAtIso ?? new Date().toISOString())
         : new Date().toISOString(),
+      version: Number(existingBill?.version ?? 0) + 1,
+      linkedGuestOrderIds,
+      ...(linkedKdsSalesOrderIds.length > 0 ? { linkedKdsSalesOrderIds } : {}),
     };
 
     const nextList = [
       updatedBill,
-      ...heldBills.filter((b) => String(b.id) !== heldBillId),
-    ].slice(0, 100);
+      ...heldBills.filter((b) => b.id !== heldBillId),
+    ];
 
-    db.prepare(
-      `INSERT INTO store_config (key, value, is_protected, updated_by, updated_at)
-       VALUES (?, ?, 0, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-       ON CONFLICT(key) DO UPDATE SET
-         value = excluded.value,
-         updated_by = excluded.updated_by,
-         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
-    ).run(cfgKey, JSON.stringify(nextList), actorUserId);
+    this.writeHeldBillsOnDb(db, outletId, nextList, actorUserId);
 
     return heldBillId;
   }
@@ -7607,15 +8417,16 @@ export class SqliteReadWritePoolEngine {
 
       // Auto-Accept ONLY when store enabled AUTO_ACCEPT_SIGNED_TABLE AND guest has valid HMAC-signed Table QR
       if (qrCfg.approvalMode === 'AUTO_ACCEPT_SIGNED_TABLE' && isSignedTableSession) {
+        const kdsRes = this.dispatchGuestOrderToKdsOnDb(db, outletId, record, 'USR-OWNER-01');
         const heldBillId = this.mergeGuestOrderIntoHeldBillOnDb(
           db,
           outletId,
           record,
           fiscal,
           'USR-OWNER-01',
-          'Auto-QR'
+          'Auto-QR',
+          { guestOrderId: record.id, kdsSalesOrderId: kdsRes.kdsSalesOrderId }
         );
-        const kdsRes = this.dispatchGuestOrderToKdsOnDb(db, outletId, record, 'USR-OWNER-01');
         record.status = 'ACCEPTED';
         record.heldBillId = heldBillId;
         record.kdsSalesOrderId = kdsRes.kdsSalesOrderId;
@@ -7890,15 +8701,16 @@ export class SqliteReadWritePoolEngine {
           );
         }
       }
+      const kdsRes = this.dispatchGuestOrderToKdsOnDb(db, outletId, target, actorUserId);
       const heldBillId = this.mergeGuestOrderIntoHeldBillOnDb(
         db,
         outletId,
         target,
         fiscal,
         actorUserId,
-        actorDisplayName
+        actorDisplayName,
+        { guestOrderId: target.id, kdsSalesOrderId: kdsRes.kdsSalesOrderId }
       );
-      const kdsRes = this.dispatchGuestOrderToKdsOnDb(db, outletId, target, actorUserId);
 
       const nowIso = new Date().toISOString();
       const updated: GuestOrderRecordDto = {

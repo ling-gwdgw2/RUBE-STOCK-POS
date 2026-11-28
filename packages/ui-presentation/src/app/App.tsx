@@ -21,9 +21,10 @@ import { formatMilliUnitsToQtyString } from '../../../shared-contracts/src/fixed
 import {
   DEFAULT_TH_FISCAL_CONFIG,
   formatMoney,
+  normalizeLocaleCode,
   type LocaleCode,
 } from '../../../shared-contracts/src/currency.ts';
-import { posTransport, setPosSessionToken } from './api/pos-transport.ts';
+import { posTransport, setPosRequestLocale, setPosSessionToken } from './api/pos-transport.ts';
 import { I18nProvider, pickLocaleText, translateKey } from './i18n/index.tsx';
 import { BomStudioWorkspace } from './components/BomStudioWorkspace.tsx';
 import { FirstRunWizardModal } from './components/FirstRunWizardModal.tsx';
@@ -62,11 +63,12 @@ interface ToastNotification {
 }
 
 const ACTIVE_OUTLET_STORAGE_KEY = 'rube_pos_v3_active_outlet_id';
+const LAST_UI_LOCALE_STORAGE_KEY = 'rube_pos_v3_last_ui_locale';
 
 const LOCKED_TERMINAL_FALLBACK_USER: StaffUserDto = {
   id: 'LOCKED-TERMINAL',
   username: 'locked',
-  displayName: 'เครื่องถูกล็อก',
+  displayName: 'LOCKED',
   role: 'CASHIER',
   active: false,
   createdAt: '',
@@ -186,11 +188,43 @@ export const App: React.FC = () => {
   const scaleScanSeqRef = useRef(0);
   const bootstrapSeqRef = useRef(0);
   const skipNextBootstrapEffectRef = useRef(false);
+  const preLoginLocaleDirtyRef = useRef(false);
   const currentUserRef = useRef<StaffUserDto | null>(null);
   currentUserRef.current = currentUser;
   const searchQueryRef = useRef(searchQuery);
   searchQueryRef.current = searchQuery;
   const searchPreBurstSnapshotRef = useRef<PreBurstInputSnapshot | null>(null);
+
+  const [cachedStartupLocale] = useState<LocaleCode>(() => {
+    try {
+      return normalizeLocaleCode(window.localStorage.getItem(LAST_UI_LOCALE_STORAGE_KEY), 'th');
+    } catch {
+      return 'th';
+    }
+  });
+  const activeFiscalConfig = bootstrap?.fiscalConfig ?? DEFAULT_TH_FISCAL_CONFIG;
+  const activeUiLocale: LocaleCode =
+    overrideLocale ?? (bootstrap ? activeFiscalConfig.uiLocale : cachedStartupLocale);
+
+  useEffect(() => {
+    setPosRequestLocale(activeUiLocale);
+    try {
+      window.localStorage.setItem(LAST_UI_LOCALE_STORAGE_KEY, activeUiLocale);
+    } catch {
+      // ignore storage restrictions
+    }
+  }, [activeUiLocale]);
+
+  const tNav = useCallback(
+    (key: Parameters<typeof translateKey>[0]) => translateKey(key, activeUiLocale),
+    [activeUiLocale]
+  );
+
+  const pickApp = useCallback(
+    (thText: string, loText: string, enText: string) =>
+      pickLocaleText(activeUiLocale, thText, loText, enText),
+    [activeUiLocale]
+  );
 
   const handleToggleSimulationMode = useCallback((enabled: boolean) => {
     setSimulationModeEnabled(enabled);
@@ -332,11 +366,18 @@ export const App: React.FC = () => {
       setPinModalOpen(false);
       setHilDrawerOpen(false);
       setIsTerminalLocked(true);
-      pushToast('เซสชันหมดอายุหรือถูกยกเลิก กรุณากดรหัส PIN เข้าใช้งานใหม่', 'warn');
+      pushToast(
+        pickApp(
+          'เซสชันหมดอายุหรือถูกยกเลิก กรุณากดรหัส PIN เข้าใช้งานใหม่',
+          'ເຊສຊັນໝົດອາຍຸ ຫຼື ຖືກຍົກເລີກ ກະລຸນາປ້ອນລະຫັດ PIN ເຂົ້າໃຊ້ງານໃໝ່',
+          'Session expired or revoked. Please enter your PIN to sign in again.'
+        ),
+        'warn'
+      );
     };
     window.addEventListener('rube-pos-session-expired', onSessionExpired);
     return () => window.removeEventListener('rube-pos-session-expired', onSessionExpired);
-  }, [pushToast]);
+  }, [pickApp, pushToast]);
 
   const handleSwitchOutlet = useCallback(
     async (nextOutletId: string) => {
@@ -354,9 +395,16 @@ export const App: React.FC = () => {
       if (bootstrapSeqRef.current !== switchEpoch + 1) return;
       const outletName =
         bootstrap?.outlets.find((o) => o.id === nextOutletId)?.name ?? nextOutletId;
-      pushToast(`สลับสาขาประจำเครื่องเป็น "${outletName}" เรียบร้อยแล้ว`, 'success');
+      pushToast(
+        pickApp(
+          `สลับสาขาประจำเครื่องเป็น "${outletName}" เรียบร้อยแล้ว`,
+          `ປ່ຽນສາຂາປະຈຳເຄື່ອງເປັນ "${outletName}" ສຳເລັດແລ້ວ`,
+          `Switched active outlet to "${outletName}"`
+        ),
+        'success'
+      );
     },
-    [activeOutletId, bootstrap?.outlets, pushToast, refreshBootstrap]
+    [activeOutletId, bootstrap?.outlets, pickApp, pushToast, refreshBootstrap]
   );
 
   const handleLockTerminal = useCallback(() => {
@@ -394,10 +442,32 @@ export const App: React.FC = () => {
             : getDefaultTabForRole(user.role, bootstrap.featureFlags)
         );
       }
-      void refreshBootstrap();
-      pushToast(`เข้าใช้งานในชื่อ ${user.displayName} (${user.role})`, 'success');
+      const pendingPreLoginLocale = preLoginLocaleDirtyRef.current ? overrideLocale : undefined;
+      if (pendingPreLoginLocale && bootstrap?.onboarded) {
+        setPosRequestLocale(pendingPreLoginLocale);
+        void posTransport
+          .updateUiLocale({ uiLocale: pendingPreLoginLocale })
+          .then(() => {
+            preLoginLocaleDirtyRef.current = false;
+            setOverrideLocale(undefined);
+            return refreshBootstrap();
+          })
+          .catch(() => {
+            void refreshBootstrap();
+          });
+      } else {
+        void refreshBootstrap();
+      }
+      pushToast(
+        pickApp(
+          `เข้าใช้งานในชื่อ ${user.displayName} (${user.role})`,
+          `ເຂົ້າໃຊ້ງານໃນຊື່ ${user.displayName} (${user.role})`,
+          `Signed in as ${user.displayName} (${user.role})`
+        ),
+        'success'
+      );
     },
-    [bootstrap, pushToast, refreshBootstrap]
+    [bootstrap, overrideLocale, pickApp, pushToast, refreshBootstrap]
   );
 
   const handleScanBarcodeIntoCart = useCallback(
@@ -428,8 +498,7 @@ export const App: React.FC = () => {
           if (matchedScaleItem) {
             if (!matchedScaleItem.active) {
               pushToast(
-                pickLocaleText(
-                  overrideLocale ?? activeFiscal.uiLocale,
+                pickApp(
                   `รายการ "${matchedScaleItem.itemName}" ถูกพักการขายชั่วคราว — ไม่สามารถเพิ่มลงบิลได้`,
                   `ລາຍການ "${matchedScaleItem.itemName}" ຖືກພັກການຂາຍຊົ່ວຄາວ`,
                   `Item "${matchedScaleItem.itemName}" is currently paused`
@@ -472,8 +541,13 @@ export const App: React.FC = () => {
                 ...(overrideLineTotalSatang !== undefined ? { overrideLineTotalSatang } : {}),
               },
             ]);
+            const qtyLabel = formatMilliUnitsToQtyString(qtyMilli, matchedScaleItem.unitName);
             pushToast(
-              `สแกนตราชั่ง: ${matchedScaleItem.itemName} (${formatMilliUnitsToQtyString(qtyMilli, matchedScaleItem.unitName)})`,
+              pickApp(
+                `สแกนตราชั่ง: ${matchedScaleItem.itemName} (${qtyLabel})`,
+                `ສະແກນຊິງຊັ່ງ: ${matchedScaleItem.itemName} (${qtyLabel})`,
+                `Scale scanned: ${matchedScaleItem.itemName} (${qtyLabel})`
+              ),
               !matchedScaleItem.isComposite && matchedScaleItem.inStockMilli <= 0
                 ? 'warn'
                 : 'success'
@@ -488,12 +562,23 @@ export const App: React.FC = () => {
         (v) => v.barcode === trimmed || v.sku.toLowerCase() === trimmed.toLowerCase()
       );
       if (!matched) {
-        pushToast(`ไม่พบรหัสบาร์โค้ด "${trimmed}" ในทะเบียนสินค้า`, 'warn');
+        pushToast(
+          pickApp(
+            `ไม่พบรหัสบาร์โค้ด "${trimmed}" ในทะเบียนสินค้า`,
+            `ບໍ່ພົບລະຫັດບາໂຄດ "${trimmed}" ໃນທະບຽນສິນຄ້າ`,
+            `Barcode "${trimmed}" was not found in the catalog`
+          ),
+          'warn'
+        );
         return;
       }
       if (!matched.active) {
         pushToast(
-          `รายการ "${matched.itemName}" ถูกพักการขายชั่วคราว — ไม่สามารถเพิ่มลงบิลได้`,
+          pickApp(
+            `รายการ "${matched.itemName}" ถูกพักการขายชั่วคราว — ไม่สามารถเพิ่มลงบิลได้`,
+            `ລາຍການ "${matched.itemName}" ຖືກພັກການຂາຍຊົ່ວຄາວ — ບໍ່ສາມາດເພີ່ມລົງບິນໄດ້`,
+            `Item "${matched.itemName}" is currently paused and cannot be added`
+          ),
           'warn'
         );
         return;
@@ -528,14 +613,25 @@ export const App: React.FC = () => {
 
       if (!matched.isComposite && matched.inStockMilli <= 0) {
         pushToast(
-          `"${matched.itemName}" สต็อกในระบบเหลือ 0 — เพิ่มลงบิลแล้ว (โปรดตรวจสอบสินค้าหน้าร้าน)`,
+          pickApp(
+            `"${matched.itemName}" สต็อกในระบบเหลือ 0 — เพิ่มลงบิลแล้ว (โปรดตรวจสอบสินค้าหน้าร้าน)`,
+            `"${matched.itemName}" ສະຕັອກໃນລະບົບເຫຼືອ 0 — ເພີ່ມລົງບິນແລ້ວ (ກະລຸນາກວດສອບສິນຄ້າໜ້າຮ້ານ)`,
+            `"${matched.itemName}" has 0 stock recorded — added to bill (please verify physical shelf)`
+          ),
           'warn'
         );
       } else {
-        pushToast(`เพิ่ม "${matched.itemName}" ×${mult} ลงบิลขายแล้ว`, 'success');
+        pushToast(
+          pickApp(
+            `เพิ่ม "${matched.itemName}" ×${mult} ลงบิลขายแล้ว`,
+            `ເພີ່ມ "${matched.itemName}" ×${mult} ລົງບິນຂາຍແລ້ວ`,
+            `Added "${matched.itemName}" ×${mult} to bill`
+          ),
+          'success'
+        );
       }
     },
-    [bootstrap, pushToast]
+    [bootstrap, pickApp, pushToast]
   );
 
   const activeUser: StaffUserDto = useMemo(() => {
@@ -634,7 +730,7 @@ export const App: React.FC = () => {
         <div className="max-w-md w-full rounded-[8px] border border-hairline bg-canvas p-8 space-y-4 text-center">
           <AlertTriangle className="h-10 w-10 text-primary mx-auto" />
           <h1 className="font-google-display text-[24px] font-normal">
-            ไม่สามารถเชื่อมต่อฐานข้อมูลท้องถิ่นได้
+            {tNav('nav.bootErrorTitle')}
           </h1>
           <p className="text-sm text-ink-muted">{bootError}</p>
           <button
@@ -642,7 +738,7 @@ export const App: React.FC = () => {
             onClick={() => void refreshBootstrap()}
             className={`h-[50px] rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
           >
-            ลองเชื่อมต่อใหม่
+            {tNav('nav.retryConnect')}
           </button>
         </div>
       </div>
@@ -654,24 +750,26 @@ export const App: React.FC = () => {
       <div className="min-h-screen bg-canvas text-ink-muted flex items-center justify-center">
         <div className="flex items-center gap-3 font-google-display text-base">
           <RefreshCw className="h-5 w-5 animate-spin text-primary" />
-          กำลังโหลดระบบ RUBE-STOCK-POS v3.1...
+          {tNav('nav.loading')}
         </div>
       </div>
     );
   }
 
-  const activeFiscalConfig = bootstrap.fiscalConfig ?? DEFAULT_TH_FISCAL_CONFIG;
-  const activeUiLocale: LocaleCode = overrideLocale ?? activeFiscalConfig.uiLocale;
-
   const handleChangeUiLocale = async (nextLocale: LocaleCode) => {
+    setPosRequestLocale(nextLocale);
     setOverrideLocale(nextLocale);
     try {
       if (bootstrap.onboarded && !isTerminalLocked) {
+        preLoginLocaleDirtyRef.current = false;
         await posTransport.updateUiLocale({ uiLocale: nextLocale });
         await refreshBootstrap();
+        setOverrideLocale(undefined);
+      } else {
+        preLoginLocaleDirtyRef.current = true;
       }
     } catch {
-      // Keep local override active even if server session is locked
+      preLoginLocaleDirtyRef.current = true;
     }
   };
 
@@ -690,6 +788,7 @@ export const App: React.FC = () => {
           onCompleted={async (ownerUser) => {
             bootstrapSeqRef.current += 1;
             currentUserRef.current = ownerUser;
+            preLoginLocaleDirtyRef.current = false;
             setOverrideLocale(undefined);
             try {
               window.sessionStorage.setItem(ACTIVE_SESSION_USER_STORAGE_KEY, ownerUser.id);
@@ -730,7 +829,6 @@ export const App: React.FC = () => {
     !isTerminalLocked &&
     (activeUser.role === 'OWNER' || activeUser.role === 'MANAGER' || activeUser.role === 'WAREHOUSE');
   const isBackgroundInert = isTerminalLocked || pinModalOpen || hilDrawerOpen;
-  const tNav = (key: Parameters<typeof translateKey>[0]) => translateKey(key, activeUiLocale);
 
   const navItems: Array<{
     id: WorkspaceTabId;
@@ -790,7 +888,21 @@ export const App: React.FC = () => {
             className="bg-hero text-white px-4 lg:px-6 py-2.5 text-xs font-medium flex items-center justify-center gap-2 border-b border-hairline"
           >
             <AlertTriangle className="h-4 w-4 text-primary shrink-0" />
-            <span>{bootstrap.upsBanner.headlineThai}</span>
+            <span>
+              {bootstrap.upsBanner.severity === 'CRITICAL_LOW_BATTERY_LOCK'
+                ? pickApp(
+                    `วิกฤต: แบตเตอรี่ UPS เหลือ ${bootstrap.upsBanner.batteryChargePercent}% — ล็อกการบันทึกข้อมูลชั่วคราว (Read-Only) เพื่อป้องกันฐานข้อมูลเสียหาย`,
+                    `ວິກິດ: ແບັດເຕີຣີ UPS ເຫຼືອ ${bootstrap.upsBanner.batteryChargePercent}% — ລັອກການບັນທຶກຂໍ້ມູນຊົ່ວຄາວ (Read-Only) ເພື່ອປ້ອງກັນຖານຂໍ້ມູນເສຍຫາຍ`,
+                    `CRITICAL: UPS battery at ${bootstrap.upsBanner.batteryChargePercent}% — writes locked (Read-Only) to protect database integrity.`
+                  )
+                : bootstrap.upsBanner.severity === 'WARNING_ON_BATTERY'
+                  ? pickApp(
+                      `แจ้งเตือนไฟดับ: กำลังใช้ไฟสำรองจาก UPS (${bootstrap.upsBanner.batteryChargePercent}%) — บันทึก WAL Checkpoint ลงดิสก์เรียบร้อยแล้ว`,
+                      `ແຈ້ງເຕືອນໄຟດັບ: ກຳລັງໃຊ້ໄຟສຳຮອງຈາກ UPS (${bootstrap.upsBanner.batteryChargePercent}%) — ບັນທຶກ WAL Checkpoint ລົງດິສກ໌ຮຽບຮ້ອຍແລ້ວ`,
+                      `Power Alert: Running on UPS battery (${bootstrap.upsBanner.batteryChargePercent}%) — WAL checkpoint flushed to disk.`
+                    )
+                  : bootstrap.upsBanner.headlineThai}
+            </span>
           </div>
         )}
 
@@ -811,8 +923,8 @@ export const App: React.FC = () => {
                   RUBE POS
                 </div>
                 <div className="text-[11px] text-ink-muted leading-none">
-                  {getProfileMeta(bootstrap.profile).shortBadge} · {activeFiscalConfig.countryCode}{' '}
-                  {activeFiscalConfig.currencySymbol}
+                  {getProfileMeta(bootstrap.profile, activeUiLocale).shortBadge} ·{' '}
+                  {activeFiscalConfig.countryCode} {activeFiscalConfig.currencySymbol}
                 </div>
               </div>
             </button>
@@ -820,7 +932,7 @@ export const App: React.FC = () => {
             {/* Canonical `nav-link` Rail: 16px / 500 / 0.25px, 4px #1a73e8 active underline */}
             <nav
               className="hidden md:flex items-center gap-1 h-full overflow-x-auto"
-              aria-label="เมนูหลัก"
+              aria-label={tNav('nav.mainNavAria')}
             >
               {navItems
                 .filter((n) => !n.hidden)
@@ -856,7 +968,7 @@ export const App: React.FC = () => {
             <div className="hidden sm:flex h-10 items-center gap-1 rounded-[48px] border border-hairline bg-canvas pl-2.5 pr-2 text-xs text-ink">
               <Globe className="h-3.5 w-3.5 text-primary shrink-0" aria-hidden="true" />
               <select
-                aria-label="Language"
+                aria-label={tNav('nav.languageLabel')}
                 value={activeUiLocale}
                 onChange={(e) => void handleChangeUiLocale(e.target.value as LocaleCode)}
                 className="bg-transparent font-google-display text-xs font-medium text-ink focus:outline-none cursor-pointer"
@@ -872,7 +984,7 @@ export const App: React.FC = () => {
               <div className="hidden lg:flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas pl-3 pr-2 text-xs text-ink">
                 <Building2 className="h-3.5 w-3.5 text-primary shrink-0" />
                 <select
-                  aria-label="เลือกสาขาประจำเครื่อง"
+                  aria-label={tNav('nav.selectOutletAria')}
                   disabled={!canSwitchOutlet}
                   value={activeOutletId}
                   onChange={(e) => void handleSwitchOutlet(e.target.value)}
@@ -895,7 +1007,11 @@ export const App: React.FC = () => {
                     setActiveTab('SETTINGS');
                   } else {
                     pushToast(
-                      `เครื่องพิมพ์ค้างคิว ${bootstrap.printer.pendingQueueLength} ใบ — กรุณาตรวจสอบกระดาษความร้อนหรือฝาเครื่องพิมพ์`,
+                      pickApp(
+                        `เครื่องพิมพ์ค้างคิว ${bootstrap.printer.pendingQueueLength} ใบ — กรุณาตรวจสอบกระดาษความร้อนหรือฝาเครื่องพิมพ์`,
+                        `ເຄື່ອງພິມຄ້າງຄິວ ${bootstrap.printer.pendingQueueLength} ໃບ — ກະລຸນາກວດສອບເຈ້ຍຄວາມຮ້ອນ ຫຼື ຝາເຄື່ອງພິມ`,
+                        `Printer has ${bootstrap.printer.pendingQueueLength} queued receipt(s) — check paper roll or printer cover`
+                      ),
                       'warn'
                     );
                   }
@@ -904,7 +1020,7 @@ export const App: React.FC = () => {
               >
                 <Printer className="h-3.5 w-3.5 text-primary-dark shrink-0" />
                 <span className="tabular-nums-google">
-                  คิวพิมพ์ {bootstrap.printer.pendingQueueLength}
+                  {tNav('nav.printQueue')} {bootstrap.printer.pendingQueueLength}
                 </span>
               </button>
             )}
@@ -923,7 +1039,7 @@ export const App: React.FC = () => {
                   </strong>
                 ) : (
                   <span className="rounded-[48px] bg-surface-1 px-2 py-0.5 text-[11px] text-ink-muted">
-                    {pickLocaleText(activeUiLocale, 'กะเปิดอยู่', 'ກະເປີດຢູ່', 'Shift Open')}
+                    {tNav('nav.shiftOpenBadge')}
                   </span>
                 )}
               </button>
@@ -933,7 +1049,7 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setHilDrawerOpen(true)}
-                aria-label="เปิดแผงจำลองฮาร์ดแวร์ HIL Bench"
+                aria-label={tNav('nav.openHilAria')}
                 className={`flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 sm:px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 <Cpu className="h-3.5 w-3.5" />
@@ -946,14 +1062,18 @@ export const App: React.FC = () => {
               onClick={() => setPinModalOpen(true)}
               aria-label={
                 isTerminalLocked
-                  ? 'หน้าจอถูกล็อก กรุณาปลดล็อกด้วยรหัส PIN'
-                  : `สลับผู้ใช้งาน (ปัจจุบัน: ${activeUser.displayName} บทบาท ${activeUser.role})`
+                  ? tNav('nav.lockedAria')
+                  : pickApp(
+                      `สลับผู้ใช้งาน (ปัจจุบัน: ${activeUser.displayName} บทบาท ${activeUser.role})`,
+                      `ປ່ຽນພະນັກງານ (ປັດຈຸບັນ: ${activeUser.displayName} ບົດບາດ ${activeUser.role})`,
+                      `Switch staff user (Current: ${activeUser.displayName}, Role: ${activeUser.role})`
+                    )
               }
               className={`flex h-10 items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-3 sm:px-4 font-google-display text-xs font-medium text-ink hover:border-primary ${UI_INTERACTION.focusButton}`}
             >
               <UserCheck className="h-3.5 w-3.5 text-primary shrink-0" />
               <span className="max-w-[84px] sm:max-w-[120px] truncate">
-                {isTerminalLocked ? 'เครื่องถูกล็อก' : activeUser.displayName}
+                {isTerminalLocked ? tNav('nav.lockedTerminal') : activeUser.displayName}
               </span>
               <span className="hidden sm:inline rounded-[48px] bg-surface-1 px-2 py-0.5 text-[10px] font-medium text-primary-dark">
                 {isTerminalLocked ? 'LOCKED' : activeUser.role}
@@ -963,8 +1083,8 @@ export const App: React.FC = () => {
             <button
               type="button"
               onClick={handleLockTerminal}
-              title="ล็อกหน้าจอเครื่องจุดขายทันที"
-              aria-label="ล็อกหน้าจอเครื่องจุดขายทันที"
+              title={tNav('nav.lockTerminalTitle')}
+              aria-label={tNav('nav.lockTerminalTitle')}
               className={`flex h-10 w-10 items-center justify-center rounded-full border border-hairline bg-canvas text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
             >
               <Lock className="h-4 w-4" />
@@ -977,7 +1097,7 @@ export const App: React.FC = () => {
       <nav
         inert={isBackgroundInert ? true : undefined}
         className="md:hidden flex items-center gap-1 overflow-x-auto border-b border-hairline bg-canvas px-4"
-        aria-label="เมนูหลักมือถือ"
+        aria-label={tNav('nav.mobileNavAria')}
       >
         {navItems
           .filter((n) => !n.hidden)
@@ -1019,10 +1139,10 @@ export const App: React.FC = () => {
               </div>
               <div className="space-y-1.5">
                 <h1 className="font-google-display text-[22px] font-normal text-ink">
-                  หน้าจอเครื่องจุดขายถูกล็อกเพื่อความปลอดภัย
+                  {tNav('nav.lockedBannerTitle')}
                 </h1>
                 <p className="text-sm text-ink-muted">
-                  กรุณายืนยันรหัส PIN พนักงานเพื่อปลดล็อกและเข้าถึงข้อมูลหน้าร้าน
+                  {tNav('nav.lockedBannerHint')}
                 </p>
               </div>
             </div>
@@ -1100,6 +1220,10 @@ export const App: React.FC = () => {
                   currentUser={activeUser}
                   simulationModeEnabled={simulationModeEnabled}
                   onToggleSimulationMode={handleToggleSimulationMode}
+                  onClearLocaleOverride={() => {
+                    preLoginLocaleDirtyRef.current = false;
+                    setOverrideLocale(undefined);
+                  }}
                   onRefreshState={() => refreshBootstrap()}
                   onToast={pushToast}
                 />
@@ -1120,7 +1244,7 @@ export const App: React.FC = () => {
             <span>
               {activeFiscalConfig.countryCode === 'LA'
                 ? `LA · ${activeFiscalConfig.currencyCode} (${activeFiscalConfig.currencySymbol})`
-                : `สาขา ${bootstrap.storeSettings.outletCode} (${bootstrap.storeSettings.branchCode})`}
+                : `${tNav('nav.branchPrefix')} ${bootstrap.storeSettings.outletCode} (${bootstrap.storeSettings.branchCode})`}
             </span>
             <span>
               {activeFiscalConfig.countryCode === 'LA'
@@ -1179,7 +1303,7 @@ export const App: React.FC = () => {
       {/* Accessible Hairline Toast Notifications with distinct Icons + aria-live */}
       <div
         role="region"
-        aria-label="การแจ้งเตือนระบบ"
+        aria-label={tNav('toast.regionAria')}
         aria-live="polite"
         className="fixed bottom-5 left-4 right-4 sm:left-auto sm:right-5 z-50 flex flex-col gap-2 sm:max-w-md pointer-events-none"
       >
@@ -1207,8 +1331,12 @@ export const App: React.FC = () => {
                 <CheckCircle2 className="h-4 w-4 text-primary shrink-0 mt-0.5" aria-hidden="true" />
               )}
               <span className="leading-snug">
-                {t.tone === 'warn' && <strong className="font-medium mr-1">แจ้งเตือน:</strong>}
-                {t.tone === 'error' && <strong className="font-medium mr-1">ข้อผิดพลาด:</strong>}
+                {t.tone === 'warn' && (
+                  <strong className="font-medium mr-1">{tNav('toast.warnPrefix')}</strong>
+                )}
+                {t.tone === 'error' && (
+                  <strong className="font-medium mr-1">{tNav('toast.errorPrefix')}</strong>
+                )}
                 {t.message}
               </span>
             </div>

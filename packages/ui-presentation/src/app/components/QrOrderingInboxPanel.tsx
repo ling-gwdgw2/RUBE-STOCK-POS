@@ -107,7 +107,7 @@ export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
   onToast,
   serviceCalls = [],
 }) => {
-  const { dateTime, fiscal, pick } = useI18n();
+  const { dateTime, fiscal, locale, pick } = useI18n();
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
   const [acknowledgingCallId, setAcknowledgingCallId] = useState<string | null>(null);
   const [rejectTarget, setRejectTarget] = useState<GuestOrderRecordDto | null>(null);
@@ -695,7 +695,7 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
   onSessionsChanged,
   onToast,
 }) => {
-  const { dateTime, fiscal, pick } = useI18n();
+  const { dateTime, fiscal, locale, pick } = useI18n();
   const qrCfg = bootstrap.qrOrderingConfig ?? DEFAULT_QR_ORDERING_CONFIG;
   const paperWidthMm: 80 | 58 = bootstrap.printerConfig.paperWidthMm;
 
@@ -959,7 +959,8 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
       const result = await writeNfcPackageViaBrowserReader(
         nfcPkg,
         25_000,
-        controller.signal
+        controller.signal,
+        locale
       );
       if (!isMountedRef.current || controller.signal.aborted) return;
       onToast(

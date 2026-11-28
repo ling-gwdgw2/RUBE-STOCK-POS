@@ -7,6 +7,8 @@ import {
   MultiFormatReader,
   NotFoundException,
 } from '@zxing/library';
+import type { LocaleCode } from '../../../../shared-contracts/src/currency.ts';
+import { pickLocaleText } from '../i18n/translations.ts';
 
 interface NativeBarcodeDetector {
   detect(source: HTMLVideoElement | HTMLCanvasElement): Promise<Array<{ rawValue?: string }>>;
@@ -190,13 +192,26 @@ export function createVideoBarcodeScannerSession(): VideoBarcodeScannerSession {
 /**
  * Decodes a barcode or QR code from a user-selected image file completely offline.
  */
-export async function decodeBarcodeFromImageFile(file: File): Promise<string | null> {
+export async function decodeBarcodeFromImageFile(
+  file: File,
+  locale: LocaleCode = 'th'
+): Promise<string | null> {
   const objectUrl = URL.createObjectURL(file);
   try {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const el = new Image();
       el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error('ไม่สามารถเปิดไฟล์รูปภาพนี้ได้'));
+      el.onerror = () =>
+        reject(
+          new Error(
+            pickLocaleText(
+              locale,
+              'ไม่สามารถเปิดไฟล์รูปภาพนี้ได้',
+              'ບໍ່ສາມາດເປີດໄຟລ໌ຮູບພາບນີ້ໄດ້',
+              'Unable to open the selected image file.'
+            )
+          )
+        );
       el.src = objectUrl;
     });
 

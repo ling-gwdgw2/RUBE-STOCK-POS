@@ -6,7 +6,9 @@
  * Gracefully reports unsupported status on Windows Desktop / iOS Safari so staff can fall back to QR Bridge / CSV export.
  */
 
+import type { LocaleCode } from '../../../../shared-contracts/src/currency.ts';
 import type { NfcTableTagPackageDto } from '../../../../shared-contracts/src/qr-ordering.ts';
+import { pickLocaleText } from '../i18n/translations.ts';
 
 export interface WebNfcRecordInit {
   recordType: string;
@@ -102,21 +104,39 @@ export function buildWebNfcRecordsFromPackage(
 export async function writeNfcPackageViaBrowserReader(
   pkg: NfcTableTagPackageDto,
   timeoutMs = 25_000,
-  externalSignal?: AbortSignal
+  externalSignal?: AbortSignal,
+  locale: LocaleCode = 'th'
 ): Promise<{ recordsCount: number; ndefByteLength: number }> {
   const ReaderCtor = getNdefReaderCtor();
   if (!ReaderCtor) {
     throw new Error(
-      'เบราว์เซอร์นี้ไม่รองรับ Web NFC (NDEFReader) — แนะนำเปิด POS บน Android Chrome เพื่อเขียนแท็ก หรือใช้ปุ่มคัดลอกลิงก์ / QR ส่งเข้าแอป NFC Tools'
+      pickLocaleText(
+        locale,
+        'เบราว์เซอร์นี้ไม่รองรับ Web NFC (NDEFReader) — แนะนำเปิด POS บน Android Chrome เพื่อเขียนแท็ก หรือใช้ปุ่มคัดลอกลิงก์ / QR ส่งเข้าแอป NFC Tools',
+        'ບຣາວເຊີນີ້ບໍ່ຮອງຮັບ Web NFC (NDEFReader) — ແນະນຳໃຫ້ເປີດ POS ເທິງ Android Chrome ເພື່ອຂຽນແທັກ ຫຼື ໃຊ້ປຸ່ມຄັດລອກລິ້ງ / QR ສົ່ງເຂົ້າແອັບ NFC Tools',
+        'This browser does not support Web NFC (NDEFReader). Open POS in Android Chrome to write tags, or use Copy Link / Bridge QR for the NFC Tools app.'
+      )
     );
   }
   if (!pkg.fitsSelectedChip) {
     throw new Error(
-      `ข้อมูล NDEF (${pkg.ndefByteLength} Bytes) ใหญ่เกินความจุชิป ${pkg.chipType} (${pkg.chipCapacityBytes} Bytes)`
+      pickLocaleText(
+        locale,
+        `ข้อมูล NDEF (${pkg.ndefByteLength} Bytes) ใหญ่เกินความจุชิป ${pkg.chipType} (${pkg.chipCapacityBytes} Bytes)`,
+        `ຂໍ້ມູນ NDEF (${pkg.ndefByteLength} Bytes) ໃຫຍ່ເກີນຄວາມຈຸຊິບ ${pkg.chipType} (${pkg.chipCapacityBytes} Bytes)`,
+        `NDEF payload (${pkg.ndefByteLength} Bytes) exceeds ${pkg.chipType} capacity (${pkg.chipCapacityBytes} Bytes).`
+      )
     );
   }
   if (externalSignal?.aborted) {
-    throw new Error('ยกเลิกการเขียนแท็ก NFC แล้ว (NFC write cancelled)');
+    throw new Error(
+      pickLocaleText(
+        locale,
+        'ยกเลิกการเขียนแท็ก NFC แล้ว (NFC write cancelled)',
+        'ຍົກເລີກການຂຽນແທັກ NFC ແລ້ວ (NFC write cancelled)',
+        'NFC tag write cancelled'
+      )
+    );
   }
 
   const reader = new ReaderCtor();
@@ -161,14 +181,33 @@ export async function writeNfcPackageViaBrowserReader(
     if (timedOut) {
       const secs = Math.max(1, Math.round(safeTimeoutMs / 1000));
       throw new Error(
-        `หมดเวลาแตะแท็ก NFC (${secs} วินาที) — กรุณากดเขียนใหม่แล้วนำแท็กมาแตะด้านหลังเครื่องให้เร็วขึ้น`
+        pickLocaleText(
+          locale,
+          `หมดเวลาแตะแท็ก NFC (${secs} วินาที) — กรุณากดเขียนใหม่แล้วนำแท็กมาแตะด้านหลังเครื่องให้เร็วขึ้น`,
+          `ໝົດເວລາແຕະແທັກ NFC (${secs} ວິນາທີ) — ກະລຸນາກົດຂຽນໃໝ່ ແລ້ວນຳແທັກມາແຕະດ້ານຫຼັງເຄື່ອງໃຫ້ໄວຂຶ້ນ`,
+          `NFC tap timed out after ${secs}s. Press Write NFC again and hold the tag closer to your phone's NFC antenna.`
+        )
       );
     }
     if (externallyAborted || externalSignal?.aborted) {
-      throw new Error('ยกเลิกการเขียนแท็ก NFC แล้ว (NFC write cancelled)');
+      throw new Error(
+        pickLocaleText(
+          locale,
+          'ยกเลิกการเขียนแท็ก NFC แล้ว (NFC write cancelled)',
+          'ຍົກເລີກການຂຽນແທັກ NFC ແລ້ວ (NFC write cancelled)',
+          'NFC tag write cancelled'
+        )
+      );
     }
     if (errName === 'AbortError' || (err instanceof Error && err.message === '__NFC_ABORT__')) {
-      throw new Error('การเขียนแท็ก NFC ถูกยกเลิกกลางคัน (NFC write aborted)');
+      throw new Error(
+        pickLocaleText(
+          locale,
+          'การเขียนแท็ก NFC ถูกยกเลิกกลางคัน (NFC write aborted)',
+          'ການຂຽນແທັກ NFC ຖືກຍົກເລີກກາງຄັນ (NFC write aborted)',
+          'NFC tag write was aborted before completion'
+        )
+      );
     }
     throw err;
   } finally {

@@ -42,6 +42,30 @@ interface FirstRunWizardModalProps {
   onCancelPreview?: (() => Promise<void>) | undefined;
 }
 
+const DEFAULT_WIZARD_STORE_NAMES = new Set([
+  'ร้านค้าของฉัน (My Store)',
+  'ຮ້ານຄ້າຂອງຂ້ອຍ (My Lao Store)',
+  'My Store',
+]);
+const DEFAULT_WIZARD_OWNER_NAMES = new Set([
+  'เจ้าของร้าน (Owner)',
+  'ເຈົ້າຂອງຮ້ານ (Owner)',
+  'Store Owner',
+]);
+
+function defaultStoreNameForLocale(locale: LocaleCode, country: CountryCode): string {
+  return pickLocaleText(
+    locale,
+    country === 'LA' ? 'ร้านค้าของฉัน (สปป.ลาว)' : 'ร้านค้าของฉัน (My Store)',
+    'ຮ້ານຄ້າຂອງຂ້ອຍ (My Lao Store)',
+    'My Store'
+  );
+}
+
+function defaultOwnerNameForLocale(locale: LocaleCode): string {
+  return pickLocaleText(locale, 'เจ้าของร้าน (Owner)', 'ເຈົ້າຂອງຮ້ານ (Owner)', 'Store Owner');
+}
+
 export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
   open,
   isPreviewMode = false,
@@ -52,13 +76,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
 }) => {
   const uid = useId();
   const initialFiscal = initialStoreSettings?.fiscalConfig;
+  const initialUiLocale: LocaleCode = initialFiscal?.uiLocale ?? 'th';
+  const initialCountry: CountryCode = initialFiscal?.countryCode ?? 'TH';
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
-  const [countryCode, setCountryCode] = useState<CountryCode>(
-    initialFiscal?.countryCode ?? 'TH'
-  );
-  const [uiLocale, setUiLocale] = useState<LocaleCode>(
-    initialFiscal?.uiLocale ?? 'th'
-  );
+  const [countryCode, setCountryCode] = useState<CountryCode>(initialCountry);
+  const [uiLocale, setUiLocale] = useState<LocaleCode>(initialUiLocale);
   const [receiptLocale, setReceiptLocale] = useState<LocaleCode>(
     initialFiscal?.receiptLocale ?? 'th'
   );
@@ -75,7 +97,7 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
     initialStoreSettings?.businessProfile ?? 'HYBRID'
   );
   const [storeName, setStoreName] = useState(
-    initialStoreSettings?.storeName || 'ร้านค้าของฉัน (My Store)'
+    initialStoreSettings?.storeName || defaultStoreNameForLocale(initialUiLocale, initialCountry)
   );
   const [storeAddress, setStoreAddress] = useState(
     initialStoreSettings?.storeAddress || initialFiscal?.storeAddress || ''
@@ -105,7 +127,9 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
   const [loadDemoSampleCatalog, setLoadDemoSampleCatalog] = useState(false);
 
   // Step 2: Owner Account & Recovery Passphrase
-  const [ownerDisplayName, setOwnerDisplayName] = useState('เจ้าของร้าน (Owner)');
+  const [ownerDisplayName, setOwnerDisplayName] = useState(() =>
+    defaultOwnerNameForLocale(initialUiLocale)
+  );
   const [ownerUsername, setOwnerUsername] = useState('owner');
   const [ownerPin, setOwnerPin] = useState('');
   const [ownerPinConfirm, setOwnerPinConfirm] = useState('');
@@ -140,20 +164,21 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
   } | null>(null);
   const [downloadedKit, setDownloadedKit] = useState(false);
 
-  const pick = (thText: string, loText: string, enText?: string) =>
+  const pick = (thText: string, loText: string, enText: string) =>
     pickLocaleText(uiLocale, thText, loText, enText);
 
   const handleSelectCountry = (nextCountry: CountryCode) => {
     setCountryCode(nextCountry);
     setErrorMsg(null);
     if (nextCountry === 'LA') {
-      setUiLocale(DEFAULT_LA_FISCAL_CONFIG.uiLocale);
-      setReceiptLocale(DEFAULT_LA_FISCAL_CONFIG.receiptLocale);
+      const nextLoc = uiLocale === 'en' ? 'en' : DEFAULT_LA_FISCAL_CONFIG.uiLocale;
+      setUiLocale(nextLoc);
+      setReceiptLocale(nextLoc === 'en' ? 'en' : DEFAULT_LA_FISCAL_CONFIG.receiptLocale);
       setVatRateBps(DEFAULT_LA_FISCAL_CONFIG.vatRateBps);
       setDefaultTaxMode('INCLUSIVE');
       setCashRoundingStepMajor(500);
-      if (!storeName || storeName === 'ร้านค้าของฉัน (My Store)') {
-        setStoreName('ຮ້ານຄ້າຂອງຂ້ອຍ (My Lao Store)');
+      if (!storeName || DEFAULT_WIZARD_STORE_NAMES.has(storeName) || storeName === 'ร้านค้าของฉัน (สปป.ลาว)') {
+        setStoreName(defaultStoreNameForLocale(nextLoc, 'LA'));
       }
       if (!taxId || taxId === '0105566009999') {
         setTaxId('123456789012');
@@ -161,20 +186,21 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
       if (!rdPosRegNo || rdPosRegNo === 'RD-POS-0001') {
         setRdPosRegNo('LA-POS-0001');
       }
-      if (!ownerDisplayName || ownerDisplayName === 'เจ้าของร้าน (Owner)') {
-        setOwnerDisplayName('ເຈົ້າຂອງຮ້ານ (Owner)');
+      if (!ownerDisplayName || DEFAULT_WIZARD_OWNER_NAMES.has(ownerDisplayName)) {
+        setOwnerDisplayName(defaultOwnerNameForLocale(nextLoc));
       }
       if (openingCashBaht === '1000.00') {
         setOpeningCashBaht('500000');
       }
     } else {
-      setUiLocale(DEFAULT_TH_FISCAL_CONFIG.uiLocale);
-      setReceiptLocale(DEFAULT_TH_FISCAL_CONFIG.receiptLocale);
+      const nextLoc = uiLocale === 'en' ? 'en' : DEFAULT_TH_FISCAL_CONFIG.uiLocale;
+      setUiLocale(nextLoc);
+      setReceiptLocale(nextLoc === 'en' ? 'en' : DEFAULT_TH_FISCAL_CONFIG.receiptLocale);
       setVatRateBps(DEFAULT_TH_FISCAL_CONFIG.vatRateBps);
       setDefaultTaxMode('INCLUSIVE');
       setCashRoundingStepMajor(0);
-      if (!storeName || storeName === 'ຮ້ານຄ້າຂອງຂ້ອຍ (My Lao Store)') {
-        setStoreName('ร้านค้าของฉัน (My Store)');
+      if (!storeName || DEFAULT_WIZARD_STORE_NAMES.has(storeName) || storeName === 'ร้านค้าของฉัน (สปป.ลาว)') {
+        setStoreName(defaultStoreNameForLocale(nextLoc, 'TH'));
       }
       if (!taxId || taxId === '123456789012') {
         setTaxId('0105566009999');
@@ -182,8 +208,8 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
       if (!rdPosRegNo || rdPosRegNo === 'LA-POS-0001') {
         setRdPosRegNo('RD-POS-0001');
       }
-      if (!ownerDisplayName || ownerDisplayName === 'ເຈົ້າຂອງຮ້ານ (Owner)') {
-        setOwnerDisplayName('เจ้าของร้าน (Owner)');
+      if (!ownerDisplayName || DEFAULT_WIZARD_OWNER_NAMES.has(ownerDisplayName)) {
+        setOwnerDisplayName(defaultOwnerNameForLocale(nextLoc));
       }
       if (openingCashBaht === '500000') {
         setOpeningCashBaht('1000.00');
@@ -456,7 +482,7 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 onClick={() => void onCancelPreview()}
                 className={`rounded-[48px] border border-white/25 bg-white/10 px-4 py-1.5 font-google-display text-xs font-medium text-white hover:bg-white/20 ${UI_INTERACTION.focusButton}`}
               >
-                ยกเลิก / กลับสู่หน้าขาย
+                {pick('ยกเลิก / กลับสู่หน้าขาย', 'ຍົກເລີກ / ກັບໄປໜ້າຂາຍ', 'Cancel / Back to POS')}
               </button>
             )}
           </div>
@@ -533,6 +559,12 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                       onClick={() => {
                         setUiLocale(loc);
                         setReceiptLocale(loc);
+                        if (DEFAULT_WIZARD_STORE_NAMES.has(storeName) || storeName === 'ร้านค้าของฉัน (สปป.ลาว)') {
+                          setStoreName(defaultStoreNameForLocale(loc, countryCode));
+                        }
+                        if (DEFAULT_WIZARD_OWNER_NAMES.has(ownerDisplayName)) {
+                          setOwnerDisplayName(defaultOwnerNameForLocale(loc));
+                        }
                       }}
                       className={`h-8 rounded-[48px] border px-3 font-google-display font-medium ${UI_INTERACTION.focusButton} ${
                         uiLocale === loc
@@ -557,10 +589,14 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                   }`}
                 >
                   <div className="font-google-display text-base font-medium text-ink">
-                    ประเทศไทย · THB (฿)
+                    {pick('ประเทศไทย · THB (฿)', 'ປະເທດໄທ · THB (฿)', 'Thailand · THB (฿)')}
                   </div>
                   <div className="text-xs text-ink-muted mt-1">
-                    VAT 7% · ใบกำกับภาษี ABB · PromptPay QR &amp; BOT Slip
+                    {pick(
+                      'VAT 7% · ใบกำกับภาษี ABB · PromptPay QR & BOT Slip',
+                      'VAT 7% · ໃບກຳກັບພາສີ ABB · PromptPay QR & BOT Slip',
+                      'VAT 7% · ABB Tax Receipt · PromptPay QR & BOT Slip'
+                    )}
                   </div>
                 </button>
                 <button
@@ -573,10 +609,14 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                   }`}
                 >
                   <div className="font-google-display text-base font-medium text-ink">
-                    ສປປ.ລາວ (สปป.ลาว) · LAK (₭)
+                    {pick('ສປປ.ລາວ (สปป.ลาว) · LAK (₭)', 'ສປປ.ລາວ (Lao PDR) · LAK (₭)', 'Lao PDR · LAK (₭)')}
                   </div>
                   <div className="text-xs text-ink-muted mt-1">
-                    ອມພ / VAT 10% (ຫຼື 0%) · LAOQR / BCEL OnePay · ພາສາລາວ + ປັດເສດເງິນສົດ
+                    {pick(
+                      'อพ./VAT 10% (หรือ 0%) · LAOQR / BCEL OnePay · ปัดเศษเงินสด 500 ₭',
+                      'ອມພ / VAT 10% (ຫຼື 0%) · LAOQR / BCEL OnePay · ພາສາລາວ + ປັດເສດເງິນສົດ',
+                      'VAT 10% (or 0%) · LAOQR / BCEL OnePay · LAK Cash Rounding'
+                    )}
                   </div>
                 </button>
               </div>
@@ -663,7 +703,7 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 <label htmlFor={`${uid}-tax-id`} className="block text-xs font-medium text-ink-muted mb-1">
                   {countryCode === 'LA'
                     ? pick('เลขประจำตัวผู้เสียภาษี (TIN 12 หลัก / ไม่บังคับหากยกเว้น)', 'ເລກປະຈຳຕົວຜູ້ເສຍອາກອນ (TIN 12 ຫຼັກ)', 'Lao Tax ID (TIN)')
-                    : 'เลขประจำตัวผู้เสียภาษี 13 หลัก'}
+                    : pick('เลขประจำตัวผู้เสียภาษี 13 หลัก', 'ເລກປະຈຳຕົວຜູ້ເສຍອາກອນ 13 ຫຼັກ', 'Thai Tax ID (13 digits)')}
                 </label>
                 <input
                   id={`${uid}-tax-id`}
@@ -677,7 +717,7 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 <label htmlFor={`${uid}-rd-reg`} className="block text-xs font-medium text-ink-muted mb-1">
                   {countryCode === 'LA'
                     ? pick('เลขทะเบียนเครื่อง POS / TaxRIS', 'ເລກທະບຽນເຄື່ອງ POS / TaxRIS', 'POS / TaxRIS Terminal No.')
-                    : 'เลขทะเบียนเครื่อง POS กรมสรรพากร'}
+                    : pick('เลขทะเบียนเครื่อง POS กรมสรรพากร', 'ເລກທະບຽນເຄື່ອງ POS', 'POS Terminal Registration No.')}
                 </label>
                 <input
                   id={`${uid}-rd-reg`}
@@ -692,7 +732,7 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 <>
                   <div>
                     <label htmlFor={`${uid}-branch-code`} className="block text-xs font-medium text-ink-muted mb-1">
-                      รหัสสาขา (00000 = สำนักงานใหญ่)
+                      {pick('รหัสสาขา (00000 = สำนักงานใหญ่)', 'ລະຫັດສາຂາ (00000 = ສຳນັກງານໃຫຍ່)', 'Branch Code (00000 = HQ)')}
                     </label>
                     <input
                       id={`${uid}-branch-code`}
@@ -704,7 +744,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                   </div>
                   <div>
                     <label htmlFor={`${uid}-promptpay`} className="block text-xs font-medium text-primary-hover mb-1">
-                      เบอร์มือถือ / เลขนิติบุคคลรับเงิน PromptPay QR
+                      {pick(
+                        'เบอร์มือถือ / เลขนิติบุคคลรับเงิน PromptPay QR',
+                        'ເບີໂທ / ເລກນິຕິບຸກຄົນຮັບເງິນ PromptPay QR',
+                        'PromptPay QR Mobile / Tax ID'
+                      )}
                     </label>
                     <input
                       id={`${uid}-promptpay`}
@@ -917,7 +961,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                     <div className="text-xs text-ink-muted">
                       {countryCode === 'LA'
                         ? pick('สร้างตัวอย่างกาแฟลาว 35,000 ₭, เบียร์ลาว, หมูสามชั้นชั่งกิโล', 'ສ້າງຕົວຢ່າງ ກາເຟເຢັນລາວ 35,000 ₭, ເບຍລາວ, ຊີ້ນໝູຊັ່ງກິໂລ', 'Creates Lao coffee 35,000 ₭, Beerlao & weighted pork')
-                        : 'สร้างเมนูชานมไข่มุก น้ำดื่ม และหมูสามชั้นชั่งกิโลสำหรับทดสอบ'}
+                        : pick(
+                            'สร้างเมนูชานมไข่มุก น้ำดื่ม และหมูสามชั้นชั่งกิโลสำหรับทดสอบ',
+                            'ສ້າງເມນູຊານົມໄຂ່ມຸກ, ນ້ຳດື່ມ ແລະ ຊີ້ນໝູຊັ່ງກິໂລສຳລັບທົດສອບ',
+                            'Creates boba tea, bottled water & weighted pork demo items'
+                          )}
                     </div>
                   </div>
                 </label>
@@ -941,14 +989,18 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
             <div className="flex items-center gap-2.5">
               <KeyRound className="h-5 w-5 text-primary shrink-0" />
               <h2 className="font-google-display text-[22px] sm:text-[24px] font-normal text-ink">
-                ตั้งรหัส PIN เจ้าของร้าน &amp; รหัสวลีกู้คืนฉุกเฉิน
+                {pick(
+                  'ตั้งรหัส PIN เจ้าของร้าน & รหัสวลีกู้คืนฉุกเฉิน',
+                  'ຕັ້ງລະຫັດ PIN ເຈົ້າຂອງຮ້ານ & ລະຫັດກູ້ຄືນສຸກເສີນ',
+                  'Owner PIN & Emergency Recovery Passphrase'
+                )}
               </h2>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
               <div>
                 <label htmlFor={`${uid}-owner-display`} className="block text-xs font-medium text-ink-muted mb-1">
-                  ชื่อที่แสดงของเจ้าของร้าน
+                  {pick('ชื่อที่แสดงของเจ้าของร้าน', 'ຊື່ທີ່ສະແດງຂອງເຈົ້າຂອງຮ້ານ', 'Owner Display Name')}
                 </label>
                 <input
                   id={`${uid}-owner-display`}
@@ -960,7 +1012,7 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
               </div>
               <div>
                 <label htmlFor={`${uid}-owner-user`} className="block text-xs font-medium text-ink-muted mb-1">
-                  ชื่อบัญชี (Username)
+                  {pick('ชื่อบัญชี (Username)', 'ຊື່ບັນຊີ (Username)', 'Username')}
                 </label>
                 <input
                   id={`${uid}-owner-user`}
@@ -972,14 +1024,14 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
               </div>
               <div>
                 <label htmlFor={`${uid}-owner-pin`} className="block text-xs font-medium text-primary-hover mb-1">
-                  ตั้งรหัส PIN เจ้าของร้าน (ตัวเลข 4–8 หลัก)
+                  {pick('ตั้งรหัส PIN เจ้าของร้าน (ตัวเลข 4–8 หลัก)', 'ຕັ້ງລະຫັດ PIN ເຈົ້າຂອງຮ້ານ (4–8 ຫຼັກ)', 'Set Owner PIN (4–8 digits)')}
                 </label>
                 <input
                   id={`${uid}-owner-pin`}
                   type="password"
                   inputMode="numeric"
                   maxLength={8}
-                  placeholder="เช่น 258099"
+                  placeholder={pick('เช่น 258099', 'ເຊັ່ນ 258099', 'e.g. 258099')}
                   value={ownerPin}
                   onChange={(e) => setOwnerPin(sanitizePinInput(e.target.value))}
                   className={`h-12 w-full rounded-[4px] border border-hairline px-4 text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
@@ -987,14 +1039,14 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
               </div>
               <div>
                 <label htmlFor={`${uid}-owner-pin-confirm`} className="block text-xs font-medium text-primary-hover mb-1">
-                  ยืนยันรหัส PIN อีกครั้ง
+                  {pick('ยืนยันรหัส PIN อีกครั้ง', 'ຢືນຢັນລະຫັດ PIN ອີກຄັ້ງ', 'Confirm Owner PIN')}
                 </label>
                 <input
                   id={`${uid}-owner-pin-confirm`}
                   type="password"
                   inputMode="numeric"
                   maxLength={8}
-                  placeholder="พิมพ์รหัส PIN ซ้ำอีกครั้ง"
+                  placeholder={pick('พิมพ์รหัส PIN ซ้ำอีกครั้ง', 'ພິມລະຫັດ PIN ຊ້ຳອີກຄັ້ງ', 'Re-enter PIN')}
                   value={ownerPinConfirm}
                   onChange={(e) => setOwnerPinConfirm(sanitizePinInput(e.target.value))}
                   className={`h-12 w-full rounded-[4px] border border-hairline px-4 text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
@@ -1002,7 +1054,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
               </div>
               <div className="sm:col-span-2">
                 <label htmlFor={`${uid}-recovery-phrase`} className="block text-xs font-medium text-ink-muted mb-1">
-                  รหัสวลีกู้คืนฐานข้อมูลข้ามเครื่อง (Owner Recovery Passphrase — อย่างน้อย 12 ตัวอักษร)
+                  {pick(
+                    'รหัสวลีกู้คืนฐานข้อมูลข้ามเครื่อง (Owner Recovery Passphrase — อย่างน้อย 12 ตัวอักษร)',
+                    'ລະຫັດກູ້ຄືນຖານຂໍ້ມູນຂ້າມເຄື່ອງ (Owner Recovery Passphrase — ຢ່າງໜ້ອຍ 12 ຕົວອັກສອນ)',
+                    'Owner Recovery Passphrase (min 12 characters)'
+                  )}
                 </label>
                 <input
                   id={`${uid}-recovery-phrase`}
@@ -1012,7 +1068,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                   className={`h-12 w-full rounded-[4px] border border-hairline px-4 text-ink ${UI_INTERACTION.focusControl}`}
                 />
                 <p className="text-xs text-ink-muted mt-1">
-                  ใช้สำหรับถอดรหัสไฟล์สำรองและย้ายฐานข้อมูลกรณีเมนบอร์ดเครื่องเดิมเสีย
+                  {pick(
+                    'ใช้สำหรับถอดรหัสไฟล์สำรองและย้ายฐานข้อมูลกรณีเมนบอร์ดเครื่องเดิมเสีย',
+                    'ໃຊ້ສຳລັບຖອດລະຫັດໄຟລ໌ສຳຮອງ ແລະ ຍ້າຍຖານຂໍ້ມູນກໍລະນີເມນບອດເຄື່ອງເດີມເສຍ',
+                    'Used to decrypt backup files and migrate the database if hardware fails'
+                  )}
                 </p>
               </div>
             </div>
@@ -1023,14 +1083,14 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 onClick={() => setStep(1)}
                 className={`h-[50px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-sm font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
-                ย้อนกลับ
+                {pick('ย้อนกลับ', 'ກັບຄືນ', 'Back')}
               </button>
               <button
                 type="button"
                 onClick={handleStep2Next}
                 className={`h-[50px] rounded-[48px] bg-primary px-8 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                ถัดไป: ตั้งค่าเครื่องพิมพ์ใบเสร็จ
+                {pick('ถัดไป: ตั้งค่าเครื่องพิมพ์ใบเสร็จ', 'ຕໍ່ໄປ: ຕັ້ງຄ່າເຄື່ອງພິມໃບບິນ', 'Next: Thermal Printer')}
               </button>
             </div>
           </div>
@@ -1041,7 +1101,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
             <div className="flex items-center gap-2.5">
               <Printer className="h-5 w-5 text-primary shrink-0" />
               <h2 className="font-google-display text-[22px] sm:text-[24px] font-normal text-ink">
-                เชื่อมต่อเครื่องพิมพ์ใบเสร็จความร้อน &amp; เงินทอนเปิดกะแรก
+                {pick(
+                  'เชื่อมต่อเครื่องพิมพ์ใบเสร็จความร้อน & เงินทอนเปิดกะแรก',
+                  'ເຊື່ອມຕໍ່ເຄື່ອງພິມໃບບິນຄວາມຮ້ອນ & ເງິນທອນເປີດກະທຳອິດ',
+                  'Thermal Receipt Printer & Initial Cash Float'
+                )}
               </h2>
             </div>
 
@@ -1049,23 +1113,43 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
               {[
                 {
                   id: 'WINDOWS_RAW_USB' as const,
-                  title: 'สาย USB (Windows Raw Spooler)',
-                  sub: 'ส่งชุดคำสั่ง ESC/POS + เตะลิ้นชัก RJ11 ผ่านไดรเวอร์ USB โดยตรง',
+                  title: pick('สาย USB (Windows Raw Spooler)', 'ສາຍ USB (Windows Raw Spooler)', 'USB Raw Spooler (Windows)'),
+                  sub: pick(
+                    'ส่งชุดคำสั่ง ESC/POS + เตะลิ้นชัก RJ11 ผ่านไดรเวอร์ USB โดยตรง',
+                    'ສົ່ງຄຳສັ່ງ ESC/POS + ເປີດລິ້ນຊັກ RJ11 ຜ່ານໄດຣເວີ USB ໂດຍກົງ',
+                    'Send ESC/POS + RJ11 drawer kick directly over USB driver'
+                  ),
                 },
                 {
                   id: 'LAN_TCP_9100' as const,
-                  title: 'สายแลน LAN (TCP Port 9100)',
-                  sub: 'ส่งตรงไปยัง IP ของเครื่องพิมพ์ความร้อนในวงแลน',
+                  title: pick('สายแลน LAN (TCP Port 9100)', 'ສາຍແລນ LAN (TCP Port 9100)', 'LAN / Ethernet (TCP 9100)'),
+                  sub: pick(
+                    'ส่งตรงไปยัง IP ของเครื่องพิมพ์ความร้อนในวงแลน',
+                    'ສົ່ງກົງໄປຍັງ IP ຂອງເຄື່ອງພິມຄວາມຮ້ອນໃນວົງແລນ',
+                    'Send directly to network thermal printer IP address'
+                  ),
                 },
                 {
                   id: 'BROWSER_PRINT_DIALOG' as const,
                   title: 'Windows Print Dialog (@media print)',
-                  sub: 'พิมพ์ผ่านหน้าต่างพรินเตอร์มาตรฐานของ Windows',
+                  sub: pick(
+                    'พิมพ์ผ่านหน้าต่างพรินเตอร์มาตรฐานของ Windows',
+                    'ພິມຜ່ານໜ້າຕ່າງປຣິນເຕີມາດຕະຖານຂອງ Windows',
+                    'Print via standard Windows system print dialog'
+                  ),
                 },
                 {
                   id: 'SIMULATED_MEMORY' as const,
-                  title: 'โหมดจำลองบนหน้าจอ (ยังไม่มีเครื่องพิมพ์)',
-                  sub: 'แสดงตัวอย่างใบเสร็จบนหน้าจอโดยไม่ส่งออกพอร์ต',
+                  title: pick(
+                    'โหมดจำลองบนหน้าจอ (ยังไม่มีเครื่องพิมพ์)',
+                    'ໂໝດຈຳລອງເທິງໜ້າຈໍ (ຍັງບໍ່ມີເຄື່ອງພິມ)',
+                    'On-Screen Simulator (No Printer Connected)'
+                  ),
+                  sub: pick(
+                    'แสดงตัวอย่างใบเสร็จบนหน้าจอโดยไม่ส่งออกพอร์ต',
+                    'ສະແດງຕົວຢ່າງໃບບິນເທິງໜ້າຈໍໂດຍບໍ່ສົ່ງອອກພອດ',
+                    'Preview receipts on screen without hardware port output'
+                  ),
                 },
               ].map((m) => (
                 <button
@@ -1089,7 +1173,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
             {printerMode === 'WINDOWS_RAW_USB' && (
               <div>
                 <label htmlFor={`${uid}-wiz-winprn`} className="block text-xs font-medium text-ink-muted mb-1">
-                  เลือกชื่อเครื่องพิมพ์ใบเสร็จใน Windows
+                  {pick(
+                    'เลือกชื่อเครื่องพิมพ์ใบเสร็จใน Windows',
+                    'ເລືອກຊື່ເຄື່ອງພິມໃບບິນໃນ Windows',
+                    'Select Windows Receipt Printer'
+                  )}
                 </label>
                 {discoveredPrinters.length > 0 ? (
                   <select
@@ -1108,7 +1196,11 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                   <input
                     id={`${uid}-wiz-winprn`}
                     type="text"
-                    placeholder="เช่น XP-80C หรือ EPSON TM-T82 Receipt"
+                    placeholder={pick(
+                      'เช่น XP-80C หรือ EPSON TM-T82 Receipt',
+                      'ເຊັ່ນ XP-80C ຫຼື EPSON TM-T82 Receipt',
+                      'e.g. XP-80C or EPSON TM-T82 Receipt'
+                    )}
                     value={windowsPrinterName}
                     onChange={(e) => setWindowsPrinterName(e.target.value)}
                     className={`h-12 w-full rounded-[4px] border border-hairline px-4 text-sm text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
@@ -1121,7 +1213,7 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="sm:col-span-2">
                   <label htmlFor={`${uid}-wiz-tcphost`} className="block text-xs font-medium text-ink-muted mb-1">
-                    IP Address เครื่องพิมพ์
+                    {pick('IP Address เครื่องพิมพ์', 'IP Address ເຄື່ອງພິມ', 'Printer IP Address')}
                   </label>
                   <input
                     id={`${uid}-wiz-tcphost`}
@@ -1149,7 +1241,7 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label htmlFor={`${uid}-wiz-width`} className="block text-xs font-medium text-ink-muted mb-1">
-                  ขนาดหน้ากว้างกระดาษความร้อน
+                  {pick('ขนาดหน้ากว้างกระดาษความร้อน', 'ຂະໜາດໜ້າກວ້າງກະດາດຄວາມຮ້ອນ', 'Thermal Paper Width')}
                 </label>
                 <select
                   id={`${uid}-wiz-width`}
@@ -1157,15 +1249,27 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                   onChange={(e) => setPaperWidthMm(Number(e.target.value) === 58 ? 58 : 80)}
                   className={`h-12 w-full rounded-[4px] border border-hairline bg-canvas px-4 text-sm text-ink ${UI_INTERACTION.focusSelect}`}
                 >
-                  <option value={80}>80 มม. มาตรฐานเคาน์เตอร์ (576 dots @ 203-DPI)</option>
-                  <option value={58}>58 มม. เครื่องขนาดกะทัดรัด (384 dots @ 203-DPI)</option>
+                  <option value={80}>
+                    {pick(
+                      '80 มม. มาตรฐานเคาน์เตอร์ (576 dots @ 203-DPI)',
+                      '80 ມມ. ມາດຕະຖານເຄົາເຕີ (576 dots @ 203-DPI)',
+                      '80mm Standard Counter (576 dots @ 203-DPI)'
+                    )}
+                  </option>
+                  <option value={58}>
+                    {pick(
+                      '58 มม. เครื่องขนาดกะทัดรัด (384 dots @ 203-DPI)',
+                      '58 ມມ. ເຄື່ອງຂະໜາດກະທັດຮັດ (384 dots @ 203-DPI)',
+                      '58mm Compact Thermal (384 dots @ 203-DPI)'
+                    )}
+                  </option>
                 </select>
               </div>
               <div>
                 <label htmlFor={`${uid}-wiz-open-cash`} className="block text-xs font-medium text-ink-muted mb-1">
                   {countryCode === 'LA'
                     ? pick('เงินสดทอนตั้งต้นในลิ้นชักกะแรก (กีบ ₭)', 'ເງິນສົດທອນຕັ້ງຕົ້ນໃນລິ້ນຊັກກະທຳອິດ (ກີບ ₭)', 'Initial Opening Cash Float (LAK ₭)')
-                    : 'เงินสดทอนตั้งต้นในลิ้นชักกะแรก (บาท)'}
+                    : pick('เงินสดทอนตั้งต้นในลิ้นชักกะแรก (บาท)', 'ເງິນສົດທອນຕັ້ງຕົ້ນໃນລິ້ນຊັກກະທຳອິດ (ບາດ)', 'Initial Opening Cash Float (THB ฿)')}
                 </label>
                 <input
                   id={`${uid}-wiz-open-cash`}
@@ -1183,7 +1287,7 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 onClick={() => setStep(2)}
                 className={`h-[50px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-sm font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
-                ย้อนกลับ
+                {pick('ย้อนกลับ', 'ກັບຄືນ', 'Back')}
               </button>
               <button
                 type="button"
@@ -1191,7 +1295,17 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 onClick={() => void handleCompleteSetup()}
                 className={`h-[50px] rounded-[48px] bg-primary px-8 font-google-display text-[15px] sm:text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                {submitting ? 'กำลังสร้างฐานข้อมูล & กุญแจนิรภัย...' : 'ยืนยันตั้งค่าร้าน & สร้าง Recovery Kit'}
+                {submitting
+                  ? pick(
+                      'กำลังสร้างฐานข้อมูล & กุญแจนิรภัย...',
+                      'ກຳລັງສ້າງຖານຂໍ້ມູນ & ກະແຈນິລະໄພ...',
+                      'Initializing Database & Security Keys...'
+                    )
+                  : pick(
+                      'ยืนยันตั้งค่าร้าน & สร้าง Recovery Kit',
+                      'ຢືນຢັນຕັ້ງຄ່າຮ້ານ & ສ້າງ Recovery Kit',
+                      'Finish Setup & Generate Recovery Kit'
+                    )}
               </button>
             </div>
           </div>
@@ -1203,11 +1317,21 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
               <div className="flex items-center gap-2.5 text-primary-dark">
                 <CheckCircle2 className="h-6 w-6 shrink-0" />
                 <h2 className="font-google-display text-[22px] font-normal text-ink">
-                  ตั้งค่าระบบและสร้างกุญแจ Dual-KEK สำเร็จแล้ว
+                  {pick(
+                    'ตั้งค่าระบบและสร้างกุญแจ Dual-KEK สำเร็จแล้ว',
+                    'ຕັ້ງຄ່າລະບົບ ແລະ ສ້າງກະແຈ Dual-KEK ສຳເລັດແລ້ວ',
+                    'System Configured & Dual-KEK Keys Generated'
+                  )}
                 </h2>
               </div>
               <p className="text-sm text-ink-soft">
-                กรุณากดดาวน์โหลดไฟล์ <strong>{completedData.recoveryKitFilename}</strong> เก็บไว้ในแฟลชไดรฟ์ของเจ้าของร้าน ก่อนเข้าสู่หน้าจอขายจริง
+                {pick('กรุณากดดาวน์โหลดไฟล์ ', 'ກະລຸນາກົດດາວໂຫຼດໄຟລ໌ ', 'Please download ')}
+                <strong>{completedData.recoveryKitFilename}</strong>
+                {pick(
+                  ' เก็บไว้ในแฟลชไดรฟ์ของเจ้าของร้าน ก่อนเข้าสู่หน้าจอขายจริง',
+                  ' ເກັບໄວ້ໃນແຟລຊໄດຣຟ໌ຂອງເຈົ້າຂອງຮ້ານ ກ່ອນເຂົ້າສູ່ໜ້າຈໍຂາຍຈິງ',
+                  ' onto the owner USB drive before launching live POS mode.'
+                )}
               </p>
 
               <button
@@ -1216,14 +1340,22 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 className={`inline-flex h-[50px] items-center gap-2 rounded-[48px] bg-canvas border border-hairline px-6 font-google-display text-sm font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 <Download className="h-4 w-4" />
-                ดาวน์โหลดไฟล์กู้คืนฉุกเฉิน (.recovery-kit)
+                {pick(
+                  'ดาวน์โหลดไฟล์กู้คืนฉุกเฉิน (.recovery-kit)',
+                  'ດາວໂຫຼດໄຟລ໌ກູ້ຄືນສຸກເສີນ (.recovery-kit)',
+                  'Download Emergency Recovery Kit (.recovery-kit)'
+                )}
               </button>
             </div>
 
             <div className="rounded-[4px] border border-hairline p-4 text-xs text-ink-muted flex items-center gap-2">
               <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
               <span>
-                ไฟล์ <code>keystore.manifest.json</code> ถูกบันทึกแบบ Atomic (<code>.part + fsync</code>) เรียบร้อยแล้ว
+                {pick('ไฟล์ ', 'ໄຟລ໌ ', 'File ')}
+                <code>keystore.manifest.json</code>
+                {pick(' ถูกบันทึกแบบ Atomic (', ' ຖືກບັນທຶກແບບ Atomic (', ' saved atomically (')}
+                <code>.part + fsync</code>
+                {pick(') เรียบร้อยแล้ว', ') ຮຽບຮ້ອຍແລ້ວ', ') successfully.')}
               </span>
             </div>
 
@@ -1234,7 +1366,9 @@ export const FirstRunWizardModal: React.FC<FirstRunWizardModalProps> = ({
                 className={`flex h-[50px] items-center gap-2 rounded-[48px] bg-primary px-8 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
                 <Building2 className="h-4 w-4" />
-                {downloadedKit ? 'เข้าสู่หน้าขายจริงทันที' : 'รับทราบและเข้าสู่หน้าขายจริง'}
+                {downloadedKit
+                  ? pick('เข้าสู่หน้าขายจริงทันที', 'ເຂົ້າສູ່ໜ້າຂາຍຈິງທັນທີ', 'Enter Live POS Now')
+                  : pick('รับทราบและเข้าสู่หน้าขายจริง', 'ຮັບຊາບ ແລະ ເຂົ້າສູ່ໜ້າຂາຍຈິງ', 'Acknowledge & Enter Live POS')}
               </button>
             </div>
           </div>

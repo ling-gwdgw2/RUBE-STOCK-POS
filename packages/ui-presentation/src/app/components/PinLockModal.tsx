@@ -16,12 +16,39 @@ interface PinLockModalProps {
   onClose: () => void;
 }
 
-const DEMO_PIN_HINTS: ReadonlyArray<{ label: string; userId: string; pin: string; badge: string }> =
-  [
-    { label: 'แคชเชียร์กะเช้า', userId: 'USR-CASHIER-01', pin: '111111', badge: 'PIN 111111' },
-    { label: 'หัวหน้าคลังสินค้า', userId: 'USR-WH-01', pin: '222222', badge: 'PIN 222222' },
-    { label: 'เจ้าของร้าน (Owner)', userId: 'USR-OWNER-01', pin: '999999', badge: 'PIN 999999' },
-  ];
+const DEMO_PIN_HINTS: ReadonlyArray<{
+  labelTh: string;
+  labelLo: string;
+  labelEn: string;
+  userId: string;
+  pin: string;
+  badge: string;
+}> = [
+  {
+    labelTh: 'แคชเชียร์กะเช้า',
+    labelLo: 'ແຄັດເຊຍກະເຊົ້າ',
+    labelEn: 'Morning Cashier',
+    userId: 'USR-CASHIER-01',
+    pin: '111111',
+    badge: 'PIN 111111',
+  },
+  {
+    labelTh: 'หัวหน้าคลังสินค้า',
+    labelLo: 'ຫົວໜ້າສາງສິນຄ້າ',
+    labelEn: 'Warehouse Lead',
+    userId: 'USR-WH-01',
+    pin: '222222',
+    badge: 'PIN 222222',
+  },
+  {
+    labelTh: 'เจ้าของร้าน (Owner)',
+    labelLo: 'ເຈົ້າຂອງຮ້ານ (Owner)',
+    labelEn: 'Store Owner',
+    userId: 'USR-OWNER-01',
+    pin: '999999',
+    badge: 'PIN 999999',
+  },
+];
 
 export const PinLockModal: React.FC<PinLockModalProps> = ({
   open,
@@ -77,7 +104,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
         setSubmitting(false);
       }
     },
-    [onAuthenticated, pin, selectedUserId]
+    [onAuthenticated, pin, selectedUserId, t]
   );
 
   useEffect(() => {
@@ -148,7 +175,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
         {canDismiss && (
           <button
             type="button"
-            aria-label="ปิดหน้าต่างยืนยันตัวตน"
+            aria-label={pick('ปิดหน้าต่างยืนยันตัวตน', 'ປິດໜ້າຕ່າງຢືນຢັນຕົວຕົນ', 'Close authentication dialog')}
             onClick={onClose}
             className={`flex h-10 w-10 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
           >
@@ -163,7 +190,11 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
             htmlFor={`${uid}-staff-select`}
             className="block text-xs font-medium text-ink-muted mb-1.5"
           >
-            เลือกบัญชีผู้ใช้งาน (หรือกดรหัส PIN โดยตรง)
+            {pick(
+              'เลือกบัญชีผู้ใช้งาน (หรือกดรหัส PIN โดยตรง)',
+              'ເລືອກບັນຊີຜູ້ໃຊ້ງານ (ຫຼື ກົດລະຫັດ PIN ໂດຍກົງ)',
+              'Select staff account (or enter PIN directly)'
+            )}
           </label>
           <select
             id={`${uid}-staff-select`}
@@ -174,7 +205,9 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
             }}
             className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-sm text-ink ${UI_INTERACTION.focusSelect}`}
           >
-            <option value="">ค้นหาอัตโนมัติจากรหัส PIN</option>
+            <option value="">
+              {pick('ค้นหาอัตโนมัติจากรหัส PIN', 'ຄົ້ນຫາອັດຕະໂນມັດຈາກລະຫັດ PIN', 'Auto-detect from PIN')}
+            </option>
             {staffUsers
               .filter((u) => u.active)
               .map((u) => (
@@ -189,7 +222,11 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
         <div className="rounded-[4px] border border-hairline bg-surface-1 px-4 py-3.5 text-center">
           <div
             className="flex items-center justify-center gap-2.5 min-h-[24px]"
-            aria-label={`กรอกแล้ว ${pin.length} หลัก`}
+            aria-label={pick(
+              `กรอกแล้ว ${pin.length} หลัก`,
+              `ປ້ອນແລ້ວ ${pin.length} ຫຼັກ`,
+              `${pin.length} digits entered`
+            )}
           >
             {Array.from({ length: Math.max(6, pin.length) }).map((_, i) => (
               <span
@@ -226,7 +263,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
             onClick={() => setPin('')}
             className={`h-12 rounded-[4px] border border-hairline bg-surface-1 text-xs font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
           >
-            ล้างค่า
+            {pick('ล้างค่า', 'ລ້າງຄ່າ', 'Clear')}
           </button>
           <button
             type="button"
@@ -238,7 +275,7 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
           </button>
           <button
             type="button"
-            aria-label="ลบหลักสุดท้าย"
+            aria-label={pick('ลบหลักสุดท้าย', 'ລຶບຫຼັກສຸດທ້າຍ', 'Backspace')}
             disabled={submitting}
             onClick={() => setPin((p) => p.slice(0, -1))}
             className={`flex h-12 items-center justify-center rounded-[4px] border border-hairline bg-surface-1 text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
@@ -254,14 +291,20 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
           className={`flex h-[50px] w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-6 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
         >
           <UserCheck className="h-4 w-4" />
-          {submitting ? 'กำลังตรวจสอบสิทธิ์...' : 'ปลดล็อกเข้าใช้งาน'}
+          {submitting
+            ? pick('กำลังตรวจสอบสิทธิ์...', 'ກຳລັງກວດສອບສິດ...', 'Verifying PIN...')
+            : t('pin.unlockBtn')}
         </button>
 
         {availableDemoHints.length > 0 && (
           <div className="border-t border-hairline pt-3.5">
             <div className="flex items-center gap-1.5 text-xs text-ink-muted mb-2">
               <KeyRound className="h-3.5 w-3.5 text-primary" />
-              สลับบทบาทด่วน (โหมดจำลองการทดสอบ)
+              {pick(
+                'สลับบทบาทด่วน (โหมดจำลองการทดสอบ)',
+                'ສະຫຼັບບົດບາດດ່ວນ (ໂໝດທົດລອງ)',
+                'Quick Role Switch (Simulation Mode)'
+              )}
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {availableDemoHints.map((hint) => (
@@ -276,7 +319,9 @@ export const PinLockModal: React.FC<PinLockModalProps> = ({
                   }}
                   className={`rounded-[4px] border border-hairline bg-canvas p-2 text-left hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
-                  <div className="text-xs font-medium text-ink truncate">{hint.label}</div>
+                  <div className="text-xs font-medium text-ink truncate">
+                    {pick(hint.labelTh, hint.labelLo, hint.labelEn)}
+                  </div>
                   <div className="text-[11px] text-primary-hover mt-0.5 tabular-nums-google">
                     {hint.badge}
                   </div>

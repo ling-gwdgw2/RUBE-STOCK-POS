@@ -44,6 +44,16 @@ import type {
 
 const POS_SESSION_TOKEN_STORAGE_KEY = 'rube_pos_v3_session_token';
 
+let activeRequestLocale: LocaleCode = 'th';
+
+export function getPosRequestLocale(): LocaleCode {
+  return activeRequestLocale;
+}
+
+export function setPosRequestLocale(locale: LocaleCode): void {
+  activeRequestLocale = locale;
+}
+
 let activeSessionToken: string | null = (() => {
   if (typeof window === 'undefined') return null;
   try {
@@ -104,6 +114,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      'X-Rube-Locale': activeRequestLocale,
       ...(activeSessionToken ? { Authorization: `Bearer ${activeSessionToken}` } : {}),
       ...(init?.headers ?? {}),
     },
@@ -531,6 +542,8 @@ export const posTransport = {
     discountSatang: number;
     paperWidthPx?: 384 | 576;
     skipKdsEnqueue?: boolean | undefined;
+    heldBillId?: string | undefined;
+    expectedHeldBillVersion?: number | undefined;
     lines: Array<{
       variantId: string;
       itemName: string;
@@ -593,11 +606,111 @@ export const posTransport = {
   saveHeldBill(input: {
     outletId?: string;
     actorUserId?: string;
+    claimToken?: string | undefined;
+    keepClaim?: boolean | undefined;
+    voidReason?: string | undefined;
+    overrideToken?: string | undefined;
     bill: HeldBillRecordDto;
   }): Promise<{ ok: boolean; heldBills: HeldBillRecordDto[] }> {
     return requestJson('/api/pos/held-bills', {
       method: 'POST',
+      ...(input.overrideToken
+        ? { headers: { 'X-Rube-Override-Token': input.overrideToken } }
+        : {}),
+      body: JSON.stringify({
+        outletId: input.outletId,
+        actorUserId: input.actorUserId,
+        ...(input.claimToken ? { claimToken: input.claimToken } : {}),
+        ...(input.keepClaim ? { keepClaim: true } : {}),
+        ...(input.voidReason ? { voidReason: input.voidReason } : {}),
+        bill: input.bill,
+      }),
+    });
+  },
+
+  claimHeldBill(input: {
+    outletId?: string;
+    id: string;
+    claimToken?: string | undefined;
+    claimedByUserId?: string | undefined;
+    claimedByName?: string | undefined;
+    forceTakeover?: boolean | undefined;
+  }): Promise<{ ok: boolean; heldBill: HeldBillRecordDto; heldBills: HeldBillRecordDto[] }> {
+    return requestJson('/api/pos/held-bills/claim', {
+      method: 'POST',
       body: JSON.stringify(input),
+    });
+  },
+
+  releaseHeldBillClaim(input: {
+    outletId?: string;
+    id: string;
+    claimToken?: string | undefined;
+    force?: boolean | undefined;
+  }): Promise<{ ok: boolean; heldBills: HeldBillRecordDto[] }> {
+    return requestJson('/api/pos/held-bills/release', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  voidHeldBill(input: {
+    outletId?: string;
+    id: string;
+    actorUserId?: string;
+    voidReason: string;
+    overrideToken?: string | undefined;
+  }): Promise<{
+    ok: boolean;
+    heldBills: HeldBillRecordDto[];
+    voidedBillId: string;
+    cancelledKdsOrderIds: string[];
+  }> {
+    return requestJson('/api/pos/held-bills/void', {
+      method: 'POST',
+      ...(input.overrideToken
+        ? { headers: { 'X-Rube-Override-Token': input.overrideToken } }
+        : {}),
+      body: JSON.stringify({
+        outletId: input.outletId,
+        id: input.id,
+        actorUserId: input.actorUserId,
+        voidReason: input.voidReason,
+      }),
+    });
+  },
+
+  voidHeldBillItem(input: {
+    outletId?: string;
+    id: string;
+    expectedVersion?: number | undefined;
+    targetCartKey: string;
+    nextQuantityMilli: number;
+    voidReason: string;
+    voidedByUserId?: string | undefined;
+    overrideToken?: string | undefined;
+  }): Promise<{
+    ok: boolean;
+    heldBill: HeldBillRecordDto | null;
+    heldBills: HeldBillRecordDto[];
+    billVoidedCompletely: boolean;
+  }> {
+    return requestJson('/api/pos/held-bills/void-item', {
+      method: 'POST',
+      ...(input.overrideToken
+        ? { headers: { 'X-Rube-Override-Token': input.overrideToken } }
+        : {}),
+      body: JSON.stringify({
+        outletId: input.outletId,
+        id: input.id,
+        ...(input.expectedVersion !== undefined
+          ? { expectedVersion: input.expectedVersion }
+          : {}),
+        targetCartKey: input.targetCartKey,
+        nextQuantityMilli: input.nextQuantityMilli,
+        voidReason: input.voidReason,
+        ...(input.voidedByUserId ? { voidedByUserId: input.voidedByUserId } : {}),
+      }),
     });
   },
 
@@ -605,11 +718,20 @@ export const posTransport = {
     outletId?: string;
     actorUserId?: string;
     id: string;
-    recall?: boolean | undefined;
+    voidReason?: string | undefined;
+    overrideToken?: string | undefined;
   }): Promise<{ ok: boolean; heldBills: HeldBillRecordDto[] }> {
     return requestJson('/api/pos/held-bills', {
       method: 'DELETE',
-      body: JSON.stringify(input),
+      ...(input.overrideToken
+        ? { headers: { 'X-Rube-Override-Token': input.overrideToken } }
+        : {}),
+      body: JSON.stringify({
+        outletId: input.outletId,
+        actorUserId: input.actorUserId,
+        id: input.id,
+        ...(input.voidReason ? { voidReason: input.voidReason } : {}),
+      }),
     });
   },
 

@@ -498,3 +498,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Production Vite UI Bundle (`npm run build:ui`)**: **Built cleanly (`index-DS-CIbs2.css` 45,975 bytes, `index-BvRIX9NN.js` 1,437.48 kB)** พร้อมฟอนต์ Noto Sans Lao ออฟไลน์ (`--color-danger`/`--color-surface-2` ครบ, `Zero CDN`, `Zero #80868b`, `Zero shadow-*`, `Zero parseFloat(`)
 - **Windows Installer Build (`npm run build:installer`)**: สร้าง `dist-installer/RubeStockPOS_3.1.1_x64_Setup.exe` (`47,058,944` bytes), `dist-installer/RubeStockPOS_3.1.1_x64_AirGapped.msi` (`47,059,258` bytes) และ `dist-installer/RubeStockPOS-DesktopShell.exe` (`9,451,008` bytes) สำเร็จ
 
+---
+
+### Held Bill Protection, Manager PIN Void Override & Complete 3-Language (`lo` / `th` / `en`) Localization
+
+#### Added & Hardened — Held Bill Protection & Non-Destructive Manager Void Override (`Phase 8M`–`8N`)
+- **Held Bill Line Locking & Optimistic Concurrency Contracts (`packages/shared-contracts/src/ipc-commands.ts`, `packages/ui-presentation/src/app/types.ts`)**:
+  - เพิ่มฟิลด์ `heldLineLocked`, `lockedMinQtyMilli`, `heldBillOriginId`, `kdsDispatched` ใน `HeldBillCartLineDto` (`CartItem`), ขยาย `HeldBillRecordDto` (`version`, `activeClaimToken`, `activeClaimedByUserId`, `activeClaimedByName`, `activeClaimedAtIso`, `linkedGuestOrderIds`, `linkedKdsSalesOrderIds`) และเพิ่ม `heldBillId`, `expectedHeldBillVersion` ใน `CheckoutOrderRequest`
+- **SQLite HMAC Fail-Closed Guard, KDS/QR Linking & Atomic Settlement (`packages/core-engine/src/runtime/sqlite-engine.ts`, `packages/cluster-gateway/src/local-ipc-bridge.ts`)**:
+  - ปกป้องรายการ `held_bills_${outletId}` ใน `store_config` ด้วย `HMAC-SHA256` (`is_protected = 1`) และเพิ่มเมธอด `listHeldBills`, `upsertHeldBill`, `claimHeldBill`, `releaseHeldBillClaim`, `voidHeldBill`, `voidHeldBillItem` (ไม่แก้ DDL Schema `0001_initial_v3_1_schema.sql`)
+  - ป้องกันแคชเชียร์ลบหรือลดจำนวนรายการที่พักบิล/ส่งครัว KDS แล้วโดยพลการ, บังคับอนุมัติด้วยสิทธิ์ `MANAGER`/`OWNER` พร้อมบันทึก `security_audit_logs` (`HELD_BILL_ITEM_VOIDED`, `HELD_BILL_VOIDED`), ยกเลิกตั๋วครัว KDS และ Guest Order ที่เชื่อมอยู่เมื่อ void ทั้งบิล และตรวจ `expectedHeldBillVersion` ตอนชำระเงิน (คืน `HTTP 409` เมื่อมีออเดอร์ QR แทรกเข้ามาเปลี่ยนเวอร์ชัน)
+- **HTTP Endpoints, POS Register Recall & Void Authorization Modal (`pos-desktop-server.ts`, `pos-transport.ts`, `VoidOrderAuthModal.tsx`, `PosRegisterWorkspace.tsx`)**:
+  - เพิ่ม Endpoints `POST /api/pos/held-bills/claim`, `/release`, `/void-item`, `/void` ร่วมกับ Guard บน `/api/pos/held-bills` และ `/api/pos/checkout` (`X-Rube-Override-Token` / `HTTP 403` / `HTTP 409`)
+  - อัปเกรด `PosRegisterWorkspace` ให้เรียกบิลคิดเงินแบบ **Non-Destructive Claim** พร้อมตัวเลือก Force Takeover, ปุ่มวางกลับเข้าบิลพัก, ปุ่มซิงค์ออเดอร์ QR ล่าสุด, ป้ายสถานะ `ส่งครัว KDS` / `บิลพัก` และเปิด `VoidOrderAuthModal` (`HELD_BILL_ITEM_VOID` / `HELD_BILL_VOID`) เมื่อลดจำนวนต่ำกว่ายอดเดิมหรือยกเลิกบิลพักทั้งใบ
+
+#### Fixed & Completed — 3-Language UI (`lo` / `th` / `en`) & Server Error Localization (`Phase 8O`)
+- **Strict TypeScript `enText`, Locale State Sync & App Shell (`i18n/translations.ts`, `i18n/index.tsx`, `pos-transport.ts`, `App.tsx`)**:
+  - บังคับพารามิเตอร์ `enText: string` บน `pick(...)` และ `pickLocaleText(...)` แทน fallback `?? thText` เพื่อตรวจจับข้อความขาดภาษาอังกฤษตั้งแต่ตอน compile
+  - ซิงค์ `document.documentElement.lang` / `document.title` ตาม `effectiveLocale`, ส่ง Header `X-Rube-Locale` ไปกับทุกคำขอ HTTP และแก้บั๊ก `overrideLocale` ให้บันทึกตาม `updateUiLocale` หลังปลดล็อก PIN, ล้าง override เมื่อกดบันทึกในหน้าตั้งค่า (`onClearLocaleOverride`) และคง `'en'` เมื่อสลับประเทศ (`TH` ↔ `LA`)
+- **HTTP Backend & Guest QR Server Localization (`server/server-error-i18n.ts` [NEW], `pos-desktop-server.ts`, `guest-qr-server.ts`)**:
+  - เพิ่ม `server-error-i18n.ts` (`resolveRequestLocale`, `localizeServerMessage`) แปลข้อความ Error/Warning ฝั่งเซิร์ฟเวอร์ (`401`, `403`, `404`, `409`, `423`, `429`, `simulate-yank-usb`, `backupWarningThai`) ตาม `X-Rube-Locale`, `?lang=` หรือ `uiLocale` พร้อมรองรับ `X-Rube-Locale` ใน CORS `Access-Control-Allow-Headers`
+- **Complete 14-Component + Utility Trilingual Coverage (`UiPrimitives.tsx`, `utils/*.ts`, Workspaces & Modals)**:
+  - แปล `ConfirmDialog`, `rbac.ts`, `profile-domain.ts`, `web-nfc-writer.ts`, `image-helper.ts`, `camera-barcode-decoder.ts`, และหน้าจอทั้งหมด 14 คอมโพเนนต์หลักร่วมกับ `TableQrSlipModal` (`PosRegisterWorkspace`, `VoidOrderAuthModal`, `QrOrderingInboxPanel`, `QrOrderingSettingsCard`, `PinLockModal`, `KdsWorkspace`, `BarcodeCameraScannerModal`, `HilSimulatorDrawer`, `FirstRunWizardModal`, `SystemSettingsWorkspace` — แก้ตัวอักษรไทย `ก` ปะปนในคำลาว `ຍົกເລີກແກ້ໄຂ` และเปลี่ยนวันที่เป็น `dateTime(...)`, `BomStudioWorkspace`, `BarcodeLabelPrintWorkspace`, `ShiftAndReportsWorkspace`, `WarehouseWorkspace`)
+- **Automated Regression Tests (`phase6-interactive-ui-server.test.ts`, `phase8-local-qr-ordering.test.ts`)**:
+  - อัปเดต `HOLD-RACE-001` และเพิ่ม `Phase 8M`–`Phase 8O` ครอบคลุม E2E บิลพัก, TypeScript AST zero-Thai-leakage audit ทั่ว `src/app/`, React 19 SSR ทุกหน้าจอในโหมด `'lo'` / `'en'` และทดสอบ HTTP server error localization จริง
+
+#### Verified & Built (2026-11-28 — Held Bill Protection & 3-Language i18n Release)
+- **TypeScript (`npx tsc --noEmit -p packages/ui-presentation/tsconfig.json`)**: **0 errors**
+- **PR Gatekeeping & Schema (`npm run verify:pr-gatekeeping`, `npm run verify:schema`)**: **PASSED** (`19 Rust files`, `55 TS files`, 34 Tables, 4 Triggers, Schema SHA-256 `866a600d3e5eaf0351712c2e7d3085dc6abd68f39f800a1dc7d7ada1895b8d37`)
+- **Automated Node.js E2E & Invariant Suite (`npm test`)**: **66/66 tests PASSED (0 failed)** (`HOLD-RACE-001`, `Phase 8M`–`8O` ครบทุกชุด)
+- **Rust Workspace & Tauri Native Tests (`cargo test --workspace` + `src-tauri`)**: **23/23 tests PASSED (0 failed)** (`4` cluster-gateway + `15` core-engine + `1` hal-drivers + `1` shared-contracts + `2` tauri-desktop)
+- **Production Vite UI Bundle (`npm run build:ui`)**: `dist/assets/index-CFQGwK-1.css` (`46.33 kB`), `dist/assets/index-BvBTJRlW.js` (`1,577.53 kB`), `3.96s` (`1906` modules)
+- **Windows Installer Build (`npm run build:installer`)**: สร้าง `dist-installer/RubeStockPOS_3.1.1_x64_Setup.exe` (`47,219,200` bytes), `dist-installer/RubeStockPOS_3.1.1_x64_AirGapped.msi` (`47,219,514` bytes), `dist-installer/RubeStockPOS-DesktopShell.exe` (`9,480,192` bytes) และ `dist-installer/RubeStockPOS_3.1.1_x64_AirGapped.manifest.json` (`offlineVerificationPassed: true`) สำเร็จ
+

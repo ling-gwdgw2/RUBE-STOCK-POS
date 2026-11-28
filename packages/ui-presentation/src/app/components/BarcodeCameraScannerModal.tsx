@@ -4,6 +4,7 @@ import {
   createVideoBarcodeScannerSession,
   decodeBarcodeFromImageFile,
 } from '../utils/camera-barcode-decoder.ts';
+import { useI18n } from '../i18n/index.tsx';
 import { ModalDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface BarcodeCameraScannerModalProps {
@@ -46,6 +47,7 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
   onPhotoCaptured,
 }) => {
   const uid = useId();
+  const { locale, pick, t } = useI18n();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -81,8 +83,16 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
     if (!navigator.mediaDevices?.getUserMedia) {
       setCameraError(
         mode === 'BARCODE'
-          ? 'อุปกรณ์หรือหน้าต่างนี้ไม่รองรับการเปิดกล้องเว็บแคม — สามารถใช้ปืนสแกนบาร์โค้ด USB/Bluetooth หรือเลือกสแกนจากไฟล์รูปบาร์โค้ดด้านล่างได้ทันที'
-          : 'อุปกรณ์หรือเบราว์เซอร์นี้ไม่รองรับการเปิดกล้องเว็บแคม — กรุณาใช้ปุ่มอัปโหลดรูปจากไฟล์แทน'
+          ? pick(
+              'อุปกรณ์หรือหน้าต่างนี้ไม่รองรับการเปิดกล้องเว็บแคม — สามารถใช้ปืนสแกนบาร์โค้ด USB/Bluetooth หรือเลือกสแกนจากไฟล์รูปบาร์โค้ดด้านล่างได้ทันที',
+              'ອຸປະກອນ ຫຼື ໜ້າຕ່າງນີ້ບໍ່ຮອງຮັບການເປີດກ້ອງເວັບແຄມ — ສາມາດໃຊ້ປືນສະແກນບາໂຄດ USB/Bluetooth ຫຼື ເລືອກສະແກນຈາກໄຟລ໌ຮູບບາໂຄດດ້ານລຸ່ມໄດ້ທັນທີ',
+              'Webcam unavailable in this window — use a USB/Bluetooth barcode scanner or scan from an image file below'
+            )
+          : pick(
+              'อุปกรณ์หรือเบราว์เซอร์นี้ไม่รองรับการเปิดกล้องเว็บแคม — กรุณาใช้ปุ่มอัปโหลดรูปจากไฟล์แทน',
+              'ອຸປະກອນ ຫຼື ບຣາວເຊີນີ້ບໍ່ຮອງຮັບການເປີດກ້ອງເວັບແຄມ — ກະລຸນາໃຊ້ປຸ່ມອັບໂຫຼດຮູບຈາກໄຟລ໌ແທນ',
+              'Webcam unavailable in this browser — please upload an image file instead'
+            )
       );
       return;
     }
@@ -130,11 +140,23 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
       .catch((err) => {
         if (!cancelled) {
           setCameraError(
-            `ไม่สามารถเปิดกล้องได้ (${err instanceof Error ? err.message : 'ไม่พบกล้องหรือไม่ได้รับอนุญาต'}) — ${
-              mode === 'BARCODE'
-                ? 'คุณสามารถใช้ปืนสแกนบาร์โค้ด USB หรือเลือกไฟล์รูปบาร์โค้ดด้านล่างได้ทันที'
-                : 'กรุณาใช้ปุ่มเลือกรูปสินค้าจากเครื่องแทน'
-            }`
+            pick(
+              `ไม่สามารถเปิดกล้องได้ (${err instanceof Error ? err.message : 'ไม่พบกล้องหรือไม่ได้รับอนุญาต'}) — ${
+                mode === 'BARCODE'
+                  ? 'คุณสามารถใช้ปืนสแกนบาร์โค้ด USB หรือเลือกไฟล์รูปบาร์โค้ดด้านล่างได้ทันที'
+                  : 'กรุณาใช้ปุ่มเลือกรูปสินค้าจากเครื่องแทน'
+              }`,
+              `ບໍ່ສາມາດເປີດກ້ອງໄດ້ (${err instanceof Error ? err.message : 'ບໍ່ພົບກ້ອງ ຫຼື ບໍ່ໄດ້ຮັບອະນຸຍາດ'}) — ${
+                mode === 'BARCODE'
+                  ? 'ທ່ານສາມາດໃຊ້ປືນສະແກນບາໂຄດ USB ຫຼື ເລືອກໄຟລ໌ຮູບບາໂຄດດ້ານລຸ່ມໄດ້ທັນທີ'
+                  : 'ກະລຸນາໃຊ້ປຸ່ມເລືອກຮູບສິນຄ້າຈາກເຄື່ອງແທນ'
+              }`,
+              `Unable to open camera (${err instanceof Error ? err.message : 'Camera not found or permission denied'}) — ${
+                mode === 'BARCODE'
+                  ? 'Use a USB barcode scanner or select a barcode image below'
+                  : 'Choose a product image file from your device instead'
+              }`
+            )
           );
         }
       });
@@ -143,7 +165,7 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
       cancelled = true;
       stopStream();
     };
-  }, [mode, open, selectedDeviceId, stopStream]);
+  }, [mode, open, pick, selectedDeviceId, stopStream]);
 
   // Real-time Offline 1D/2D Barcode Detection loop (Native BarcodeDetector + @zxing/library JS Fallback)
   useEffect(() => {
@@ -186,7 +208,7 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
     setDecodingImage(true);
     setDecodeFeedbackMsg(null);
     try {
-      const decoded = await decodeBarcodeFromImageFile(file);
+      const decoded = await decodeBarcodeFromImageFile(file, locale);
       if (decoded) {
         playSoftScanBeep();
         stopStream();
@@ -194,7 +216,11 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
         onClose();
       } else {
         setDecodeFeedbackMsg(
-          'ไม่พบบาร์โค้ดหรือ QR Code ที่คมชัดในรูปภาพนี้ — กรุณาลองถ่ายให้ตรงกรอบหรือใช้ปืนยิงบาร์โค้ด USB'
+          pick(
+            'ไม่พบบาร์โค้ดหรือ QR Code ที่คมชัดในรูปภาพนี้ — กรุณาลองถ่ายให้ตรงกรอบหรือใช้ปืนยิงบาร์โค้ด USB',
+            'ບໍ່ພົບບາໂຄດ ຫຼື QR Code ທີ່ຊັດເຈນໃນຮູບພາບນີ້ — ກະລຸນາລອງຖ່າຍໃຫ້ຕົງກອບ ຫຼື ໃຊ້ປືນຍິງບາໂຄດ USB',
+            'No sharp barcode or QR code detected in this image — align within the frame or use a USB scanner'
+          )
         );
       }
     } catch (err) {
@@ -249,18 +275,28 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
               id={`${uid}-cam-title`}
               className="font-google-display text-[18px] font-normal text-ink"
             >
-              {mode === 'BARCODE' ? 'สแกนบาร์โค้ดสินค้าด้วยกล้อง' : 'ถ่ายรูปภาพสินค้าด้วยกล้อง'}
+              {mode === 'BARCODE'
+                ? pick('สแกนบาร์โค้ดสินค้าด้วยกล้อง', 'ສະແກນບາໂຄດສິນຄ້າດ້ວຍກ້ອງ', 'Scan Product Barcode with Camera')
+                : pick('ถ่ายรูปภาพสินค้าด้วยกล้อง', 'ຖ່າຍຮູບພາບສິນຄ້າດ້ວຍກ້ອງ', 'Capture Product Photo')}
             </h3>
             <p className="text-xs text-ink-muted">
               {mode === 'BARCODE'
-                ? 'วางบาร์โค้ด EAN-13 / Code128 / QR ให้อยู่ในกรอบตรงกลาง (ถอดรหัสออฟไลน์ 100%)'
-                : 'จัดวางสินค้าให้อยู่ในกรอบแล้วกดปุ่มถ่ายภาพ'}
+                ? pick(
+                    'วางบาร์โค้ด EAN-13 / Code128 / QR ให้อยู่ในกรอบตรงกลาง (ถอดรหัสออฟไลน์ 100%)',
+                    'ວາງບາໂຄດ EAN-13 / Code128 / QR ໃຫ້ຢູ່ໃນກອບທາງກາງ (ຖອດລະຫັດອອບໄລນ໌ 100%)',
+                    'Align EAN-13 / Code128 / QR inside the center guide (100% offline decoding)'
+                  )
+                : pick(
+                    'จัดวางสินค้าให้อยู่ในกรอบแล้วกดปุ่มถ่ายภาพ',
+                    'ຈັດວາງສິນຄ້າໃຫ້ຢູ່ໃນກອບແລ້ວກົດປຸ່ມຖ່າຍຮູບ',
+                    'Center the product inside the frame and click Capture'
+                  )}
             </p>
           </div>
         </div>
         <button
           type="button"
-          aria-label="ปิดหน้าต่างกล้อง"
+          aria-label={pick('ปิดหน้าต่างกล้อง', 'ປິດໜ້າຕ່າງກ້ອງ', 'Close camera modal')}
           onClick={onClose}
           className={`flex h-9 w-9 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
         >
@@ -272,7 +308,7 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
         {videoDevices.length > 1 && (
           <div className="flex items-center justify-between gap-3 text-xs">
             <label htmlFor={`${uid}-cam-select`} className="font-medium text-ink-muted shrink-0">
-              เลือกกล้องเว็บแคม:
+              {pick('เลือกกล้องเว็บแคม:', 'ເລືອກກ້ອງເວັບແຄມ:', 'Select camera:')}
             </label>
             <select
               id={`${uid}-cam-select`}
@@ -280,10 +316,10 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
               onChange={(e) => setSelectedDeviceId(e.target.value)}
               className={`h-10 flex-1 rounded-[4px] border border-hairline bg-canvas px-3 text-xs text-ink ${UI_INTERACTION.focusSelect}`}
             >
-              <option value="">กล้องหลักอัตโนมัติ</option>
+              <option value="">{pick('กล้องหลักอัตโนมัติ', 'ກ້ອງຫຼັກອັດຕະໂນມັດ', 'Auto-select main camera')}</option>
               {videoDevices.map((cam, idx) => (
                 <option key={cam.deviceId} value={cam.deviceId}>
-                  {cam.label || `กล้องที่ ${idx + 1}`}
+                  {cam.label || pick(`กล้องที่ ${idx + 1}`, `ກ້ອງທີ ${idx + 1}`, `Camera ${idx + 1}`)}
                 </option>
               ))}
             </select>
@@ -293,7 +329,9 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
         {cameraError ? (
           <div className="rounded-[8px] border border-hairline bg-surface-1 p-5 text-center space-y-2">
             <AlertTriangle className="h-8 w-8 text-primary mx-auto" />
-            <p className="text-sm font-medium text-ink">ไม่สามารถเข้าถึงกล้องได้</p>
+            <p className="text-sm font-medium text-ink">
+              {pick('ไม่สามารถเข้าถึงกล้องได้', 'ບໍ່ສາມາດເຂົ້າເຖິງກ້ອງໄດ້', 'Camera access unavailable')}
+            </p>
             <p className="text-xs text-ink-muted leading-relaxed">{cameraError}</p>
           </div>
         ) : (
@@ -317,7 +355,13 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
 
         {mode === 'BARCODE' && (
           <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-ink-muted">
-            <span>ตัวถอดรหัสออฟไลน์ 1D/2D พร้อมสแกน — EAN-13, Code128, UPC, QR</span>
+            <span>
+              {pick(
+                'ตัวถอดรหัสออฟไลน์ 1D/2D พร้อมสแกน — EAN-13, Code128, UPC, QR',
+                'ຕົວຖອດລະຫັດອອບໄລນ໌ 1D/2D ພ້ອມສະແກນ — EAN-13, Code128, UPC, QR',
+                '1D/2D Offline Decoder Ready — EAN-13, Code128, UPC, QR'
+              )}
+            </span>
             {decodeFeedbackMsg && (
               <span role="status" className="text-xs font-medium text-primary-dark w-full mt-1">
                 {decodeFeedbackMsg}
@@ -334,7 +378,11 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
               ref={imageInputRef}
               type="file"
               accept="image/*"
-              aria-label="เลือกไฟล์รูปภาพบาร์โค้ดเพื่อสแกน"
+              aria-label={pick(
+                'เลือกไฟล์รูปภาพบาร์โค้ดเพื่อสแกน',
+                'ເລືອກໄຟລ໌ຮູບພາບບາໂຄດເພື່ອສະແກນ',
+                'Select barcode image file to scan'
+              )}
               onChange={(e) => void handleScanImageFile(e)}
               className="hidden"
             />
@@ -345,7 +393,11 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
               className={`flex h-[44px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary ${UI_INTERACTION.focusButton}`}
             >
               <ImagePlus className="h-4 w-4" />
-              <span>{decodingImage ? 'กำลังอ่านบาร์โค้ด...' : 'สแกนจากไฟล์รูปบาร์โค้ด'}</span>
+              <span>
+                {decodingImage
+                  ? pick('กำลังอ่านบาร์โค้ด...', 'ກຳລັງອ່ານບາໂຄດ...', 'Decoding barcode...')
+                  : pick('สแกนจากไฟล์รูปบาร์โค้ด', 'ສະແກນຈາກໄຟລ໌ຮູບບາໂຄດ', 'Scan from Barcode Image')}
+              </span>
             </button>
           </>
         ) : (
@@ -358,7 +410,7 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
             onClick={onClose}
             className={`h-[44px] rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-ink hover:border-ink ${UI_INTERACTION.focusButton}`}
           >
-            ยกเลิก
+            {t('common.cancel')}
           </button>
           {mode === 'PHOTO' && cameraReady && !cameraError && (
             <button
@@ -367,7 +419,7 @@ export const BarcodeCameraScannerModal: React.FC<BarcodeCameraScannerModalProps>
               className={`flex h-[44px] items-center gap-1.5 rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
               <Camera className="h-4 w-4" />
-              <span>ถ่ายภาพสินค้านี้</span>
+              <span>{pick('ถ่ายภาพสินค้านี้', 'ຖ່າຍຮູບສິນຄ້ານີ້', 'Capture Product Photo')}</span>
             </button>
           )}
         </div>

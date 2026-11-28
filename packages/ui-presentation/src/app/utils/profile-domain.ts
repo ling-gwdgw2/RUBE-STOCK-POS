@@ -1,3 +1,5 @@
+import type { LocaleCode } from '../../../../shared-contracts/src/currency.ts';
+import { pickLocaleText } from '../i18n/translations.ts';
 import type {
   BusinessProfile,
   CatalogVariantDetailDto,
@@ -24,15 +26,40 @@ export function getCategoryDepartment(
   return 'RETAIL';
 }
 
-export function getDepartmentThaiLabel(dept: ShopCategoryDepartment): string {
+export function getDepartmentLabel(
+  dept: ShopCategoryDepartment,
+  locale: LocaleCode = 'th'
+): string {
   switch (dept) {
     case 'RETAIL':
-      return 'สินค้าปลีก / ซูเปอร์มาร์เก็ต';
+      return pickLocaleText(
+        locale,
+        'สินค้าปลีก / ซูเปอร์มาร์เก็ต',
+        'ສິນຄ້າຂາຍຍ່ອຍ / ຊຸບເປີມາເກັດ',
+        'Retail / Supermarket'
+      );
     case 'HOSPITALITY':
-      return 'เมนูคาเฟ่ / ร้านอาหาร';
+      return pickLocaleText(
+        locale,
+        'เมนูคาเฟ่ / ร้านอาหาร',
+        'ເມນູຄາເຟ່ / ຮ້ານອາຫານ',
+        'Cafe / Restaurant Menu'
+      );
     case 'RAW_MATERIAL':
-      return 'วัตถุดิบหลังร้าน / ต้มเตรียม';
+      return pickLocaleText(
+        locale,
+        'วัตถุดิบหลังร้าน / ต้มเตรียม',
+        'ວັດຖຸດິບຫຼັງຮ້ານ / ກຽມຜະລິດ',
+        'Back-of-House Ingredients / Prep'
+      );
   }
+}
+
+export function getDepartmentThaiLabel(
+  dept: ShopCategoryDepartment,
+  locale: LocaleCode = 'th'
+): string {
+  return getDepartmentLabel(dept, locale);
 }
 
 export function getDepartmentStationPreset(dept: ShopCategoryDepartment): string {
@@ -123,45 +150,79 @@ export interface OrderTypeOption {
  * - HOSPITALITY: Dine-In + Takeaway + Delivery (NO Retail)
  * - HYBRID: All 4 order types
  */
-export function getAllowedOrderTypesForProfile(profile: BusinessProfile): OrderTypeOption[] {
+export function getAllowedOrderTypesForProfile(
+  profile: BusinessProfile,
+  locale: LocaleCode = 'th'
+): OrderTypeOption[] {
+  const retailOpt: OrderTypeOption = {
+    value: 'RETAIL',
+    label: pickLocaleText(locale, 'ขายปลีกหน้าร้าน (Retail)', 'ຂາຍຍ່ອຍໜ້າຮ້ານ (Retail)', 'Retail Counter'),
+  };
+  const dineInOpt: OrderTypeOption = {
+    value: 'DINE_IN',
+    label: pickLocaleText(locale, 'ทานที่ร้าน (Dine-In)', 'ທານທີ່ຮ້ານ (Dine-In)', 'Dine-In'),
+  };
+  const takeawayOpt: OrderTypeOption = {
+    value: 'TAKEAWAY',
+    label: pickLocaleText(locale, 'สั่งกลับบ้าน (Takeaway)', 'ສັ່ງກັບບ້ານ (Takeaway)', 'Takeaway'),
+  };
+  const deliveryOpt: OrderTypeOption = {
+    value: 'DELIVERY',
+    label: pickLocaleText(locale, 'เดลิเวอรี (Delivery)', 'ສົ່ງເຖິງທີ່ (Delivery)', 'Delivery'),
+  };
+
   if (profile === 'RETAIL') {
-    return [
-      { value: 'RETAIL', label: 'ขายปลีกหน้าร้าน (Retail)' },
-      { value: 'DELIVERY', label: 'จัดส่ง / เดลิเวอรี (Delivery)' },
-    ];
+    return [retailOpt, deliveryOpt];
   }
   if (profile === 'HOSPITALITY') {
-    return [
-      { value: 'DINE_IN', label: 'ทานที่ร้าน (Dine-In)' },
-      { value: 'TAKEAWAY', label: 'สั่งกลับบ้าน (Takeaway)' },
-      { value: 'DELIVERY', label: 'เดลิเวอรี (Delivery)' },
-    ];
+    return [dineInOpt, takeawayOpt, deliveryOpt];
   }
-  return [
-    { value: 'TAKEAWAY', label: 'สั่งกลับบ้าน (Takeaway)' },
-    { value: 'DINE_IN', label: 'ทานที่ร้าน (Dine-In)' },
-    { value: 'RETAIL', label: 'ขายปลีกหน้าร้าน (Retail)' },
-    { value: 'DELIVERY', label: 'เดลิเวอรี (Delivery)' },
-  ];
+  return [takeawayOpt, dineInOpt, retailOpt, deliveryOpt];
 }
 
-export function getOrderReferenceFieldMeta(profile: BusinessProfile): {
+export function getOrderReferenceFieldMeta(
+  profile: BusinessProfile,
+  locale: LocaleCode = 'th'
+): {
   ariaLabel: string;
   placeholder: string;
 } {
   if (profile === 'RETAIL') {
     return {
-      ariaLabel: 'รหัสสมาชิกหรือหมายเหตุบิลขายปลีก',
-      placeholder: 'รหัสสมาชิก / หมายเหตุบิล (ถ้ามี)',
+      ariaLabel: pickLocaleText(
+        locale,
+        'รหัสสมาชิกหรือหมายเหตุบิลขายปลีก',
+        'ລະຫັດສະມາຊິກ ຫຼື ໝາຍເຫດບິນຂາຍຍ່ອຍ',
+        'Member ID or retail order note'
+      ),
+      placeholder: pickLocaleText(
+        locale,
+        'รหัสสมาชิก / หมายเหตุบิล (ถ้ามี)',
+        'ລະຫັດສະມາຊິກ / ໝາຍເຫດບິນ (ຖ້າມີ)',
+        'Member ID / Order note (optional)'
+      ),
     };
   }
   return {
-    ariaLabel: 'หมายเลขโต๊ะหรือป้ายคิว',
-    placeholder: 'ป้ายคิว / โต๊ะ (เช่น โต๊ะ 4, A-04)',
+    ariaLabel: pickLocaleText(
+      locale,
+      'หมายเลขโต๊ะหรือป้ายคิว',
+      'ເລກໂຕະ ຫຼື ເລກຄິວ',
+      'Table or queue reference'
+    ),
+    placeholder: pickLocaleText(
+      locale,
+      'ป้ายคิว / โต๊ะ (เช่น โต๊ะ 4, A-04)',
+      'ເລກຄິວ / ໂຕະ (ເຊັ່ນ ໂຕະ 4, A-04)',
+      'Queue / Table (e.g. T04, A-04)'
+    ),
   };
 }
 
-export function getProfileMeta(profile: BusinessProfile): {
+export function getProfileMeta(
+  profile: BusinessProfile,
+  locale: LocaleCode = 'th'
+): {
   shortBadge: string;
   titleThai: string;
   newItemButtonLabel: string;
@@ -170,27 +231,72 @@ export function getProfileMeta(profile: BusinessProfile): {
 } {
   if (profile === 'RETAIL') {
     return {
-      shortBadge: 'ค้าปลีก · RETAIL',
-      titleThai: 'โหมดร้านค้าปลีก / ซูเปอร์มาร์เก็ต',
-      newItemButtonLabel: 'เพิ่มสินค้าปลีกใหม่',
-      catalogTitleThai: 'ทะเบียนสินค้าปลีก สต็อก และต้นทุนเฉลี่ย (MAC)',
-      defaultUnit: 'ชิ้น',
+      shortBadge: pickLocaleText(locale, 'ค้าปลีก · RETAIL', 'ຂາຍຍ່ອຍ · RETAIL', 'RETAIL'),
+      titleThai: pickLocaleText(
+        locale,
+        'โหมดร้านค้าปลีก / ซูเปอร์มาร์เก็ต',
+        'ໂໝດຮ້ານຂາຍຍ່ອຍ / ຊຸບເປີມາເກັດ',
+        'Retail / Supermarket Mode'
+      ),
+      newItemButtonLabel: pickLocaleText(
+        locale,
+        'เพิ่มสินค้าปลีกใหม่',
+        'ເພີ່ມສິນຄ້າຂາຍຍ່ອຍໃໝ່',
+        'Add Retail Product'
+      ),
+      catalogTitleThai: pickLocaleText(
+        locale,
+        'ทะเบียนสินค้าปลีก สต็อก และต้นทุนเฉลี่ย (MAC)',
+        'ທະບຽນສິນຄ້າຂາຍຍ່ອຍ, ສະຕັອກ ແລະ ຕົ້ນທຶນສະເລ່ຍ (MAC)',
+        'Retail Catalog, Stock Levels & Moving Average Cost (MAC)'
+      ),
+      defaultUnit: pickLocaleText(locale, 'ชิ้น', 'ອັນ', 'pcs'),
     };
   }
   if (profile === 'HOSPITALITY') {
     return {
-      shortBadge: 'คาเฟ่/อาหาร · HOSPITALITY',
-      titleThai: 'โหมดคาเฟ่ / ร้านอาหาร',
-      newItemButtonLabel: 'เพิ่มเมนู / วัตถุดิบใหม่',
-      catalogTitleThai: 'ทะเบียนเมนูอาหาร เครื่องดื่ม และวัตถุดิบหลังร้าน',
-      defaultUnit: 'แก้ว',
+      shortBadge: pickLocaleText(locale, 'คาเฟ่/อาหาร · HOSPITALITY', 'ຄາເຟ່/ອາຫານ · HOSPITALITY', 'HOSPITALITY'),
+      titleThai: pickLocaleText(
+        locale,
+        'โหมดคาเฟ่ / ร้านอาหาร',
+        'ໂໝດຄາເຟ່ / ຮ້ານອາຫານ',
+        'Cafe & Restaurant Mode'
+      ),
+      newItemButtonLabel: pickLocaleText(
+        locale,
+        'เพิ่มเมนู / วัตถุดิบใหม่',
+        'ເພີ່ມເມນູ / ວັດຖຸດິບໃໝ່',
+        'Add Menu / Ingredient'
+      ),
+      catalogTitleThai: pickLocaleText(
+        locale,
+        'ทะเบียนเมนูอาหาร เครื่องดื่ม และวัตถุดิบหลังร้าน',
+        'ທະບຽນເມນູອາຫານ, ເຄື່ອງດື່ມ ແລະ ວັດຖຸດິບຫຼັງຮ້ານ',
+        'Food/Beverage Menu & Kitchen Ingredient Catalog'
+      ),
+      defaultUnit: pickLocaleText(locale, 'แก้ว', 'ຈອກ', 'cup'),
     };
   }
   return {
-    shortBadge: 'ผสมครบวงจร · HYBRID',
-    titleThai: 'โหมดร้านค้าผสมครบวงจร (ค้าปลีก + คาเฟ่)',
-    newItemButtonLabel: 'เพิ่มสินค้า / เมนูใหม่',
-    catalogTitleThai: 'ทะเบียนสินค้าปลีก เมนูคาเฟ่ และวัตถุดิบ (แยกตามแผนก)',
-    defaultUnit: 'ชิ้น',
+    shortBadge: pickLocaleText(locale, 'ผสมครบวงจร · HYBRID', 'ຄົບວົງຈອນ · HYBRID', 'HYBRID'),
+    titleThai: pickLocaleText(
+      locale,
+      'โหมดร้านค้าผสมครบวงจร (ค้าปลีก + คาเฟ่)',
+      'ໂໝດຮ້ານຄົບວົງຈອນ (ຂາຍຍ່ອຍ + ຄາເຟ່)',
+      'Hybrid Mode (Retail + Hospitality)'
+    ),
+    newItemButtonLabel: pickLocaleText(
+      locale,
+      'เพิ่มสินค้า / เมนูใหม่',
+      'ເພີ່ມສິນຄ້າ / ເມນູໃໝ່',
+      'Add Product / Menu Item'
+    ),
+    catalogTitleThai: pickLocaleText(
+      locale,
+      'ทะเบียนสินค้าปลีก เมนูคาเฟ่ และวัตถุดิบ (แยกตามแผนก)',
+      'ທະບຽນສິນຄ້າຂາຍຍ່ອຍ, ເມນູຄາເຟ່ ແລະ ວັດຖຸດິບ (ແຍກຕາມພະແນກ)',
+      'Unified Retail, Menu & Ingredient Catalog (Department-Scoped)'
+    ),
+    defaultUnit: pickLocaleText(locale, 'ชิ้น', 'ອັນ', 'pcs'),
   };
 }

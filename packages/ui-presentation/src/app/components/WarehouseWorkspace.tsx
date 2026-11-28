@@ -90,6 +90,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     countryCode,
     currencyCode,
     dateTime,
+    locale,
     money,
     moneyInput,
     parseMoney,
@@ -143,7 +144,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   const [prodCategoryId, setProdCategoryId] = useState(
     getDefaultCategoryForProfile(bootstrap.categories, bootstrap.profile)?.id ?? 'CAT-RETAIL'
   );
-  const [prodUnit, setProdUnit] = useState(getProfileMeta(bootstrap.profile).defaultUnit);
+  const [prodUnit, setProdUnit] = useState(getProfileMeta(bootstrap.profile, locale).defaultUnit);
   const [prodPriceBaht, setProdPriceBaht] = useState(() => (isLaos ? '35000' : '45.00'));
   const [prodCostBaht, setProdCostBaht] = useState(() => (isLaos ? '18000' : '22.0000'));
   const [prodInitStock, setProdInitStock] = useState('20.000');
@@ -171,7 +172,9 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   // Quick Stock Adjustment Modal
   const [adjTarget, setAdjTarget] = useState<CatalogVariantDetailDto | null>(null);
   const [adjDeltaInput, setAdjDeltaInput] = useState('-1.000');
-  const [adjReason, setAdjReason] = useState('DAMAGED / ตัดของชำรุด');
+  const [adjReason, setAdjReason] = useState(
+    pick('DAMAGED / ตัดของชำรุด', 'DAMAGED / ຕັດສິນຄ້າເປ່ເພ', 'DAMAGED / Write-off')
+  );
 
   // Product Barcode Label Printing Queue & Quick Print Modal
   const [barcodeQueue, setBarcodeQueue] = useState<BarcodeQueueEntry[]>([]);
@@ -200,7 +203,9 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   >(() => [
     {
       costType: 'FREIGHT',
-      description: isLaos ? 'ຄ່າຂົນສົ່ງ (Cold-Chain Freight)' : 'ค่าขนส่งห้องเย็น (Cold-Chain Freight)',
+      description: isLaos
+        ? pick('ค่าขนส่งห้องเย็น (Cold-Chain Freight)', 'ຄ່າຂົນສົ່ງ (Cold-Chain Freight)', 'Cold-Chain Freight')
+        : pick('ค่าขนส่งห้องเย็น (Cold-Chain Freight)', 'ຄ່າຂົນສົ່ງ (Cold-Chain Freight)', 'Cold-Chain Freight'),
       amountBahtInput: isLaos ? '50000' : '250.00',
     },
   ]);
@@ -224,7 +229,9 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   // Stocktake & Inter-Outlet Transfer
   const [stocktakeInputs, setStocktakeInputs] = useState<Record<string, string>>({});
   const [newOutletCode, setNewOutletCode] = useState('BR-02');
-  const [newOutletName, setNewOutletName] = useState('สาขาสยามสแควร์ (Branch 02)');
+  const [newOutletName, setNewOutletName] = useState(
+    pick('สาขาสยามสแควร์ (Branch 02)', 'ສາຂາໃໝ່ (Branch 02)', 'Branch 02')
+  );
   const [trDestOutletId, setTrDestOutletId] = useState('');
   const [trVariantId, setTrVariantId] = useState('VAR-RET-001');
   const [trQtyInput, setTrQtyInput] = useState('5.000');
@@ -336,7 +343,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       setModGroupName('');
       setModTargetGroupId(res.group.id);
       await onRefreshState();
-      onToast(`สร้างกลุ่มตัวเลือก "${res.group.name}" สำเร็จ`, 'success');
+      onToast(
+        pick(
+          `สร้างกลุ่มตัวเลือก "${res.group.name}" สำเร็จ`,
+          `ສ້າງກຸ່ມຕົວເລືອກ "${res.group.name}" ສຳເລັດ`,
+          `Created modifier group "${res.group.name}"`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -364,7 +378,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       });
       setModItemName('');
       await onRefreshState();
-      onToast(`เพิ่มตัวเลือกเสริม "${modItemName}" สำเร็จ`, 'success');
+      onToast(
+        pick(
+          `เพิ่มตัวเลือกเสริม "${modItemName}" สำเร็จ`,
+          `ເພີ່ມຕົວເລືອກເສີມ "${modItemName}" ສຳເລັດ`,
+          `Added modifier "${modItemName}"`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -390,7 +411,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     }
   }, [subTab, ledgerVariantFilter, outletId, trDestOutletId]);
 
-  const profileMeta = useMemo(() => getProfileMeta(bootstrap.profile), [bootstrap.profile]);
+  const profileMeta = useMemo(
+    () => getProfileMeta(bootstrap.profile, locale),
+    [bootstrap.profile, locale]
+  );
   const profileWarehouseCategories = useMemo(
     () => getCategoriesForProfile(bootstrap.categories, bootstrap.profile, 'WAREHOUSE'),
     [bootstrap.categories, bootstrap.profile]
@@ -420,7 +444,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       );
       setProdBarcode(cleanBarcode);
       setProdCategoryId(defaultCat?.id ?? bootstrap.categories[0]?.id ?? 'CAT-RETAIL');
-      setProdUnit(getProfileMeta(bootstrap.profile).defaultUnit);
+      setProdUnit(getProfileMeta(bootstrap.profile, locale).defaultUnit);
       setProdPriceBaht(isLaos ? '35000' : '55.00');
       setProdCostBaht(isLaos ? '18000' : '25.0000');
       setProdInitStock('20.000');
@@ -436,7 +460,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       setProductModalOpen(true);
       window.setTimeout(() => prodNameInputRef.current?.focus(), 60);
     },
-    [bootstrap.categories, bootstrap.profile, isLaos]
+    [bootstrap.categories, bootstrap.profile, isLaos, locale]
   );
 
   const openEditProductModal = useCallback(
@@ -474,13 +498,21 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       if (matched) {
         openEditProductModal(matched);
         onToast(
-          `พบบาร์โค้ด "${code}" (${matched.itemName}) — เปิดหน้าแก้ไขสินค้าแล้ว`,
+          pick(
+            `พบบาร์โค้ด "${code}" (${matched.itemName}) — เปิดหน้าแก้ไขสินค้าแล้ว`,
+            `ພົບບາໂຄດ "${code}" (${matched.itemName}) — ເປີດໜ້າແກ້ໄຂສິນຄ້າແລ້ວ`,
+            `Matched barcode "${code}" (${matched.itemName}) — editing item`
+          ),
           'success'
         );
       } else {
         openCreateProductModal(code);
         onToast(
-          `ยังไม่พบบาร์โค้ด "${code}" ในระบบ — เปิดฟอร์มเพิ่มสินค้าใหม่พร้อมใส่บาร์โค้ดให้แล้ว`,
+          pick(
+            `ยังไม่พบบาร์โค้ด "${code}" ในระบบ — เปิดฟอร์มเพิ่มสินค้าใหม่พร้อมใส่บาร์โค้ดให้แล้ว`,
+            `ຍັງບໍ່ພົບບາໂຄດ "${code}" ໃນລະບົບ — ເປີດຟອມເພີ່ມສິນຄ້າໃໝ່ພ້ອມໃສ່ບາໂຄດໃຫ້ແລ້ວ`,
+            `Barcode "${code}" not found — opened New Product form with prefilled barcode`
+          ),
           'success'
         );
       }
@@ -614,7 +646,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         whFirstKeySnapshotRef.current = null;
         if (listenInModal) {
           setProdBarcode(completedBarcode);
-          onToast(`รับรหัสบาร์โค้ด "${completedBarcode}" จากปืนสแกนเรียบร้อยแล้ว`, 'success');
+          onToast(
+            pick(
+              `รับรหัสบาร์โค้ด "${completedBarcode}" จากปืนสแกนเรียบร้อยแล้ว`,
+              `ຮັບລະຫັດບາໂຄດ "${completedBarcode}" ຈາກປືນສະແກນຮຽບຮ້ອຍແລ້ວ`,
+              `Captured barcode "${completedBarcode}" from scanner`
+            ),
+            'success'
+          );
         } else if (listenInCatalog) {
           handleWarehouseBarcodeLookupOrCreate(completedBarcode);
         }
@@ -674,7 +713,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
 
       setProductModalOpen(false);
       await onRefreshState();
-      onToast(`บันทึกข้อมูลสินค้า "${prodName}" สำเร็จ`, 'success');
+      onToast(
+        pick(
+          `บันทึกข้อมูลสินค้า "${prodName}" สำเร็จ`,
+          `ບັນທຶກຂໍ້ມູນສິນຄ້າ "${prodName}" ສຳເລັດ`,
+          `Saved product "${prodName}"`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -687,10 +733,17 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
     e.target.value = '';
     if (!file) return;
     try {
-      const compressed = await compressImageFileToDataUrl(file);
+      const compressed = await compressImageFileToDataUrl(file, locale);
       setProdImagePreviewUrl(compressed);
       setProdImagePendingDataUrl(compressed);
-      onToast('เตรียมรูปภาพสินค้าเรียบร้อย กดบันทึกเพื่อยืนยัน', 'success');
+      onToast(
+        pick(
+          'เตรียมรูปภาพสินค้าเรียบร้อย กดบันทึกเพื่อยืนยัน',
+          'ກຽມຮູບພາບສິນຄ້າຮຽບຮ້ອຍ ກົດບັນທຶກເພື່ອຢືນຢັນ',
+          'Product photo ready — click Save to confirm'
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     }
@@ -699,7 +752,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   const handleSaveCategory = async (overrideName?: string, overrideDept?: ShopCategoryDepartment) => {
     const cleanName = (overrideName ?? catNameInput).trim();
     if (!cleanName) {
-      onToast('กรุณากรอกชื่อหมวดหมู่', 'warn');
+      onToast(
+        pick('กรุณากรอกชื่อหมวดหมู่', 'ກະລຸນາປ້ອນຊື່ໝວດໝູ່', 'Please enter category name'),
+        'warn'
+      );
       return;
     }
     const targetDept = overrideDept ?? catDeptInput;
@@ -721,7 +777,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         setCatEditingId(null);
         setCatNameInput('');
       }
-      onToast(`บันทึกหมวดหมู่ "${res.category.name}" เรียบร้อยแล้ว`, 'success');
+      onToast(
+        pick(
+          `บันทึกหมวดหมู่ "${res.category.name}" เรียบร้อยแล้ว`,
+          `ບັນທຶກໝວດໝູ່ "${res.category.name}" ຮຽບຮ້ອຍແລ້ວ`,
+          `Saved category "${res.category.name}"`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -757,8 +820,16 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       await onRefreshState();
       onToast(
         nextActive
-          ? `เปิดขาย "${v.itemName}" บนหน้าจอ POS อีกครั้งแล้ว`
-          : `พักการขาย "${v.itemName}" ชั่วคราวแล้ว (ซ่อนจากหน้าขาย POS)`,
+          ? pick(
+              `เปิดขาย "${v.itemName}" บนหน้าจอ POS อีกครั้งแล้ว`,
+              `ເປີດຂາຍ "${v.itemName}" ເທິງໜ້າຈໍ POS ອີກຄັ້ງແລ້ວ`,
+              `Re-enabled "${v.itemName}" on POS register`
+            )
+          : pick(
+              `พักการขาย "${v.itemName}" ชั่วคราวแล้ว (ซ่อนจากหน้าขาย POS)`,
+              `ພັກການຂາຍ "${v.itemName}" ຊົ່ວຄາວແລ້ວ (ຊ່ອນຈາກໜ້າຂາຍ POS)`,
+              `Paused "${v.itemName}" (hidden from POS register)`
+            ),
         nextActive ? 'success' : 'warn'
       );
     } catch (err) {
@@ -782,7 +853,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       });
       setAdjTarget(null);
       await onRefreshState();
-      onToast(`ปรับปรุงสต็อก ${adjTarget.itemName} บันทึกลงสมุดบัญชีสำเร็จ`, 'success');
+      onToast(
+        pick(
+          `ปรับปรุงสต็อก ${adjTarget.itemName} บันทึกลงสมุดบัญชีสำเร็จ`,
+          `ປັບປຸງສະຕັອກ ${adjTarget.itemName} ບັນທຶກລົງປຶ້ມບັນຊີສຳເລັດ`,
+          `Adjusted stock for ${adjTarget.itemName} in ledger`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -822,7 +900,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         landedCosts,
       });
       setPoPreviewLines(res.lines);
-      onToast('คำนวณปันส่วนค่าขนส่งแฝง (Largest Remainder i128) สำเร็จ', 'success');
+      onToast(
+        pick(
+          'คำนวณปันส่วนค่าขนส่งแฝง (Largest Remainder i128) สำเร็จ',
+          'ຄຳນວນປັນສ່ວນຄ່າຂົນສົ່ງແຝງ (Largest Remainder i128) ສຳເລັດ',
+          'Calculated landed cost allocation (Largest Remainder i128)'
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -855,7 +940,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       const hist = await posTransport.listPoHistory(outletId);
       setPoHistory(hist.purchaseOrders);
       await onRefreshState();
-      onToast(`รับสินค้าเข้าคลังเลขที่ ${res.poNumber} พร้อมคำนวณ MAC ใหม่สำเร็จ`, 'success');
+      onToast(
+        pick(
+          `รับสินค้าเข้าคลังเลขที่ ${res.poNumber} พร้อมคำนวณ MAC ใหม่สำเร็จ`,
+          `ຮັບສິນຄ້າເຂົ້າສາງເລກທີ ${res.poNumber} ພ້ອມຄຳນວນ MAC ໃໝ່ສຳເລັດ`,
+          `Received PO ${res.poNumber} & recalculated MAC`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -888,7 +980,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
   const handleExecuteStocktake = async () => {
     const entries = Object.entries(stocktakeInputs).filter(([, v]) => v.trim() !== '');
     if (entries.length === 0) {
-      onToast('กรุณากรอกยอดนับจริงอย่างน้อย 1 รายการในตารางตรวจนับสต็อก', 'warn');
+      onToast(
+        pick(
+          'กรุณากรอกยอดนับจริงอย่างน้อย 1 รายการในตารางตรวจนับสต็อก',
+          'ກະລຸນາປ້ອນຍອດນັບຈິງຢ່າງໜ້ອຍ 1 ລາຍການໃນຕາຕະລາງກວດນັບສະຕັອກ',
+          'Enter counted quantity for at least 1 stocktake row'
+        ),
+        'warn'
+      );
       return;
     }
     setBusy(true);
@@ -927,7 +1026,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       await onRefreshState();
       const created = res.outlets.find((o) => o.id !== 'OUTLET-HQ');
       if (created) setTrDestOutletId(created.id);
-      onToast(`เปิดสาขาปลายทาง ${newOutletName} สำเร็จ`, 'success');
+      onToast(
+        pick(
+          `เปิดสาขาปลายทาง ${newOutletName} สำเร็จ`,
+          `ເປີດສາຂາປາຍທາງ ${newOutletName} ສຳເລັດ`,
+          `Created destination branch "${newOutletName}"`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -937,7 +1043,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
 
   const handleDispatchTransfer = async () => {
     if (!trDestOutletId) {
-      onToast('กรุณาสร้างหรือเลือกสาขาปลายทางก่อนส่งโอนสต็อก', 'warn');
+      onToast(
+        pick(
+          'กรุณาสร้างหรือเลือกสาขาปลายทางก่อนส่งโอนสต็อก',
+          'ກະລຸນາສ້າງ ຫຼື ເລືອກສາຂາປາຍທາງກ່ອນສົ່ງໂອນສະຕັອກ',
+          'Create or select a destination branch before transferring stock'
+        ),
+        'warn'
+      );
       return;
     }
     setBusy(true);
@@ -952,7 +1065,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       const trData = await posTransport.listTransfers();
       setTransfersList(trData.transfers);
       await onRefreshState();
-      onToast(`ตัดจ่ายใบโอนย้ายสาขา ${res.transferNumber} (IN_TRANSIT) สำเร็จ`, 'success');
+      onToast(
+        pick(
+          `ตัดจ่ายใบโอนย้ายสาขา ${res.transferNumber} (IN_TRANSIT) สำเร็จ`,
+          `ຕັດຈ່າຍໃບໂອນຍ້າຍສາຂາ ${res.transferNumber} (IN_TRANSIT) ສຳເລັດ`,
+          `Dispatched inter-branch transfer ${res.transferNumber} (IN_TRANSIT)`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -970,7 +1090,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       const trData = await posTransport.listTransfers();
       setTransfersList(trData.transfers);
       await onRefreshState();
-      onToast(`สาขาปลายทางกดรับสต็อกใบโอน ${transferNo} (COMPLETED) สำเร็จ`, 'success');
+      onToast(
+        pick(
+          `สาขาปลายทางกดรับสต็อกใบโอน ${transferNo} (COMPLETED) สำเร็จ`,
+          `ສາຂາປາຍທາງກົດຮັບສະຕັອກໃບໂອນ ${transferNo} (COMPLETED) ສຳເລັດ`,
+          `Destination branch received transfer ${transferNo} (COMPLETED)`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -1069,7 +1196,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           <div
             className="flex items-center gap-1 overflow-x-auto"
             role="tablist"
-            aria-label="หมวดหมู่คลังสินค้าและจัดซื้อ"
+            aria-label={pick('หมวดหมู่คลังสินค้าและจัดซื้อ', 'ໝວດໝູ່ສາງສິນຄ້າ ແລະ ຈັດຊື້', 'Warehouse & Purchasing Tabs')}
           >
             {visibleWarehouseTabs.map((tab) => {
               const Icon = tab.icon;
@@ -1120,7 +1247,11 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   {profileMeta.catalogTitleThai} ({outletId})
                 </h3>
                 <p className="text-xs text-ink-muted mt-0.5">
-                  ยิงปืนบาร์โค้ดที่ตัวสินค้าได้เลยเพื่อเปิดแก้ไข หรือเพิ่มสินค้าใหม่พร้อมใส่รูปภาพและลบรายการได้ยืดหยุ่น
+                  {pick(
+                    'ยิงปืนบาร์โค้ดที่ตัวสินค้าได้เลยเพื่อเปิดแก้ไข หรือเพิ่มสินค้าใหม่พร้อมใส่รูปภาพและลบรายการได้ยืดหยุ่น',
+                    'ຍິງປືນບາໂຄດທີ່ສິນຄ້າໄດ້ເລີຍເພື່ອແກ້ໄຂ ຫຼື ເພີ່ມສິນຄ້າໃໝ່ພ້ອມຮູບພາບ ແລະ ລຶບລາຍການໄດ້ຍືດຫຍຸ່ນ',
+                    'Scan any item barcode to edit directly, or add new products with photos and flexible delete'
+                  )}
                 </p>
               </div>
               <div className="relative w-full sm:w-80">
@@ -1129,10 +1260,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   id={`${uid}-catalog-search`}
                   data-wh-barcode-scan="catalog-search"
                   type="text"
-                  aria-label="ค้นหาชื่อสินค้า รหัส SKU หรือบาร์โค้ด"
+                  aria-label={pick('ค้นหาชื่อสินค้า รหัส SKU หรือบาร์โค้ด', 'ຄົ້ນຫາຊື່ສິນຄ້າ, SKU ຫຼື ບາໂຄດ', 'Search name, SKU, or barcode')}
                   value={catalogSearch}
                   onChange={(e) => setCatalogSearch(e.target.value)}
-                  placeholder="ค้นหาชื่อสินค้า / SKU / บาร์โค้ด..."
+                  placeholder={pick('ค้นหาชื่อสินค้า / SKU / บาร์โค้ด...', 'ຄົ້ນຫາຊື່ສິນຄ້າ / SKU / ບາໂຄດ...', 'Search name / SKU / barcode...')}
                   className={`h-11 w-full rounded-[48px] border border-hairline bg-canvas pl-10 pr-4 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                 />
               </div>
@@ -1142,7 +1273,9 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             <div className="rounded-[8px] border border-primary/25 bg-primary-soft/60 p-3 flex flex-wrap items-center gap-2.5">
               <div className="flex items-center gap-2 text-xs font-medium text-primary-dark shrink-0">
                 <ScanBarcode className="h-4 w-4" />
-                <span>สแกนบาร์โค้ดเพื่อเพิ่ม/ค้นหาสินค้า:</span>
+                <span>
+                  {pick('สแกนบาร์โค้ดเพื่อเพิ่ม/ค้นหาสินค้า:', 'ສະແກນບາໂຄດເພື່ອເພີ່ມ/ຄົ້ນຫາສິນຄ້າ:', 'Scan barcode to add or find:')}
+                </span>
               </div>
               <form
                 onSubmit={(e) => {
@@ -1155,10 +1288,18 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   id={`${uid}-wh-scan`}
                   type="text"
                   data-wh-barcode-scan="true"
-                  aria-label="ยิงปืนบาร์โค้ดหรือกรอกบาร์โค้ดเพื่อเพิ่มหรือค้นหาสินค้า"
+                  aria-label={pick(
+                    'ยิงปืนบาร์โค้ดหรือกรอกบาร์โค้ดเพื่อเพิ่มหรือค้นหาสินค้า',
+                    'ຍິງປືນບາໂຄດ ຫຼື ປ້ອນບາໂຄດເພື່ອເພີ່ມ ຫຼື ຄົ້ນຫາສິນຄ້າ',
+                    'Scan or enter barcode to find or add item'
+                  )}
                   value={warehouseScanInput}
                   onChange={(e) => setWarehouseScanInput(e.target.value)}
-                  placeholder="ยิงปืนบาร์โค้ดสินค้าทันที หรือพิมพ์รหัสแล้วกด Enter..."
+                  placeholder={pick(
+                    'ยิงปืนบาร์โค้ดสินค้าทันที หรือพิมพ์รหัสแล้วกด Enter...',
+                    'ຍິງປືນບາໂຄດສິນຄ້າທັນທີ ຫຼື ພິມລະຫັດແລ້ວກົດ Enter...',
+                    'Scan item barcode or type code + Enter...'
+                  )}
                   className={`h-10 flex-1 rounded-[48px] border border-hairline bg-canvas px-4 text-xs text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
                 <button
@@ -1166,7 +1307,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   disabled={!warehouseScanInput.trim()}
                   className={`h-10 rounded-[48px] bg-primary px-4 font-google-display text-xs font-medium text-white hover:bg-primary-hover whitespace-nowrap ${UI_INTERACTION.focusButtonPrimary}`}
                 >
-                  ค้นหา / เพิ่มเลย
+                  {pick('ค้นหา / เพิ่มเลย', 'ຄົ້ນຫາ / ເພີ່ມເລີຍ', 'Find / Add')}
                 </button>
               </form>
               <button
@@ -1175,7 +1316,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 className={`inline-flex h-10 items-center gap-1.5 rounded-[48px] border border-primary bg-canvas px-4 font-google-display text-xs font-medium text-primary-dark hover:bg-surface-1 whitespace-nowrap ${UI_INTERACTION.focusButton}`}
               >
                 <Camera className="h-3.5 w-3.5" />
-                <span>สแกนด้วยกล้อง</span>
+                <span>{pick('สแกนด้วยกล้อง', 'ສະແກນດ້ວຍກ້ອງ', 'Camera Scan')}</span>
               </button>
             </div>
 
@@ -1183,9 +1324,9 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               <div className="flex flex-wrap items-center gap-2">
                 {(
                   [
-                    { id: 'ALL', label: `ทั้งหมด (${profileScopedCatalog.length})` },
-                    { id: 'LOW_STOCK', label: `ต่ำกว่าเกณฑ์ / ของหมด (${lowStockCount})` },
-                    { id: 'PAUSED', label: `พักการขายชั่วคราว (${pausedCount})` },
+                    { id: 'ALL', label: `${pick('ทั้งหมด', 'ທັງໝົດ', 'All')} (${profileScopedCatalog.length})` },
+                    { id: 'LOW_STOCK', label: `${pick('ต่ำกว่าเกณฑ์ / ของหมด', 'ຕ່ຳກວ່າເກນ / ໝົດສະຕັອກ', 'Low / Out of Stock')} (${lowStockCount})` },
+                    { id: 'PAUSED', label: `${pick('พักการขายชั่วคราว', 'ພັກການຂາຍຊົ່ວຄາວ', 'Paused')} (${pausedCount})` },
                   ] as const
                 ).map((pill) => {
                   const active = catalogFilterMode === pill.id;
@@ -1217,8 +1358,12 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   }`}
                 >
                   {showOtherProfileItems
-                    ? 'ซ่อนสินค้าต่างโหมดธุรกิจ'
-                    : `มีสินค้าต่างโหมดธุรกิจซ่อนอยู่ ${otherProfileItemsCount} รายการ (คลิกดู)`}
+                    ? pick('ซ่อนสินค้าต่างโหมดธุรกิจ', 'ຊ່ອນສິນຄ້າຕ່າງໂໝດທຸລະກິດ', 'Hide Other Profile Items')
+                    : pick(
+                        `มีสินค้าต่างโหมดธุรกิจซ่อนอยู่ ${otherProfileItemsCount} รายการ (คลิกดู)`,
+                        `ມີສິນຄ້າຕ່າງໂໝດທຸລະກິດຊ່ອນຢູ່ ${otherProfileItemsCount} ລາຍການ (ຄລິກເບິ່ງ)`,
+                        `${otherProfileItemsCount} items in other profiles hidden (Show)`
+                      )}
                 </button>
               )}
             </div>
@@ -1228,13 +1373,13 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             <table className="w-full text-left text-xs">
               <thead className="bg-surface-1 text-ink-muted font-medium border-b border-hairline">
                 <tr>
-                  <th scope="col" className="py-3 px-4">SKU / บาร์โค้ด</th>
-                  <th scope="col" className="py-3 px-4">ชื่อรายการ</th>
-                  <th scope="col" className="py-3 px-4">หมวด / ประเภทสต็อก</th>
-                  <th scope="col" className="py-3 px-4 text-right">คงเหลือจริง</th>
-                  <th scope="col" className="py-3 px-4 text-right">ต้นทุนเฉลี่ย MAC</th>
-                  <th scope="col" className="py-3 px-4 text-right">ราคาขาย</th>
-                  <th scope="col" className="py-3 px-4 text-right">จัดการ</th>
+                  <th scope="col" className="py-3 px-4">{pick('SKU / บาร์โค้ด', 'SKU / ບາໂຄດ', 'SKU / Barcode')}</th>
+                  <th scope="col" className="py-3 px-4">{pick('ชื่อรายการ', 'ຊື່ລາຍການ', 'Product Name')}</th>
+                  <th scope="col" className="py-3 px-4">{pick('หมวด / ประเภทสต็อก', 'ໝວດ / ປະເພດສະຕັອກ', 'Category / Stock Type')}</th>
+                  <th scope="col" className="py-3 px-4 text-right">{pick('คงเหลือจริง', 'ຄົງເຫຼືອຈິງ', 'Stock on Hand')}</th>
+                  <th scope="col" className="py-3 px-4 text-right">{pick('ต้นทุนเฉลี่ย MAC', 'ຕົ້ນທຶນສະເລ່ຍ MAC', 'Avg Cost (MAC)')}</th>
+                  <th scope="col" className="py-3 px-4 text-right">{pick('ราคาขาย', 'ລາຄາຂາຍ', 'Selling Price')}</th>
+                  <th scope="col" className="py-3 px-4 text-right">{pick('จัดการ', 'ຈັດການ', 'Actions')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-hairline bg-canvas">
@@ -1242,8 +1387,16 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   <tr>
                     <td colSpan={7} className="py-12 text-center text-ink-muted">
                       {catalogSearch.trim()
-                        ? 'ไม่พบสินค้าหรือวัตถุดิบที่ตรงกับคำค้นหา'
-                        : 'ยังไม่มีรายการสินค้า/วัตถุดิบในคลัง — กดปุ่ม "+ เพิ่มสินค้า / วัตถุดิบใหม่" มุมขวาบนเพื่อเริ่มต้น'}
+                        ? pick(
+                            'ไม่พบสินค้าหรือวัตถุดิบที่ตรงกับคำค้นหา',
+                            'ບໍ່ພົບສິນຄ້າ ຫຼື ວັດຖຸດິບທີ່ກົງກັບຄຳຄົ້ນຫາ',
+                            'No matching products or raw materials found'
+                          )
+                        : pick(
+                            'ยังไม่มีรายการสินค้า/วัตถุดิบในคลัง — กดปุ่ม "+ เพิ่มสินค้า / วัตถุดิบใหม่" มุมขวาบนเพื่อเริ่มต้น',
+                            'ຍັງບໍ່ມີສິນຄ້າ/ວັດຖຸດິບໃນສາງ — ກົດປຸ່ມ "+ ເພີ່ມສິນຄ້າ / ວັດຖຸດິບໃໝ່" ມຸມຂວາເທິງເພື່ອເລີ່ມຕົ້ນ',
+                            'Catalog is empty — click "+ New Product / Material" at the top right to start'
+                          )}
                     </td>
                   </tr>
                 ) : (
@@ -1256,7 +1409,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                       <td className="py-3 px-4 tabular-nums-google">
                         <div className="font-medium text-ink">{v.sku}</div>
                         <div className="text-[11px] text-ink-muted">
-                          {v.barcode ?? 'ไม่มีบาร์โค้ด'}
+                          {v.barcode ?? pick('ไม่มีบาร์โค้ด', 'ບໍ່ມີບາໂຄດ', 'No barcode')}
                         </div>
                       </td>
                       <td className="py-3 px-4">
@@ -1283,7 +1436,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                               </span>
                               {!v.active && (
                                 <span className="rounded-[4px] bg-ink px-2 py-0.5 text-[10px] font-medium text-white">
-                                  พักขายชั่วคราว
+                                  {pick('พักขายชั่วคราว', 'ພັກຂາຍຊົ່ວຄາວ', 'Paused')}
                                 </span>
                               )}
                             </div>
@@ -1298,17 +1451,17 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                         </div>
                         <div className="text-[11px] text-ink-muted">
                           {v.useProduction
-                            ? 'Pre-Built ต้มเตรียมขาย'
+                            ? pick('Pre-Built ต้มเตรียมขาย', 'Pre-Built ຕົ້ມກຽມຂາຍ', 'Pre-Built Prep Batch')
                             : v.isComposite
-                              ? 'เมนูผูกสูตร BOM ตัดสด'
+                              ? pick('เมนูผูกสูตร BOM ตัดสด', 'ເມນູຜູກສູດ BOM ຕັດສົດ', 'Live BOM Recipe')
                               : v.isWeightedScale
-                                ? 'สินค้าชั่งน้ำหนักสด EAN-13'
-                                : 'ตัดสต็อกรายชิ้นโดยตรง'}
+                                ? pick('สินค้าชั่งน้ำหนักสด EAN-13', 'ສິນຄ້າຊັ່ງນ້ຳໜັກສົດ EAN-13', 'Weighted Scale EAN-13')
+                                : pick('ตัดสต็อกรายชิ้นโดยตรง', 'ຕັດສະຕັອກລາຍຊິ້ນໂດຍກົງ', 'Direct Unit Deduction')}
                         </div>
                       </td>
                       <td className="py-3 px-4 text-right tabular-nums-google">
                         {v.isComposite && !v.useProduction ? (
-                          <span className="text-ink-muted">ตามวัตถุดิบ</span>
+                          <span className="text-ink-muted">{pick('ตามวัตถุดิบ', 'ຕາມວັດຖຸດິບ', 'By Ingredients')}</span>
                         ) : (
                           <div>
                             <span className="text-sm font-medium text-ink">
@@ -1316,7 +1469,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                             </span>
                             {isLow && (
                               <div className="mt-0.5 inline-flex items-center justify-end gap-1 rounded-[4px] bg-ink px-1.5 py-0.5 text-[10px] text-white ml-1.5">
-                                <AlertCircle className="h-3 w-3" /> ต่ำกว่าเกณฑ์
+                                <AlertCircle className="h-3 w-3" /> {pick('ต่ำกว่าเกณฑ์', 'ຕ່ຳກວ່າເກນ', 'Low Stock')}
                               </div>
                             )}
                           </div>
@@ -1339,7 +1492,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                               : 'border-primary bg-primary-soft text-primary-dark hover:bg-primary-soft/80'
                           }`}
                         >
-                          {v.active ? 'พักขาย' : 'เปิดขาย'}
+                          {v.active ? pick('พักขาย', 'ພັກຂາຍ', 'Pause') : pick('เปิดขาย', 'ເປີດຂາຍ', 'Activate')}
                         </button>
                         <button
                           type="button"
@@ -1347,14 +1500,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           className={`inline-flex items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-3 py-1.5 text-[11px] font-medium text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                         >
                           <Printer className="h-3.5 w-3.5" />
-                          <span>บาร์โค้ด</span>
+                          <span>{pick('บาร์โค้ด', 'ບາໂຄດ', 'Label')}</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => openEditProductModal(v)}
                           className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-[11px] font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                         >
-                          แก้ไข
+                          {pick('แก้ไข', 'ແກ້ໄຂ', 'Edit')}
                         </button>
                         {(!v.isComposite || v.useProduction) && (
                           <button
@@ -1365,12 +1518,12 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                             }}
                             className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-[11px] font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                           >
-                            ปรับสต็อก
+                            {pick('ปรับสต็อก', 'ປັບສະຕັອກ', 'Adjust')}
                           </button>
                         )}
                         <button
                           type="button"
-                          aria-label={`ลบสินค้า ${v.itemName}`}
+                          aria-label={pick(`ลบสินค้า ${v.itemName}`, `ລຶບສິນຄ້າ ${v.itemName}`, `Delete product ${v.itemName}`)}
                           onClick={() => setConfirmDeleteVariant(v)}
                           className={`inline-flex h-11 w-11 items-center justify-center rounded-full border border-hairline bg-canvas text-ink-muted hover:border-ink hover:bg-surface-1 hover:text-ink align-middle ${UI_INTERACTION.focusButton}`}
                         >
@@ -1397,31 +1550,41 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               </div>
               <div>
                 <h3 className="font-google-display text-[18px] font-normal text-ink">
-                  {catEditingId ? 'แก้ไขหมวดหมู่สินค้า' : 'เพิ่มหมวดหมู่สินค้า / เมนูใหม่'}
+                  {catEditingId
+                    ? pick('แก้ไขหมวดหมู่สินค้า', 'ແກ້ໄຂໝວດໝູ່ສິນຄ້າ', 'Edit Category')
+                    : pick('เพิ่มหมวดหมู่สินค้า / เมนูใหม่', 'ເພີ່ມໝວດໝູ່ສິນຄ້າ / ເມນູໃໝ່', 'Create Product / Menu Category')}
                 </h3>
                 <p className="text-ink-muted">
-                  แยกแผนกหมวดหมู่ตามโหมดร้านค้าชัดเจน ไม่ปะปนกันระหว่างค้าปลีกและคาเฟ่
+                  {pick(
+                    'แยกแผนกหมวดหมู่ตามโหมดร้านค้าชัดเจน ไม่ปะปนกันระหว่างค้าปลีกและคาเฟ่',
+                    'ແຍກພະແນກໝວດໝູ່ຕາມໂໝດຮ້ານຄ້າຊັດເຈນ ບໍ່ປົນເປກັນລະຫວ່າງຂາຍຍ່ອຍ ແລະ ຄາເຟ່',
+                    'Separates departments cleanly by store profile without mixing retail & café items'
+                  )}
                 </p>
               </div>
             </div>
 
             <div>
               <label htmlFor={`${uid}-cat-name`} className="block text-ink-muted mb-1">
-                ชื่อหมวดหมู่ (เช่น กาแฟสด, เบเกอรี่, เครื่องดื่มแช่เย็น, ของใช้ในบ้าน)
+                {pick(
+                  'ชื่อหมวดหมู่ (เช่น กาแฟสด, เบเกอรี่, เครื่องดื่มแช่เย็น, ของใช้ในบ้าน)',
+                  'ຊື່ໝວດໝູ່ (ເຊັ່ນ ກາເຟສົດ, ເບເກີຣີ, ເຄື່ອງດື່ມແຊ່ເຢັນ)',
+                  'Category Name (e.g. Fresh Coffee, Bakery, Chilled Drinks)'
+                )}
               </label>
               <input
                 id={`${uid}-cat-name`}
                 type="text"
                 value={catNameInput}
                 onChange={(e) => setCatNameInput(e.target.value)}
-                placeholder="พิมพ์ชื่อหมวดหมู่..."
+                placeholder={pick('พิมพ์ชื่อหมวดหมู่...', 'ພິມຊື່ໝວດໝູ່...', 'Enter category name...')}
                 className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
             </div>
 
             <div>
               <label htmlFor={`${uid}-cat-dept`} className="block text-ink-muted mb-1">
-                ประเภทแผนก / รูปแบบร้านค้า
+                {pick('ประเภทแผนก / รูปแบบร้านค้า', 'ປະເພດພະແນກ / ຮູບແບບຮ້ານຄ້າ', 'Department / Profile Type')}
               </label>
               <select
                 id={`${uid}-cat-dept`}
@@ -1430,12 +1593,18 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
               >
                 {bootstrap.profile !== 'HOSPITALITY' && (
-                  <option value="RETAIL">สินค้าปลีก / ซูเปอร์มาร์เก็ต (สถานี NONE)</option>
+                  <option value="RETAIL">
+                    {pick('สินค้าปลีก / ซูเปอร์มาร์เก็ต (สถานี NONE)', 'ສິນຄ້າຂາຍຍ່ອຍ / ຊູເປີມາເກັດ (ສະຖານີ NONE)', 'Retail / Supermarket (Station NONE)')}
+                  </option>
                 )}
                 {bootstrap.profile !== 'RETAIL' && (
                   <>
-                    <option value="HOSPITALITY">เมนูคาเฟ่ / ร้านอาหาร (ส่งจอครัว BAR/MAIN)</option>
-                    <option value="RAW_MATERIAL">วัตถุดิบหลังร้าน / ต้มเตรียม (ซ่อนจากหน้าขาย POS)</option>
+                    <option value="HOSPITALITY">
+                      {pick('เมนูคาเฟ่ / ร้านอาหาร (ส่งจอครัว BAR/MAIN)', 'ເມນູຄາເຟ່ / ຮ້ານອາຫານ (ສົ່ງຈໍຄົວ BAR/MAIN)', 'Café / Restaurant Menu (KDS BAR/MAIN)')}
+                    </option>
+                    <option value="RAW_MATERIAL">
+                      {pick('วัตถุดิบหลังร้าน / ต้มเตรียม (ซ่อนจากหน้าขาย POS)', 'ວັດຖຸດິບຫຼັງຮ້ານ / ຕົ້ມກຽມ (ຊ່ອນຈາກໜ້າຂາຍ POS)', 'Back-of-House Raw Material (Hidden on POS)')}
+                    </option>
                   </>
                 )}
               </select>
@@ -1448,7 +1617,9 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onClick={() => void handleSaveCategory()}
                 className={`flex-1 h-[46px] rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                {catEditingId ? 'บันทึกการแก้ไขหมวดหมู่' : '+ เพิ่มหมวดหมู่ใหม่'}
+                {catEditingId
+                  ? pick('บันทึกการแก้ไขหมวดหมู่', 'ບັນທຶກການແກ້ໄຂໝວດໝູ່', 'Save Category Changes')
+                  : pick('+ เพิ่มหมวดหมู่ใหม่', '+ ເພີ່ມໝວດໝູ່ໃໝ່', '+ Create Category')}
               </button>
               {catEditingId && (
                 <button
@@ -1459,7 +1630,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   }}
                   className={`h-[46px] rounded-[48px] border border-hairline bg-canvas px-4 text-xs font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
-                  ยกเลิก
+                  {t('common.cancel')}
                 </button>
               )}
             </div>
@@ -1468,13 +1639,18 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           <div className="xl:col-span-7 rounded-[4px] border border-hairline bg-canvas overflow-hidden">
             <div className="border-b border-hairline bg-surface-1 px-5 py-4">
               <h3 className="font-google-display text-[18px] font-normal text-ink">
-                รายการหมวดหมู่ทั้งหมด ({profileWarehouseCategories.length} หมวดหมู่ในโหมด {bootstrap.profile})
+                {pick('รายการหมวดหมู่ทั้งหมด', 'ລາຍການໝວດໝູ່ທັງໝົດ', 'All Categories')} ({profileWarehouseCategories.length}{' '}
+                {pick('หมวดหมู่ในโหมด', 'ໝວດໝູ່ໃນໂໝດ', 'categories in')} {bootstrap.profile})
               </h3>
             </div>
             <div className="divide-y divide-hairline">
               {profileWarehouseCategories.length === 0 ? (
                 <div className="py-12 text-center text-xs text-ink-muted">
-                  ยังไม่มีหมวดหมู่ในโหมดธุรกิจนี้ — สร้างหมวดหมู่ใหม่ได้จากฟอร์มด้านซ้าย
+                  {pick(
+                    'ยังไม่มีหมวดหมู่ในโหมดธุรกิจนี้ — สร้างหมวดหมู่ใหม่ได้จากฟอร์มด้านซ้าย',
+                    'ຍັງບໍ່ມີໝວດໝູ່ໃນໂໝດທຸລະກິດນີ້ — ສ້າງໝວດໝູ່ໃໝ່ໄດ້ຈາກຟອມດ້ານຊ້າຍ',
+                    'No categories in this business profile — create one on the left'
+                  )}
                 </div>
               ) : (
                 profileWarehouseCategories.map((cat) => {
@@ -1491,11 +1667,12 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                         <div className="font-google-display text-sm font-medium text-ink flex items-center gap-2">
                           <span>{cat.name}</span>
                           <span className="rounded-[48px] border border-hairline bg-surface-1 px-2.5 py-0.5 text-[11px] font-medium text-primary-dark">
-                            {getDepartmentThaiLabel(dept)}
+                            {getDepartmentThaiLabel(dept, locale)}
                           </span>
                         </div>
                         <div className="text-[11px] text-ink-muted tabular-nums-google">
-                          ID: {cat.id} · สถานี {cat.kitchenStation} · มีสินค้า {countInCat} รายการ
+                          ID: {cat.id} · {pick('สถานี', 'ສະຖານີ', 'Station')} {cat.kitchenStation} ·{' '}
+                          {pick(`มีสินค้า ${countInCat} รายการ`, `ມີສິນຄ້າ ${countInCat} ລາຍການ`, `${countInCat} items`)}
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
@@ -1508,11 +1685,11 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           }}
                           className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-[11px] font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                         >
-                          แก้ไขชื่อ
+                          {pick('แก้ไขชื่อ', 'ແກ້ໄຂຊື່', 'Rename')}
                         </button>
                         <button
                           type="button"
-                          aria-label={`ลบหมวดหมู่ ${cat.name}`}
+                          aria-label={pick(`ลบหมวดหมู่ ${cat.name}`, `ລຶບໝວດໝູ່ ${cat.name}`, `Delete category ${cat.name}`)}
                           onClick={() => setConfirmDeleteCategory(cat)}
                           className={`inline-flex h-11 w-11 items-center justify-center rounded-full border border-hairline bg-canvas text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                         >
@@ -1535,25 +1712,29 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             {/* Create Group */}
             <div className="rounded-[4px] border border-hairline bg-canvas p-6 space-y-4 text-xs">
               <h3 className="font-google-display text-[18px] font-normal text-ink">
-                1. สร้างกลุ่มตัวเลือกเสริมใหม่ (ความหวาน / ท็อปปิ้ง)
+                {pick(
+                  '1. สร้างกลุ่มตัวเลือกเสริมใหม่ (ความหวาน / ท็อปปิ้ง)',
+                  '1. ສ້າງກຸ່ມຕົວເລືອກເສີມໃໝ່ (ຄວາມຫວານ / ທັອບປິ້ງ)',
+                  '1. Create Modifier Group (Sweetness / Toppings)'
+                )}
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                 <input
                   type="text"
-                  aria-label="ชื่อกลุ่มตัวเลือกเสริม"
-                  placeholder="ชื่อกลุ่มตัวเลือก..."
+                  aria-label={pick('ชื่อกลุ่มตัวเลือกเสริม', 'ຊື່ກຸ່ມຕົວເລືອກເສີມ', 'Modifier group name')}
+                  placeholder={pick('ชื่อกลุ่มตัวเลือก...', 'ຊື່ກຸ່ມຕົວເລືອກ...', 'Group name...')}
                   value={modGroupName}
                   onChange={(e) => setModGroupName(e.target.value)}
                   className={`sm:col-span-2 h-11 rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                 />
                 <select
-                  aria-label="ประเภทการเลือกกลุ่มตัวเลือก"
+                  aria-label={pick('ประเภทการเลือกกลุ่มตัวเลือก', 'ປະເພດການເລືອກກຸ່ມຕົວເລືອກ', 'Modifier selection type')}
                   value={modGroupType}
                   onChange={(e) => setModGroupType(e.target.value as 'SINGLE' | 'MULTIPLE')}
                   className={`h-11 rounded-[4px] border border-hairline bg-canvas px-2.5 text-ink ${UI_INTERACTION.focusSelect}`}
                 >
-                  <option value="SINGLE">เลือก 1 ข้อ</option>
-                  <option value="MULTIPLE">เลือกหลายข้อ</option>
+                  <option value="SINGLE">{pick('เลือก 1 ข้อ', 'ເລືອກ 1 ຂໍ້', 'Single Choice')}</option>
+                  <option value="MULTIPLE">{pick('เลือกหลายข้อ', 'ເລືອກຫຼາຍຂໍ້', 'Multi-Select')}</option>
                 </select>
               </div>
               <button
@@ -1562,24 +1743,28 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onClick={() => void handleCreateModifierGroup()}
                 className={`h-[46px] w-full rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                + สร้างกลุ่มตัวเลือกเสริม
+                {pick('+ สร้างกลุ่มตัวเลือกเสริม', '+ ສ້າງກຸ່ມຕົວເລືອກເສີມ', '+ Create Modifier Group')}
               </button>
             </div>
 
             {/* Create Modifier Item */}
             <div className="rounded-[4px] border border-hairline bg-canvas p-6 space-y-4 text-xs">
               <h3 className="font-google-display text-[18px] font-normal text-ink">
-                2. เพิ่มรายการย่อยในกลุ่มตัวเลือก
+                {pick('2. เพิ่มรายการย่อยในกลุ่มตัวเลือก', '2. ເພີ່ມລາຍການຍ່ອຍໃນກຸ່ມຕົວເລືອກ', '2. Add Option to Modifier Group')}
               </h3>
               {bootstrap.modifierGroups.length === 0 ? (
                 <div className="rounded-[8px] bg-primary-soft p-4 text-xs text-ink">
-                  กรุณาสร้างกลุ่มตัวเลือกเสริมในฟอร์มด้านบนอย่างน้อย 1 กลุ่มก่อนเพิ่มรายการย่อย
+                  {pick(
+                    'กรุณาสร้างกลุ่มตัวเลือกเสริมในฟอร์มด้านบนอย่างน้อย 1 กลุ่มก่อนเพิ่มรายการย่อย',
+                    'ກະລຸນາສ້າງກຸ່ມຕົວເລືອກເສີມໃນຟອມດ້ານເທິງຢ່າງໜ້ອຍ 1 ກຸ່ມກ່ອນເພີ່ມລາຍການຍ່ອຍ',
+                    'Create at least 1 modifier group above before adding options'
+                  )}
                 </div>
               ) : (
                 <>
                   <div>
                     <label htmlFor={`${uid}-mod-group`} className="block text-ink-muted mb-1">
-                      เลือกกลุ่มเป้าหมาย
+                      {pick('เลือกกลุ่มเป้าหมาย', 'ເລືອກກຸ່ມເປົ້າໝາຍ', 'Target Group')}
                     </label>
                     <select
                       id={`${uid}-mod-group`}
@@ -1597,12 +1782,12 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <div>
                       <label htmlFor={`${uid}-mod-name`} className="block text-ink-muted mb-1">
-                        ชื่อตัวเลือก
+                        {pick('ชื่อตัวเลือก', 'ຊື່ຕົວເລືອກ', 'Option Name')}
                       </label>
                       <input
                         id={`${uid}-mod-name`}
                         type="text"
-                        placeholder="เช่น หวานน้อย 25%, เพิ่มบุก"
+                        placeholder={pick('เช่น หวานน้อย 25%, เพิ่มบุก', 'ເຊັ່ນ ຫວານໜ້ອຍ 25%, ເພີ່ມໄຂ່ມຸກ', 'e.g. 25% Sugar, Extra Boba')}
                         value={modItemName}
                         onChange={(e) => setModItemName(e.target.value)}
                         className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
@@ -1624,7 +1809,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
 
                   <div>
                     <label htmlFor={`${uid}-mod-mode`} className="block text-ink-muted mb-1">
-                      กลไกตัดสต็อกเบื้องหลัง
+                      {pick('กลไกตัดสต็อกเบื้องหลัง', 'ກົນໄກຕັດສະຕັອກເບື້ອງຫຼັງ', 'Backend Stock Deduction Mode')}
                     </label>
                     <select
                       id={`${uid}-mod-mode`}
@@ -1634,8 +1819,12 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                       }
                       className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
                     >
-                      <option value="FIXED_QTY_DELTA">ตัดสต็อกวัตถุดิบตามปริมาณคงที่ (+40g)</option>
-                      <option value="ROLE_SCALE_BPS">ปรับเปอร์เซ็นต์ตามบทบาทวัตถุดิบ (-75%)</option>
+                      <option value="FIXED_QTY_DELTA">
+                        {pick('ตัดสต็อกวัตถุดิบตามปริมาณคงที่ (+40g)', 'ຕັດສະຕັອກວັດຖຸດິບຕາມປະລິມານຄົງທີ່ (+40g)', 'Fixed Ingredient Qty Delta (+40g)')}
+                      </option>
+                      <option value="ROLE_SCALE_BPS">
+                        {pick('ปรับเปอร์เซ็นต์ตามบทบาทวัตถุดิบ (-75%)', 'ປັບເປີເຊັນຕາມບົດບາດວັດຖຸດິບ (-75%)', 'Scale Ingredient Role % (-75%)')}
+                      </option>
                     </select>
                   </div>
 
@@ -1643,7 +1832,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                       <div>
                         <label htmlFor={`${uid}-mod-comp`} className="block text-ink-muted mb-1">
-                          วัตถุดิบที่จะตัดเพิ่ม
+                          {pick('วัตถุดิบที่จะตัดเพิ่ม', 'ວັດຖຸດິບທີ່ຈະຕັດເພີ່ມ', 'Extra Deducted Ingredient')}
                         </label>
                         <select
                           id={`${uid}-mod-comp`}
@@ -1651,7 +1840,9 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           onChange={(e) => setModCompVariantId(e.target.value)}
                           className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
                         >
-                          <option value="">ไม่ตัดสต็อกวัตถุดิบ (ปรับราคาอย่างเดียว)</option>
+                          <option value="">
+                            {pick('ไม่ตัดสต็อกวัตถุดิบ (ปรับราคาอย่างเดียว)', 'ບໍ່ຕັດສະຕັອກວັດຖຸດິບ (ປັບລາຄາຢ່າງດຽວ)', 'No stock deduction (price adjustment only)')}
+                          </option>
                           {bootstrap.catalogDetailed.map((v) => (
                             <option key={v.id} value={v.id}>
                               {v.itemName} ({v.unitName})
@@ -1661,7 +1852,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                       </div>
                       <div>
                         <label htmlFor={`${uid}-mod-qty`} className="block text-ink-muted mb-1">
-                          ปริมาณที่ตัดเพิ่ม
+                          {pick('ปริมาณที่ตัดเพิ่ม', 'ປະລິມານທີ່ຕັດເພີ່ມ', 'Additional Deduction Qty')}
                         </label>
                         <input
                           id={`${uid}-mod-qty`}
@@ -1676,7 +1867,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                       <div>
                         <label htmlFor={`${uid}-mod-role`} className="block text-ink-muted mb-1">
-                          บทบาทวัตถุดิบในสูตร
+                          {pick('บทบาทวัตถุดิบในสูตร', 'ບົດບາດວັດຖຸດິບໃນສູດ', 'Recipe Component Role')}
                         </label>
                         <select
                           id={`${uid}-mod-role`}
@@ -1684,15 +1875,15 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           onChange={(e) => setModRoleTarget(e.target.value as ComponentRole)}
                           className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
                         >
-                          <option value="SWEETENER">SWEETENER (ความหวาน/ไซรัป)</option>
-                          <option value="COFFEE_SHOT">COFFEE_SHOT (ช็อตกาแฟ)</option>
-                          <option value="MILK_BASE">MILK_BASE (นม)</option>
-                          <option value="TEA_BASE">TEA_BASE (เบสชา)</option>
+                          <option value="SWEETENER">{pick('SWEETENER (ความหวาน/ไซรัป)', 'SWEETENER (ຄວາມຫວານ/ນ້ຳເຊື່ອມ)', 'SWEETENER (Sugar / Syrup)')}</option>
+                          <option value="COFFEE_SHOT">{pick('COFFEE_SHOT (ช็อตกาแฟ)', 'COFFEE_SHOT (ຊັອດກາເຟ)', 'COFFEE_SHOT (Espresso)')}</option>
+                          <option value="MILK_BASE">{pick('MILK_BASE (นม)', 'MILK_BASE (ນົມ)', 'MILK_BASE (Milk)')}</option>
+                          <option value="TEA_BASE">{pick('TEA_BASE (เบสชา)', 'TEA_BASE (ເບສຊາ)', 'TEA_BASE (Tea Base)')}</option>
                         </select>
                       </div>
                       <div>
                         <label htmlFor={`${uid}-mod-scale`} className="block text-ink-muted mb-1">
-                          % ที่เปลี่ยนแปลง (เช่น -50)
+                          {pick('% ที่เปลี่ยนแปลง (เช่น -50)', '% ທີ່ປ່ຽນແປງ (ເຊັ່ນ -50)', '% Change (e.g. -50)')}
                         </label>
                         <input
                           id={`${uid}-mod-scale`}
@@ -1711,7 +1902,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     onClick={() => void handleCreateModifierItem()}
                     className={`h-[46px] w-full rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                   >
-                    + บันทึกตัวเลือกเสริมเข้าสู่หน้าขาย POS
+                    {pick('+ บันทึกตัวเลือกเสริมเข้าสู่หน้าขาย POS', '+ ບັນທຶກຕົວເລືອກເສີມເຂົ້າສູ່ໜ້າຂາຍ POS', '+ Save Option to POS Menu')}
                   </button>
                 </>
               )}
@@ -1722,7 +1913,11 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           <div className="xl:col-span-7 space-y-4">
             {bootstrap.modifierGroups.length === 0 ? (
               <div className="rounded-[4px] border border-hairline bg-canvas p-12 text-center text-xs text-ink-muted">
-                ยังไม่มีกลุ่มตัวเลือกเสริมในระบบ — สร้างกลุ่มใหม่ทางด้านซ้าย (เช่น ระดับความหวาน, ท็อปปิ้ง)
+                {pick(
+                  'ยังไม่มีกลุ่มตัวเลือกเสริมในระบบ — สร้างกลุ่มใหม่ทางด้านซ้าย (เช่น ระดับความหวาน, ท็อปปิ้ง)',
+                  'ຍັງບໍ່ມີກຸ່ມຕົວເລືອກເສີມໃນລະບົບ — ສ້າງກຸ່ມໃໝ່ທາງດ້ານຊ້າຍ (ເຊັ່ນ ລະດັບຄວາມຫວານ, ທັອບປິ້ງ)',
+                  'No modifier groups yet — create one on the left (e.g. Sweetness, Toppings)'
+                )}
               </div>
             ) : (
               bootstrap.modifierGroups.map((group) => (
@@ -1746,13 +1941,13 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     }
                     className={`rounded-[48px] border border-hairline bg-canvas px-3 py-1 text-xs font-medium text-ink-muted hover:border-ink hover:text-ink flex items-center gap-1 ${UI_INTERACTION.focusButton}`}
                   >
-                    <Trash2 className="h-3.5 w-3.5" /> ลบกลุ่ม
+                    <Trash2 className="h-3.5 w-3.5" /> {pick('ลบกลุ่ม', 'ລຶບກຸ່ມ', 'Delete Group')}
                   </button>
                 </div>
 
                 {group.modifiers.length === 0 ? (
                   <div className="rounded-[4px] border border-hairline bg-surface-1 py-5 text-center text-xs text-ink-muted">
-                    ยังไม่มีตัวเลือกย่อยในกลุ่มนี้
+                    {pick('ยังไม่มีตัวเลือกย่อยในกลุ่มนี้', 'ຍັງບໍ່ມີຕົວເລືອກຍ່ອຍໃນກຸ່ມນີ້', 'No options in this group yet')}
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -1774,14 +1969,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                               {mod.modifierMode === 'ROLE_SCALE_BPS'
                                 ? `${mod.targetComponentRole} ${mod.scaleBasisPoints / 100}%`
                                 : mod.componentVariantId
-                                  ? `${mod.quantityDeltaMilli >= 0 ? '+' : ''}${mod.quantityDeltaMilli / 1000} หน่วย`
-                                  : 'ไม่ตัดสต็อก'}
+                                  ? `${mod.quantityDeltaMilli >= 0 ? '+' : ''}${mod.quantityDeltaMilli / 1000} ${pick('หน่วย', 'ໜ່ວຍ', 'units')}`
+                                  : pick('ไม่ตัดสต็อก', 'ບໍ່ຕັດສະຕັອກ', 'No stock deduction')}
                             </span>
                           </div>
                         </div>
                         <button
                           type="button"
-                          aria-label={`ลบ ${mod.name}`}
+                          aria-label={pick(`ลบ ${mod.name}`, `ລຶບ ${mod.name}`, `Delete ${mod.name}`)}
                           onClick={() =>
                             setConfirmDeleteMod({ kind: 'item', id: mod.id, name: mod.name })
                           }
@@ -1807,14 +2002,22 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline pb-4">
               <div>
                 <h3 className="font-google-display text-[20px] font-normal text-ink">
-                  ออกใบรับสินค้าเข้าคลัง (PO) &amp; ปันส่วนค่าขนส่งแฝง
+                  {pick(
+                    'ออกใบรับสินค้าเข้าคลัง (PO) & ปันส่วนค่าขนส่งแฝง',
+                    'ອອກໃບຮັບສິນຄ້າເຂົ້າສາງ (PO) & ປັນສ່ວນຄ່າຂົນສົ່ງແຝງ',
+                    'Receive Purchase Order (PO) & Landed Cost Allocation'
+                  )}
                 </h3>
                 <p className="text-xs text-ink-muted mt-0.5">
-                  คำนวณด้วยสมการ i128 Largest Remainder กระจายเศษไมโครบาทครบ 100%
+                  {pick(
+                    'คำนวณด้วยสมการ i128 Largest Remainder กระจายเศษไมโครบาทครบ 100%',
+                    'ຄຳນວນດ້ວຍສົມຜົນ i128 Largest Remainder ກະຈາຍເສດຄ່າໃຊ້ຈ່າຍຄົບ 100%',
+                    'Allocated via exact i128 Largest Remainder rounding with 100% conservation'
+                  )}
                 </p>
               </div>
               <select
-                aria-label="เลือกผู้จำหน่ายสำหรับใบรับสินค้า"
+                aria-label={pick('เลือกผู้จำหน่ายสำหรับใบรับสินค้า', 'ເລືອກຜູ້ຈຳໜ່າຍສຳລັບໃບຮັບສິນຄ້າ', 'Select PO Supplier')}
                 value={poSupplierId}
                 onChange={(e) => setPoSupplierId(e.target.value)}
                 className={`h-11 max-w-full rounded-[4px] border border-hairline bg-canvas px-3 text-xs text-ink ${UI_INTERACTION.focusSelect}`}
@@ -1830,7 +2033,9 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             {/* PO Item Lines */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-ink-muted">รายการสินค้าที่รับเข้า</span>
+                <span className="text-xs font-medium text-ink-muted">
+                  {pick('รายการสินค้าที่รับเข้า', 'ລາຍການສິນຄ້າທີ່ຮັບເຂົ້າ', 'Received Line Items')}
+                </span>
                 <button
                   type="button"
                   disabled={purchasableVariants.length === 0}
@@ -1850,13 +2055,17 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   }
                   className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1 text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 flex items-center gap-1 ${UI_INTERACTION.focusButton}`}
                 >
-                  <Plus className="h-3.5 w-3.5" /> เพิ่มแถวสินค้า
+                  <Plus className="h-3.5 w-3.5" /> {pick('เพิ่มแถวสินค้า', 'ເພີ່ມແຖວສິນຄ້າ', 'Add Line')}
                 </button>
               </div>
 
               {purchasableVariants.length === 0 ? (
                 <div className="rounded-[8px] bg-primary-soft p-4 text-xs text-ink">
-                  ยังไม่มีสินค้าหรือวัตถุดิบที่รับเข้าสต็อกได้ กรุณาเพิ่มรายการในแท็บ &ldquo;ทะเบียนสินค้า &amp; คลัง&rdquo; ก่อนออกใบ PO
+                  {pick(
+                    'ยังไม่มีสินค้าหรือวัตถุดิบที่รับเข้าสต็อกได้ กรุณาเพิ่มรายการในแท็บ "ทะเบียนสินค้า & คลัง" ก่อนออกใบ PO',
+                    'ຍັງບໍ່ມີສິນຄ້າ ຫຼື ວັດຖຸດິບທີ່ຮັບເຂົ້າສະຕັອກໄດ້ ກະລຸນາເພີ່ມໃນແທັບ "ທະບຽນສິນຄ້າ & ສາງ" ກ່ອນອອກໃບ PO',
+                    'No stockable items yet — add items in the "Catalog & Stock" tab before creating a PO'
+                  )}
                 </div>
               ) : (
                 poLines.map((line, idx) => (
@@ -1866,7 +2075,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 >
                   <div className="sm:col-span-6">
                     <select
-                      aria-label={`สินค้าแถวที่ ${idx + 1}`}
+                      aria-label={pick(`สินค้าแถวที่ ${idx + 1}`, `ສິນຄ້າແຖວທີ ${idx + 1}`, `Item line ${idx + 1}`)}
                       value={line.variantId}
                       onChange={(e) => {
                         const val = e.target.value;
@@ -1888,7 +2097,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   <div className="sm:col-span-3">
                     <input
                       type="text"
-                      aria-label={`จำนวนสินค้าแถวที่ ${idx + 1}`}
+                      aria-label={pick(`จำนวนสินค้าแถวที่ ${idx + 1}`, `ຈຳນວນສິນຄ້າແຖວທີ ${idx + 1}`, `Quantity line ${idx + 1}`)}
                       value={line.qtyInput}
                       onChange={(e) => {
                         const val = e.target.value;
@@ -1896,14 +2105,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           prev.map((r, i) => (i === idx ? { ...r, qtyInput: val } : r))
                         );
                       }}
-                      placeholder="จำนวน"
+                      placeholder={pick('จำนวน', 'ຈຳນວນ', 'Qty')}
                       className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-2.5 text-right text-xs text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
                     />
                   </div>
                   <div className="sm:col-span-2">
                     <input
                       type="text"
-                      aria-label={`ต้นทุนต่อหน่วยแถวที่ ${idx + 1}`}
+                      aria-label={pick(`ต้นทุนต่อหน่วยแถวที่ ${idx + 1}`, `ຕົ້ນທຶນຕໍ່ໜ່ວຍແຖວທີ ${idx + 1}`, `Unit cost line ${idx + 1}`)}
                       value={line.unitCostBahtInput}
                       onChange={(e) => {
                         const val = e.target.value;
@@ -1911,7 +2120,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           prev.map((r, i) => (i === idx ? { ...r, unitCostBahtInput: val } : r))
                         );
                       }}
-                      placeholder="ทุน/หน่วย"
+                      placeholder={pick('ทุน/หน่วย', 'ທຶນ/ໜ່ວຍ', 'Unit Cost')}
                       className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-2.5 text-right text-xs text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
                     />
                   </div>
@@ -1919,7 +2128,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     {poLines.length > 1 && (
                       <button
                         type="button"
-                        aria-label={`ลบแถวสินค้าที่ ${idx + 1}`}
+                        aria-label={pick(`ลบแถวสินค้าที่ ${idx + 1}`, `ລຶບແຖວສິນຄ້າທີ ${idx + 1}`, `Remove line ${idx + 1}`)}
                         onClick={() => setPoLines((prev) => prev.filter((_, i) => i !== idx))}
                         className={`inline-flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-canvas hover:text-ink ${UI_INTERACTION.focusButton}`}
                       >
@@ -1945,14 +2154,16 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                       ...prev,
                       {
                         costType: 'HANDLING',
-                        description: isLaos ? 'ຄ່າຈັດການ/ແຊ່ເຢັນ' : 'ค่ายกของ/แช่เย็น',
+                        description: isLaos
+                          ? pick('ค่ายกของ/แช่เย็น', 'ຄ່າຈັດການ/ແຊ່ເຢັນ', 'Handling / Cold Storage')
+                          : pick('ค่ายกของ/แช่เย็น', 'ຄ່າຈັດການ/ແຊ່ເຢັນ', 'Handling / Cold Storage'),
                         amountBahtInput: isLaos ? '20000' : '100.00',
                       },
                     ])
                   }
                   className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1 text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 flex items-center gap-1 ${UI_INTERACTION.focusButton}`}
                 >
-                  <Plus className="h-3.5 w-3.5" /> เพิ่มค่าขนส่งแฝง
+                  <Plus className="h-3.5 w-3.5" /> {pick('เพิ่มค่าขนส่งแฝง', 'ເພີ່ມຄ່າຂົນສົ່ງແຝງ', 'Add Landed Cost')}
                 </button>
               </div>
               {poLandedCosts.map((lc, idx) => (
@@ -1962,7 +2173,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 >
                   <div className="sm:col-span-4">
                     <select
-                      aria-label={`ประเภทค่าใช้จ่ายแฝงที่ ${idx + 1}`}
+                      aria-label={pick(`ประเภทค่าใช้จ่ายแฝงที่ ${idx + 1}`, `ປະເພດຄ່າໃຊ້ຈ່າຍແຝງທີ ${idx + 1}`, `Landed cost type ${idx + 1}`)}
                       value={lc.costType}
                       onChange={(e) => {
                         const val = e.target.value as typeof lc.costType;
@@ -1972,16 +2183,16 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                       }}
                       className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-2.5 text-xs text-ink ${UI_INTERACTION.focusSelect}`}
                     >
-                      <option value="FREIGHT">FREIGHT (ค่าขนส่ง)</option>
-                      <option value="CUSTOMS_DUTY">CUSTOMS (ภาษีนำเข้า)</option>
-                      <option value="INSURANCE">INSURANCE (ประกันภัย)</option>
-                      <option value="HANDLING">HANDLING (ค่าจัดการ)</option>
+                      <option value="FREIGHT">{pick('FREIGHT (ค่าขนส่ง)', 'FREIGHT (ຄ່າຂົນສົ່ງ)', 'FREIGHT (Shipping)')}</option>
+                      <option value="CUSTOMS_DUTY">{pick('CUSTOMS (ภาษีนำเข้า)', 'CUSTOMS (ພາສີນຳເຂົ້າ)', 'CUSTOMS (Import Duty)')}</option>
+                      <option value="INSURANCE">{pick('INSURANCE (ประกันภัย)', 'INSURANCE (ປະກັນໄພ)', 'INSURANCE (Cargo Ins.)')}</option>
+                      <option value="HANDLING">{pick('HANDLING (ค่าจัดการ)', 'HANDLING (ຄ່າຈັດການ)', 'HANDLING (Handling Fee)')}</option>
                     </select>
                   </div>
                   <div className="sm:col-span-5">
                     <input
                       type="text"
-                      aria-label={`รายละเอียดค่าใช้จ่ายแฝงที่ ${idx + 1}`}
+                      aria-label={pick(`รายละเอียดค่าใช้จ่ายแฝงที่ ${idx + 1}`, `ລາຍລະອຽດຄ່າໃຊ້ຈ່າຍແຝງທີ ${idx + 1}`, `Landed cost description ${idx + 1}`)}
                       value={lc.description}
                       onChange={(e) => {
                         const val = e.target.value;
@@ -1995,7 +2206,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   <div className="sm:col-span-3">
                     <input
                       type="text"
-                      aria-label={`จำนวนเงินค่าใช้จ่ายแฝงที่ ${idx + 1}`}
+                      aria-label={pick(`จำนวนเงินค่าใช้จ่ายแฝงที่ ${idx + 1}`, `ຈຳນວນເງິນຄ່າໃຊ້ຈ່າຍແຝງທີ ${idx + 1}`, `Landed cost amount ${idx + 1}`)}
                       value={lc.amountBahtInput}
                       onChange={(e) => {
                         const val = e.target.value;
@@ -2017,7 +2228,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onClick={() => void handlePreviewPo()}
                 className={`h-[48px] rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
-                จำลองคำนวณ MAC ก่อนรับจริง (Preview)
+                {pick('จำลองคำนวณ MAC ก่อนรับจริง (Preview)', 'ຈຳລອງຄຳນວນ MAC ກ່ອນຮັບຈິງ (Preview)', 'Preview MAC Allocation')}
               </button>
               <button
                 type="button"
@@ -2025,7 +2236,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onClick={() => void handleReceivePo()}
                 className={`h-[48px] rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                ยืนยันรับของเข้าคลัง &amp; อัปเดต MAC
+                {pick('ยืนยันรับของเข้าคลัง & อัปเดต MAC', 'ຢືນຢັນຮັບເຄື່ອງເຂົ້າສາງ & ອັບເດດ MAC', 'Post Purchase Order & Update MAC')}
               </button>
             </div>
           </div>
@@ -2037,10 +2248,15 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <div className="font-google-display text-sm font-medium text-primary-dark">
-                      รับสินค้าใบ PO {lastReceivedPoBatch.poNumber} สำเร็จ
+                      {pick('รับสินค้าใบ PO', 'ຮັບສິນຄ້າໃບ PO', 'Received PO')} {lastReceivedPoBatch.poNumber}{' '}
+                      {pick('สำเร็จ', 'ສຳເລັດ', 'successfully')}
                     </div>
                     <div className="text-[11px] text-ink-soft">
-                      พร้อมส่งสินค้าที่รับเข้าทั้ง {lastReceivedPoBatch.items.length} รายการไปพิมพ์สติกเกอร์บาร์โค้ดติดกล่อง/ซอง
+                      {pick(
+                        `พร้อมส่งสินค้าที่รับเข้าทั้ง ${lastReceivedPoBatch.items.length} รายการไปพิมพ์สติกเกอร์บาร์โค้ดติดกล่อง/ซอง`,
+                        `ພ້ອມສົ່ງສິນຄ້າທີ່ຮັບເຂົ້າທັງ ${lastReceivedPoBatch.items.length} ລາຍການໄປພິມສະຕິກເກີບາໂຄດ`,
+                        `Ready to send all ${lastReceivedPoBatch.items.length} received item(s) to barcode label printing`
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2050,21 +2266,35 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     setBarcodeQueue(lastReceivedPoBatch.items);
                     setSubTab('BARCODE_PRINT');
                     onToast(
-                      `โหลดสินค้าจากใบรับของ ${lastReceivedPoBatch.poNumber} เข้าคิวพิมพ์บาร์โค้ดแล้ว`,
+                      pick(
+                        `โหลดสินค้าจากใบรับของ ${lastReceivedPoBatch.poNumber} เข้าคิวพิมพ์บาร์โค้ดแล้ว`,
+                        `ໂຫຼດສິນຄ້າຈາກໃບຮັບເຄື່ອງ ${lastReceivedPoBatch.poNumber} ເຂົ້າຄິວພິມບາໂຄດແລ້ວ`,
+                        `Queued items from PO ${lastReceivedPoBatch.poNumber} for barcode labels`
+                      ),
                       'success'
                     );
                   }}
                   className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-4 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                 >
                   <Printer className="h-4 w-4" />
-                  <span>พิมพ์สติกเกอร์บาร์โค้ดตามจำนวนที่รับเข้า PO นี้</span>
+                  <span>
+                    {pick(
+                      'พิมพ์สติกเกอร์บาร์โค้ดตามจำนวนที่รับเข้า PO นี้',
+                      'ພິມສະຕິກເກີບາໂຄດຕາມຈຳນວນທີ່ຮັບເຂົ້າ PO ນີ້',
+                      'Print Labels for Received PO Quantities'
+                    )}
+                  </span>
                 </button>
               </div>
             )}
             {poPreviewLines && (
               <div className="rounded-[8px] bg-primary-soft p-5 space-y-3">
                 <h4 className="font-google-display text-sm font-medium text-primary-dark">
-                  ผลการปันส่วนค่าขนส่งแฝง &amp; ต้นทุนเฉลี่ยใหม่ (Preview)
+                  {pick(
+                    'ผลการปันส่วนค่าขนส่งแฝง & ต้นทุนเฉลี่ยใหม่ (Preview)',
+                    'ຜົນການປັນສ່ວນຄ່າຂົນສົ່ງແຝງ & ຕົ້ນທຶນສະເລ່ຍໃໝ່ (Preview)',
+                    'Landed Cost Allocation & New MAC Preview'
+                  )}
                 </h4>
                 <div className="space-y-2.5">
                   {poPreviewLines.map((p) => (
@@ -2093,11 +2323,13 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
 
             <div className="rounded-[4px] border border-hairline bg-canvas p-6">
               <h4 className="font-google-display text-[18px] font-normal text-ink mb-3">
-                ประวัติใบรับสินค้า (PO History)
+                {pick('ประวัติใบรับสินค้า (PO History)', 'ປະຫວັດໃບຮັບສິນຄ້າ (PO History)', 'Purchase Order History')}
               </h4>
               <div className="divide-y divide-hairline rounded-[4px] border border-hairline max-h-96 overflow-y-auto">
                 {poHistory.length === 0 ? (
-                  <p className="text-xs text-ink-muted py-8 text-center">ยังไม่มีประวัติใบสั่งซื้อ</p>
+                  <p className="text-xs text-ink-muted py-8 text-center">
+                    {pick('ยังไม่มีประวัติใบสั่งซื้อ', 'ຍັງບໍ່ມີປະຫວັດໃບສັ່ງຊື້', 'No purchase order history yet')}
+                  </p>
                 ) : (
                   poHistory.map((po) => (
                     <div
@@ -2109,7 +2341,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           {po.poNumber}
                         </div>
                         <div className="text-[11px] text-ink-muted">
-                          {po.supplierName} · {po.lineCount} รายการ
+                          {po.supplierName} · {po.lineCount} {pick('รายการ', 'ລາຍການ', 'items')}
                         </div>
                       </div>
                       <div className="text-right tabular-nums-google">
@@ -2138,24 +2370,35 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               <span>Pre-Built Batch Production (use_production = 1)</span>
             </div>
             <h3 className="mt-1.5 font-google-display text-[26px] font-normal leading-[34px] tracking-[-0.25px]">
-              สั่งผลิตของเตรียมขายล่วงหน้า
+              {pick('สั่งผลิตของเตรียมขายล่วงหน้า', 'ສັ່ງຜະລິດຂອງກຽມຂາຍລ່ວງໜ້າ', 'Build Pre-Built Batch Inventory')}
             </h3>
             <p className="text-xs text-white/75 mt-1">
-              ตัดสต็อกวัตถุดิบตั้งต้นทันทีและคำนวณต้นทุน MAC ของวัตถุดิบกึ่งสำเร็จรูปล็อตใหม่
+              {pick(
+                'ตัดสต็อกวัตถุดิบตั้งต้นทันทีและคำนวณต้นทุน MAC ของวัตถุดิบกึ่งสำเร็จรูปล็อตใหม่',
+                'ຕັດສະຕັອກວັດຖຸດິບຕັ້ງຕົ້ນທັນທີ ແລະ ຄຳນວນຕົ້ນທຶນ MAC ຂອງວັດຖຸດິບເຄິ່ງສຳເລັດຮູບລັອດໃໝ່',
+                'Deducts raw ingredients immediately and updates MAC for the pre-built batch'
+              )}
             </p>
           </div>
 
           <div className="p-6 space-y-5">
             {prepCandidates.length === 0 ? (
               <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 text-xs text-ink-muted">
-                ยังไม่มีสินค้ากึ่งสำเร็จรูปในคลัง กรุณาสร้างรายการในแท็บ &ldquo;ทะเบียนสินค้า &amp; คลัง&rdquo;
-                และติ๊กเลือก <strong className="text-ink">ต้มเตรียมล่วงหน้า (Pre-Built)</strong> ก่อนสั่งผลิต
+                {pick(
+                  'ยังไม่มีสินค้ากึ่งสำเร็จรูปในคลัง กรุณาสร้างรายการในแท็บ "ทะเบียนสินค้า & คลัง" และติ๊กเลือก ',
+                  'ຍັງບໍ່ມີສິນຄ້າເຄິ່ງສຳເລັດຮູບໃນສາງ ກະລຸນາສ້າງລາຍການໃນແທັບ "ທະບຽນສິນຄ້າ & ສາງ" ແລະ ຕິກເລືອກ ',
+                  'No pre-built items yet — create one in "Catalog & Stock" and check '
+                )}
+                <strong className="text-ink">
+                  {pick('ต้มเตรียมล่วงหน้า (Pre-Built)', 'ຕົ້ມກຽມລ່ວງໜ້າ (Pre-Built)', 'Pre-Built Batch')}
+                </strong>{' '}
+                {pick('ก่อนสั่งผลิต', 'ກ່ອນສັ່ງຜະລິດ', 'before producing.')}
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                 <div>
                   <label htmlFor={`${uid}-prep-var`} className="block font-medium text-ink-muted mb-1.5">
-                    เลือกรายการกึ่งสำเร็จรูป (Pre-Built Node)
+                    {pick('เลือกรายการกึ่งสำเร็จรูป (Pre-Built Node)', 'ເລືອກລາຍການເຄິ່ງສຳເລັດຮູບ (Pre-Built Node)', 'Select Pre-Built Item')}
                   </label>
                   <select
                     id={`${uid}-prep-var`}
@@ -2165,7 +2408,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   >
                     {prepCandidates.map((c) => (
                       <option key={c.id} value={c.id}>
-                        {c.itemName} (คงเหลือ{' '}
+                        {c.itemName} ({pick('คงเหลือ', 'ຄົງເຫຼືອ', 'On Hand')}{' '}
                         {formatMilliUnitsToQtyString(c.inStockMilli, c.unitName)})
                       </option>
                     ))}
@@ -2173,7 +2416,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 </div>
                 <div>
                   <label htmlFor={`${uid}-prep-qty`} className="block font-medium text-ink-muted mb-1.5">
-                    ปริมาณที่ผลิตได้ในรอบนี้
+                    {pick('ปริมาณที่ผลิตได้ในรอบนี้', 'ປະລິມານທີ່ຜະລິດໄດ້ໃນຮອບນີ້', 'Batch Yield Quantity')}
                   </label>
                   <input
                     id={`${uid}-prep-qty`}
@@ -2192,7 +2435,11 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               onClick={() => void handlePrepBuild()}
               className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
-              บันทึกการผลิตล็อตใหม่ &amp; ตัดวัตถุดิบตั้งต้นอัตโนมัติ
+              {pick(
+                'บันทึกการผลิตล็อตใหม่ & ตัดวัตถุดิบตั้งต้นอัตโนมัติ',
+                'ບັນທຶກການຜະລິດລັອດໃໝ່ & ຕັດວັດຖຸດິບຕັ້ງຕົ້ນອັດຕະໂນມັດ',
+                'Record Production Batch & Deduct Raw Ingredients'
+              )}
             </button>
           </div>
         </div>
@@ -2207,10 +2454,20 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               <div>
                 <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2">
                   <ClipboardCheck className="h-5 w-5 text-primary" />
-                  <span>ใบตรวจนับสต็อกจริง (Physical Stocktake · RE_COUNT)</span>
+                  <span>
+                    {pick(
+                      'ใบตรวจนับสต็อกจริง (Physical Stocktake · RE_COUNT)',
+                      'ໃບກວດນັບສະຕັອກຈິງ (Physical Stocktake · RE_COUNT)',
+                      'Physical Stocktake Sheet (RE_COUNT)'
+                    )}
+                  </span>
                 </h3>
                 <p className="text-xs text-ink-muted mt-0.5">
-                  กรอกเฉพาะรายการที่ต้องการปรับยอดให้ตรงกับของจริงบนชั้นวาง
+                  {pick(
+                    'กรอกเฉพาะรายการที่ต้องการปรับยอดให้ตรงกับของจริงบนชั้นวาง',
+                    'ປ້ອນສະເພາະລາຍການທີ່ຕ້ອງການປັບຍອດໃຫ້ຕົງກັບຂອງຈິງເທິງຊັ້ນວາງ',
+                    'Enter physical counts only for items needing reconciliation'
+                  )}
                 </p>
               </div>
               <button
@@ -2219,7 +2476,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onClick={() => void handleExecuteStocktake()}
                 className={`h-[44px] rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                ยืนยันผลตรวจนับสต็อก
+                {pick('ยืนยันผลตรวจนับสต็อก', 'ຢືນຢັນຜົນກວດນັບສະຕັອກ', 'Post Stocktake Variance')}
               </button>
             </div>
 
@@ -2227,16 +2484,20 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               <table className="w-full text-left text-xs">
                 <thead className="bg-surface-1 text-ink-muted font-medium border-b border-hairline">
                   <tr>
-                    <th scope="col" className="py-2.5 px-3">รายการ</th>
-                    <th scope="col" className="py-2.5 px-3 text-right">ยอดในระบบ</th>
-                    <th scope="col" className="py-2.5 px-3 text-right">ยอดนับจริง</th>
+                    <th scope="col" className="py-2.5 px-3">{pick('รายการ', 'ລາຍການ', 'Item')}</th>
+                    <th scope="col" className="py-2.5 px-3 text-right">{pick('ยอดในระบบ', 'ຍອດໃນລະບົບ', 'System Qty')}</th>
+                    <th scope="col" className="py-2.5 px-3 text-right">{pick('ยอดนับจริง', 'ຍອດນັບຈິງ', 'Counted Qty')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-hairline bg-canvas">
                   {purchasableVariants.length === 0 ? (
                     <tr>
                       <td colSpan={3} className="py-10 text-center text-ink-muted">
-                        ยังไม่มีรายการสินค้าหรือวัตถุดิบสำหรับตรวจนับสต็อก
+                        {pick(
+                          'ยังไม่มีรายการสินค้าหรือวัตถุดิบสำหรับตรวจนับสต็อก',
+                          'ຍັງບໍ່ມີລາຍການສິນຄ້າ ຫຼື ວັດຖຸດິບສຳລັບກວດນັບສະຕັອກ',
+                          'No inventory items available to count'
+                        )}
                       </td>
                     </tr>
                   ) : (
@@ -2254,7 +2515,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                         <td className="py-2.5 px-3 text-right">
                           <input
                             type="text"
-                            aria-label={`ยอดนับจริงของ ${v.itemName}`}
+                            aria-label={pick(`ยอดนับจริงของ ${v.itemName}`, `ຍອດນັບຈິງຂອງ ${v.itemName}`, `Physical count for ${v.itemName}`)}
                             placeholder={formatMilliUnitsToQtyString(v.inStockMilli)}
                             value={stocktakeInputs[v.id] ?? ''}
                             onChange={(e) =>
@@ -2275,25 +2536,29 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           <div className="xl:col-span-5 rounded-[4px] border border-hairline bg-canvas p-6 space-y-4">
             <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2">
               <ArrowLeftRight className="h-5 w-5 text-primary" />
-              <span>โอนย้ายสต็อกระหว่างสาขา</span>
+              <span>{pick('โอนย้ายสต็อกระหว่างสาขา', 'ໂອນຍ້າຍສະຕັອກລະຫວ່າງສາຂາ', 'Inter-Branch Stock Transfers')}</span>
             </h3>
 
             {bootstrap.outlets.length < 2 && (
               <div className="rounded-[8px] bg-primary-soft p-4 space-y-2.5">
                 <div className="text-xs font-medium text-ink">
-                  เปิดสาขาที่ 2 เพื่อเริ่มใช้งานโอนสต็อกข้ามสาขา:
+                  {pick(
+                    'เปิดสาขาที่ 2 เพื่อเริ่มใช้งานโอนสต็อกข้ามสาขา:',
+                    'ເປີດສາຂາທີ 2 ເພື່ອເລີ່ມໃຊ້ງານໂອນສະຕັອກຂ້າມສາຂາ:',
+                    'Create a 2nd branch to enable stock transfers:'
+                  )}
                 </div>
                 <div className="flex flex-col sm:flex-row gap-2">
                   <input
                     type="text"
-                    aria-label="รหัสสาขาใหม่"
+                    aria-label={pick('รหัสสาขาใหม่', 'ລະຫັດສາຂາໃໝ່', 'New branch code')}
                     value={newOutletCode}
                     onChange={(e) => setNewOutletCode(e.target.value)}
                     className={`h-10 w-full sm:w-24 rounded-[4px] border border-hairline bg-canvas px-2.5 text-xs text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                   />
                   <input
                     type="text"
-                    aria-label="ชื่อสาขาใหม่"
+                    aria-label={pick('ชื่อสาขาใหม่', 'ຊື່ສາຂາໃໝ່', 'New branch name')}
                     value={newOutletName}
                     onChange={(e) => setNewOutletName(e.target.value)}
                     className={`h-10 flex-1 rounded-[4px] border border-hairline bg-canvas px-2.5 text-xs text-ink ${UI_INTERACTION.focusControl}`}
@@ -2303,7 +2568,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     onClick={() => void handleCreateBranchOutlet()}
                     className={`h-10 rounded-[48px] bg-primary px-4 text-xs font-medium text-white hover:bg-primary-hover whitespace-nowrap ${UI_INTERACTION.focusButtonPrimary}`}
                   >
-                    + เปิดสาขา
+                    {pick('+ เปิดสาขา', '+ ເປີດສາຂາ', '+ Add Branch')}
                   </button>
                 </div>
               </div>
@@ -2312,7 +2577,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             <div className="space-y-3 text-xs">
             <div>
               <label htmlFor={`${uid}-tr-dest`} className="block text-ink-muted mb-1">
-                โอนจากสาขาปัจจุบัน ({outletId}) ไปยัง
+                {pick(`โอนจากสาขาปัจจุบัน (${outletId}) ไปยัง`, `ໂອນຈາກສາຂາປັດຈຸບັນ (${outletId}) ໄປຍັງ`, `Transfer from ${outletId} to`)}
               </label>
               <select
                 id={`${uid}-tr-dest`}
@@ -2320,7 +2585,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onChange={(e) => setTrDestOutletId(e.target.value)}
                 className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
               >
-                <option value="">-- เลือกสาขาปลายทาง --</option>
+                <option value="">{pick('-- เลือกสาขาปลายทาง --', '-- ເລືອກສາຂາປາຍທາງ --', '-- Select Destination Branch --')}</option>
                 {bootstrap.outlets
                   .filter((o) => o.id !== outletId)
                   .map((o) => (
@@ -2332,7 +2597,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <select
-                  aria-label="เลือกสินค้าที่จะโอนย้าย"
+                  aria-label={pick('เลือกสินค้าที่จะโอนย้าย', 'ເລືອກສິນຄ້າທີ່ຈະໂອນຍ້າຍ', 'Select item to transfer')}
                   value={trVariantId}
                   onChange={(e) => setTrVariantId(e.target.value)}
                   className={`sm:col-span-2 h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
@@ -2347,7 +2612,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 </select>
                 <input
                   type="text"
-                  aria-label="จำนวนที่โอนย้าย"
+                  aria-label={pick('จำนวนที่โอนย้าย', 'ຈຳນວນທີ່ໂອນຍ້າຍ', 'Transfer quantity')}
                   value={trQtyInput}
                   onChange={(e) => setTrQtyInput(e.target.value)}
                   className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-right text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
@@ -2359,14 +2624,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onClick={() => void handleDispatchTransfer()}
                 className={`h-[46px] w-full rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                ส่งออกใบโอนย้ายสต็อก (TRANSFER_OUT)
+                {pick('ส่งออกใบโอนย้ายสต็อก (TRANSFER_OUT)', 'ສົ່ງອອກໃບໂອນຍ້າຍສະຕັອກ (TRANSFER_OUT)', 'Dispatch Stock Transfer (TRANSFER_OUT)')}
               </button>
             </div>
 
             <div className="divide-y divide-hairline rounded-[4px] border border-hairline max-h-60 overflow-y-auto">
               {transfersList.length === 0 ? (
                 <div className="py-6 text-center text-xs text-ink-muted">
-                  ยังไม่มีประวัติใบโอนย้ายสต็อกระหว่างสาขา
+                  {pick('ยังไม่มีประวัติใบโอนย้ายสต็อกระหว่างสาขา', 'ຍັງບໍ່ມີປະຫວັດໃບໂອນຍ້າຍສະຕັອກລະຫວ່າງສາຂາ', 'No inter-branch transfers yet')}
                 </div>
               ) : (
                 transfersList.map((tr) => (
@@ -2398,11 +2663,11 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                         onClick={() => void handleReceiveTransfer(tr.id, tr.transferNumber)}
                         className={`shrink-0 rounded-[48px] bg-primary px-4 py-1.5 text-[11px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                       >
-                        กดรับของเข้าสาขา
+                        {pick('กดรับของเข้าสาขา', 'ກົດຮັບເຄື່ອງເຂົ້າສາຂາ', 'Confirm Receipt')}
                       </button>
                     ) : (
                       <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium text-primary-hover">
-                        <CheckCircle2 className="h-3.5 w-3.5" /> สำเร็จ
+                        <CheckCircle2 className="h-3.5 w-3.5" /> {pick('สำเร็จ', 'ສຳເລັດ', 'Completed')}
                       </span>
                     )}
                   </div>
@@ -2434,10 +2699,18 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               <ShieldCheck className="h-5 w-5 text-primary shrink-0 mt-0.5" />
               <div>
                 <h3 className="font-google-display text-[18px] font-normal text-ink">
-                  สมุดบัญชีความเคลื่อนไหวสต็อกห้ามแก้ไข/ลบ (Immutable inventory_transactions)
+                  {pick(
+                    'สมุดบัญชีความเคลื่อนไหวสต็อกห้ามแก้ไข/ลบ (Immutable inventory_transactions)',
+                    'ປຶ້ມບັນຊີຄວາມເຄື່ອນໄຫວສະຕັອກຫ້າມແກ້ໄຂ/ລຶບ (Immutable inventory_transactions)',
+                    'Immutable Inventory Transaction Ledger (inventory_transactions)'
+                  )}
                 </h3>
                 <p className="text-xs text-ink-muted">
-                  ป้องกันการแก้ไขย้อนหลังด้วย SQLite Triggers ระดับฐานข้อมูล + ตรวจสอบสมการผลรวมตรงกับคงเหลือ 100%
+                  {pick(
+                    'ป้องกันการแก้ไขย้อนหลังด้วย SQLite Triggers ระดับฐานข้อมูล + ตรวจสอบสมการผลรวมตรงกับคงเหลือ 100%',
+                    'ປ້ອງກັນການແກ້ໄຂຍ້ອນຫຼັງດ້ວຍ SQLite Triggers ລະດັບຖານຂໍ້ມູນ + ກວດສອບສົມຜົນຜົນລວມຕົງກັບຄົງເຫຼືອ 100%',
+                    'Protected against tampering by database-level SQLite Triggers + 100% balance conservation check'
+                  )}
                 </p>
               </div>
             </div>
@@ -2450,16 +2723,20 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   }`}
                 >
                   {bootstrap.ledgerInvariant.valid
-                    ? 'Ledger Conservation: 100% ตรงกัน'
-                    : `พบส่วนต่าง ${bootstrap.ledgerInvariant.mismatches.length} รายการ`}
+                    ? pick('Ledger Conservation: 100% ตรงกัน', 'Ledger Conservation: 100% ຕົງກັນ', 'Ledger Conservation: 100% Exact')
+                    : pick(
+                        `พบส่วนต่าง ${bootstrap.ledgerInvariant.mismatches.length} รายการ`,
+                        `ພົບສ່ວນຕ່າງ ${bootstrap.ledgerInvariant.mismatches.length} ລາຍການ`,
+                        `${bootstrap.ledgerInvariant.mismatches.length} ledger mismatch(es)`
+                      )}
                 </span>
                 <select
-                  aria-label="กรองสมุดบัญชีตามสินค้าหรือวัตถุดิบ"
+                  aria-label={pick('กรองสมุดบัญชีตามสินค้าหรือวัตถุดิบ', 'ກັ່ນຕອງປຶ້ມບັນຊີຕາມສິນຄ້າ', 'Filter ledger by item')}
                   value={ledgerVariantFilter}
                   onChange={(e) => setLedgerVariantFilter(e.target.value)}
                   className={`h-10 max-w-full rounded-[4px] border border-hairline bg-canvas px-3 text-xs text-ink ${UI_INTERACTION.focusSelect}`}
                 >
-                  <option value="">-- แสดงทุกรายการสินค้า --</option>
+                  <option value="">{pick('-- แสดงทุกรายการสินค้า --', '-- ສະແດງທຸກລາຍການ --', '-- All Inventory Items --')}</option>
                   {bootstrap.catalogDetailed.map((v) => (
                     <option key={v.id} value={v.id}>
                       {v.sku} — {v.itemName}
@@ -2473,19 +2750,19 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             <table className="w-full text-left text-xs">
               <thead className="bg-surface-1 text-ink-muted font-medium border-b border-hairline sticky top-0">
                 <tr>
-                  <th scope="col" className="py-3 px-4">เวลา / อ้างอิง</th>
-                  <th scope="col" className="py-3 px-4">ประเภทธุรกรรม</th>
-                  <th scope="col" className="py-3 px-4">สินค้า / วัตถุดิบ</th>
-                  <th scope="col" className="py-3 px-4 text-right">เปลี่ยนแปลง</th>
-                  <th scope="col" className="py-3 px-4 text-right">ก่อน → หลัง</th>
-                  <th scope="col" className="py-3 px-4 text-right">ต้นทุน/หน่วย</th>
+                  <th scope="col" className="py-3 px-4">{pick('เวลา / อ้างอิง', 'ເວລາ / ອ້າງອີງ', 'Time / Reference')}</th>
+                  <th scope="col" className="py-3 px-4">{pick('ประเภทธุรกรรม', 'ປະເພດທຸລະກຳ', 'Transaction Type')}</th>
+                  <th scope="col" className="py-3 px-4">{pick('สินค้า / วัตถุดิบ', 'ສິນຄ້າ / ວັດຖຸດິບ', 'Product / Material')}</th>
+                  <th scope="col" className="py-3 px-4 text-right">{pick('เปลี่ยนแปลง', 'ປ່ຽນແປງ', 'Delta')}</th>
+                  <th scope="col" className="py-3 px-4 text-right">{pick('ก่อน → หลัง', 'ກ່ອນ → ຫຼັງ', 'Before → After')}</th>
+                  <th scope="col" className="py-3 px-4 text-right">{pick('ต้นทุน/หน่วย', 'ຕົ້ນທຶນ/ໜ່ວຍ', 'Unit Cost')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-hairline bg-canvas">
                 {ledgerRows.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="py-12 text-center text-ink-muted">
-                      ยังไม่มีรายการความเคลื่อนไหวสต็อกในสมุดบัญชี
+                      {pick('ยังไม่มีรายการความเคลื่อนไหวสต็อกในสมุดบัญชี', 'ຍັງບໍ່ມີລາຍການເຄື່ອນໄຫວສະຕັອກໃນປຶ້ມບັນຊີ', 'No stock ledger movements recorded')}
                     </td>
                   </tr>
                 ) : (
@@ -2496,7 +2773,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                           {dateTime(row.createdAt)}
                         </div>
                         <div className="text-[11px] text-ink-muted">
-                          {row.referenceType} · {row.referenceId} · โดย {row.performedByName}
+                          {row.referenceType} · {row.referenceId} · {pick('โดย', 'ໂດຍ', 'by')} {row.performedByName}
                         </div>
                       </td>
                     <td className="py-2.5 px-4">
@@ -2550,11 +2827,13 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
       >
         <div className="flex items-center justify-between border-b border-hairline px-6 py-4 bg-canvas shrink-0">
           <h3 id={`${uid}-prod-modal-title`} className="font-google-display text-[20px] font-normal text-ink">
-            {editingVariantId ? 'แก้ไขข้อมูลสินค้า / วัตถุดิบ' : 'เพิ่มสินค้า / วัตถุดิบใหม่เข้าคลัง'}
+            {editingVariantId
+              ? pick('แก้ไขข้อมูลสินค้า / วัตถุดิบ', 'ແກ້ໄຂຂໍ້ມູນສິນຄ້າ / ວັດຖຸດິບ', 'Edit Product / Material')
+              : pick('เพิ่มสินค้า / วัตถุดิบใหม่เข้าคลัง', 'ເພີ່ມສິນຄ້າ / ວັດຖຸດິບໃໝ່ເຂົ້າສາງ', 'New Product / Material')}
           </h3>
           <button
             type="button"
-            aria-label="ปิดหน้าต่างสินค้า"
+            aria-label={pick('ปิดหน้าต่างสินค้า', 'ປິດໜ້າຕ່າງສິນຄ້າ', 'Close product modal')}
             onClick={() => setProductModalOpen(false)}
             className={`flex h-9 w-9 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
           >
@@ -2569,23 +2848,31 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               {prodImagePreviewUrl ? (
                 <img
                   src={prodImagePreviewUrl}
-                  alt="ตัวอย่างรูปสินค้า"
+                  alt={pick('ตัวอย่างรูปสินค้า', 'ຕົວຢ່າງຮູບສິນຄ້າ', 'Product photo preview')}
                   className="h-full w-full object-cover"
                 />
               ) : (
                 <div className="text-center text-[11px] text-ink-muted px-2">
                   <ImagePlus className="h-5 w-5 mx-auto mb-1 text-ink-muted" />
-                  <span>ยังไม่มีรูป</span>
+                  <span>{pick('ยังไม่มีรูป', 'ຍັງບໍ່ມີຮູບ', 'No Photo')}</span>
                 </div>
               )}
             </div>
 
             <div className="flex-1 min-w-[200px] space-y-2">
               <div className="font-google-display text-sm font-medium text-ink">
-                รูปภาพสินค้า / เมนู (แสดงบนหน้าจอขาย POS และคลังสินค้า)
+                {pick(
+                  'รูปภาพสินค้า / เมนู (แสดงบนหน้าจอขาย POS และคลังสินค้า)',
+                  'ຮູບພາບສິນຄ້າ / ເມນູ (ສະແດງເທິງໜ້າຈໍຂາຍ POS ແລະ ສາງສິນຄ້າ)',
+                  'Product / Menu Image (Shown on POS & Warehouse)'
+                )}
               </div>
               <p className="text-[11px] text-ink-muted">
-                รองรับ JPG / PNG / WebP บีบอัดขนาดอัตโนมัติและเก็บในเครื่องแบบออฟไลน์ 100%
+                {pick(
+                  'รองรับ JPG / PNG / WebP บีบอัดขนาดอัตโนมัติและเก็บในเครื่องแบบออฟไลน์ 100%',
+                  'ຮອງຮັບ JPG / PNG / WebP ບີບອັດຂະໜາດອັດຕະໂນມັດ ແລະ ເກັບໃນເຄື່ອງແບບອອບໄລນ໌ 100%',
+                  'Supports JPG / PNG / WebP — compressed & stored 100% locally offline'
+                )}
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <input
@@ -2601,7 +2888,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   className={`inline-flex h-9 items-center gap-1.5 rounded-[48px] border border-primary bg-canvas px-3.5 text-xs font-medium text-primary hover:bg-primary-soft/50 ${UI_INTERACTION.focusButton}`}
                 >
                   <Upload className="h-3.5 w-3.5" />
-                  <span>เลือกรูปภาพ</span>
+                  <span>{pick('เลือกรูปภาพ', 'ເລືອກຮູບພາບ', 'Choose Image')}</span>
                 </button>
                 <button
                   type="button"
@@ -2609,7 +2896,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   className={`inline-flex h-9 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3.5 text-xs font-medium text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                 >
                   <Camera className="h-3.5 w-3.5" />
-                  <span>ถ่ายรูปจากกล้อง</span>
+                  <span>{pick('ถ่ายรูปจากกล้อง', 'ຖ່າຍຮູບຈາກກ້ອງ', 'Take Photo')}</span>
                 </button>
                 {prodImagePreviewUrl && (
                   <button
@@ -2621,7 +2908,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     className={`inline-flex h-9 items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-3 text-xs font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
-                    <span>ลบรูป</span>
+                    <span>{pick('ลบรูป', 'ລຶບຮູບ', 'Remove Photo')}</span>
                   </button>
                 )}
               </div>
@@ -2630,7 +2917,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
 
           <div className="sm:col-span-2">
             <label htmlFor={`${uid}-prod-name`} className="block text-ink-muted mb-1">
-              ชื่อสินค้า / เมนู / วัตถุดิบ
+              {pick('ชื่อสินค้า / เมนู / วัตถุดิบ', 'ຊື່ສິນຄ້າ / ເມນູ / ວັດຖຸດິບ', 'Product / Menu / Material Name')}
             </label>
             <input
               ref={prodNameInputRef}
@@ -2640,15 +2927,15 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               onChange={(e) => setProdName(e.target.value)}
               placeholder={
                 bootstrap.profile === 'HOSPITALITY'
-                  ? 'เช่น ลาเต้เย็น, ข้าวผัดกะเพรา, ผงชาไทย...'
-                  : 'เช่น น้ำดื่ม 600 มล., ขนมปังโฮลวีต...'
+                  ? pick('เช่น ลาเต้เย็น, ข้าวผัดกะเพรา, ผงชาไทย...', 'ເຊັ່ນ ລາເຕ້ເຢັນ, ເຂົ້າຜັດກະເພົາ, ຜົງຊາລາວ...', 'e.g. Iced Latte, Basil Rice, Tea Powder...')
+                  : pick('เช่น น้ำดื่ม 600 มล., ขนมปังโฮลวีต...', 'ເຊັ່ນ ນ້ຳດື່ມ 600 ມລ., ເຂົ້າຈີ່...', 'e.g. Drinking Water 600ml, Whole Wheat Bread...')
               }
               className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
             />
           </div>
           <div>
             <label htmlFor={`${uid}-prod-sku`} className="block text-ink-muted mb-1">
-              รหัส SKU
+              {pick('รหัส SKU', 'ລະຫັດ SKU', 'SKU Code')}
             </label>
             <input
               id={`${uid}-prod-sku`}
@@ -2661,9 +2948,11 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           <div>
             <div className="flex items-center justify-between mb-1">
               <label htmlFor={`${uid}-prod-barcode`} className="block text-ink-muted">
-                รหัสบาร์โค้ด (ยิงปืนสแกนที่ตัวสินค้าได้เลย)
+                {pick('รหัสบาร์โค้ด (ยิงปืนสแกนที่ตัวสินค้าได้เลย)', 'ລະຫັດບາໂຄດ (ຍິງປືນສະແກນທີ່ສິນຄ້າໄດ້ເລີຍ)', 'Barcode (scan item directly)')}
               </label>
-              <span className="text-[10px] font-medium text-primary-dark">พร้อมรับปืนสแกน</span>
+              <span className="text-[10px] font-medium text-primary-dark">
+                {pick('พร้อมรับปืนสแกน', 'ພ້ອມຮັບປືນສະແກນ', 'Scanner Ready')}
+              </span>
             </div>
             <div className="flex items-center gap-1.5">
               <input
@@ -2672,13 +2961,13 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 type="text"
                 value={prodBarcode}
                 onChange={(e) => setProdBarcode(e.target.value)}
-                placeholder="ยิงปืนสแกน หรือเว้นว่างได้..."
+                placeholder={pick('ยิงปืนสแกน หรือเว้นว่างได้...', 'ຍິງປືນສະແກນ ຫຼື ປະວ່າງໄດ້...', 'Scan barcode or leave blank...')}
                 className={`h-11 flex-1 min-w-0 rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
               />
               <button
                 type="button"
-                title="สแกนบาร์โค้ดด้วยกล้อง"
-                aria-label="สแกนบาร์โค้ดด้วยกล้อง"
+                title={pick('สแกนบาร์โค้ดด้วยกล้อง', 'ສະແກນບາໂຄດດ້ວຍກ້ອງ', 'Scan barcode with camera')}
+                aria-label={pick('สแกนบาร์โค้ดด้วยกล้อง', 'ສະແກນບາໂຄດດ້ວຍກ້ອງ', 'Scan barcode with camera')}
                 onClick={() => setCameraModal({ mode: 'BARCODE', target: 'MODAL_BARCODE' })}
                 className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-[4px] border border-primary bg-primary-soft text-primary-dark hover:bg-primary-soft/80 ${UI_INTERACTION.focusButton}`}
               >
@@ -2686,8 +2975,12 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               </button>
               <button
                 type="button"
-                title="สุ่มรหัสบาร์โค้ด EAN-13 มาตรฐานสากลพร้อม Check Digit"
-                aria-label="สุ่มรหัสบาร์โค้ดอัตโนมัติ"
+                title={pick(
+                  'สุ่มรหัสบาร์โค้ด EAN-13 มาตรฐานสากลพร้อม Check Digit',
+                  'ສຸ່ມລະຫັດບາໂຄດ EAN-13 ມາດຕະຖານສາກົນພ້ອມ Check Digit',
+                  'Generate random valid EAN-13 barcode'
+                )}
+                aria-label={pick('สุ่มรหัสบาร์โค้ดอัตโนมัติ', 'ສຸ່ມລະຫັດບາໂຄດອັດຕະໂນມັດ', 'Generate random barcode')}
                 onClick={() => {
                   const existingSet = new Set(
                     bootstrap.catalogDetailed.map((v) => v.barcode).filter((b): b is string => Boolean(b))
@@ -2703,14 +2996,16 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           <div>
             <div className="flex items-center justify-between mb-1">
               <label htmlFor={`${uid}-prod-cat`} className="block text-ink-muted">
-                หมวดหมู่ ({profileMeta.shortBadge})
+                {pick('หมวดหมู่', 'ໝວດໝູ່', 'Category')} ({profileMeta.shortBadge})
               </label>
               <button
                 type="button"
                 onClick={() => setInlineCatOpen((v) => !v)}
                 className="text-[11px] font-medium text-primary hover:underline cursor-pointer"
               >
-                {inlineCatOpen ? 'ปิดฟอร์มเพิ่มหมวด' : '+ เพิ่มหมวดหมู่ใหม่'}
+                {inlineCatOpen
+                  ? pick('ปิดฟอร์มเพิ่มหมวด', 'ປິດຟອມເພີ່ມໝວດ', 'Close Form')
+                  : pick('+ เพิ่มหมวดหมู่ใหม่', '+ ເພີ່ມໝວດໝູ່ໃໝ່', '+ New Category')}
               </button>
             </div>
             <select
@@ -2728,7 +3023,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 }
                 return list.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name} · {getDepartmentThaiLabel(getCategoryDepartment(c))}
+                    {c.name} · {getDepartmentThaiLabel(getCategoryDepartment(c), locale)}
                   </option>
                 ));
               })()}
@@ -2738,10 +3033,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 <input
                   id={`${uid}-inline-cat-name`}
                   type="text"
-                  aria-label="ชื่อหมวดหมู่ใหม่ด่วน"
+                  aria-label={pick('ชื่อหมวดหมู่ใหม่ด่วน', 'ຊື່ໝວດໝູ່ໃໝ່ດ່ວນ', 'Quick new category name')}
                   value={inlineCatName}
                   onChange={(e) => setInlineCatName(e.target.value)}
-                  placeholder="ชื่อหมวดหมู่ใหม่..."
+                  placeholder={pick('ชื่อหมวดหมู่ใหม่...', 'ຊື່ໝວດໝູ່ໃໝ່...', 'New category name...')}
                   className={`h-9 flex-1 rounded-[4px] border border-primary bg-canvas px-2.5 text-xs text-ink ${UI_INTERACTION.focusControl}`}
                 />
                 <button
@@ -2755,14 +3050,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   }
                   className={`h-9 rounded-[48px] bg-primary px-3 text-[11px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                 >
-                  สร้าง
+                  {pick('สร้าง', 'ສ້າງ', 'Create')}
                 </button>
               </div>
             )}
           </div>
           <div>
             <label htmlFor={`${uid}-prod-unit`} className="block text-ink-muted mb-1">
-              หน่วยนับ (เช่น ชิ้น, แก้ว, กก., มล.)
+              {pick('หน่วยนับ (เช่น ชิ้น, แก้ว, กก., มล.)', 'ໜ່ວຍນັບ (ເຊັ່ນ ຊິ້ນ, ຈອກ, ກກ., ມລ.)', 'Unit (e.g. pcs, cup, kg, ml)')}
             </label>
             <input
               id={`${uid}-prod-unit`}
@@ -2799,7 +3094,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           {!editingVariantId && (
             <div>
               <label htmlFor={`${uid}-prod-init`} className="block text-ink-muted mb-1">
-                สต็อกยกมาเริ่มต้น
+                {pick('สต็อกยกมาเริ่มต้น', 'ສະຕັອກຍົກມາເລີ່ມຕົ້ນ', 'Opening Stock Qty')}
               </label>
               <input
                 id={`${uid}-prod-init`}
@@ -2812,7 +3107,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
           )}
           <div>
             <label htmlFor={`${uid}-prod-low`} className="block text-ink-muted mb-1">
-              จุดเตือนสต็อกต่ำ (Low Stock)
+              {pick('จุดเตือนสต็อกต่ำ (Low Stock)', 'ຈຸດເຕືອນສະຕັອກຕ່ຳ (Low Stock)', 'Low Stock Alert Threshold')}
             </label>
             <input
               id={`${uid}-prod-low`}
@@ -2831,7 +3126,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onChange={(e) => setProdActive(e.target.checked)}
                 className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
               />
-              <span>เปิดจำหน่ายบนหน้าขาย POS</span>
+              <span>{pick('เปิดจำหน่ายบนหน้าขาย POS', 'ເປີດຈຳໜ່າຍເທິງໜ້າຂາຍ POS', 'Active on POS Register')}</span>
             </label>
             {bootstrap.profile !== 'RETAIL' && (
               <>
@@ -2842,7 +3137,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     onChange={(e) => setProdIsComposite(e.target.checked)}
                     className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
                   />
-                  <span>ผูกสูตร BOM (ตัดวัตถุดิบสด)</span>
+                  <span>{pick('ผูกสูตร BOM (ตัดวัตถุดิบสด)', 'ຜູກສູດ BOM (ຕັດວັດຖຸດິບສົດ)', 'Use BOM Recipe (Live Deduction)')}</span>
                 </label>
                 <label className="flex items-center gap-2 rounded-[4px] border border-hairline bg-surface-1 p-3 text-ink cursor-pointer transition-colors duration-200 hover:border-primary focus-within:ring-2 focus-within:ring-primary/25">
                   <input
@@ -2854,7 +3149,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                     }}
                     className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
                   />
-                  <span>ต้มเตรียมล่วงหน้า (Pre-Built)</span>
+                  <span>{pick('ต้มเตรียมล่วงหน้า (Pre-Built)', 'ຕົ້ມກຽມລ່ວງໜ້າ (Pre-Built)', 'Pre-Built Batch Item')}</span>
                 </label>
               </>
             )}
@@ -2866,7 +3161,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   onChange={(e) => setProdIsScale(e.target.checked)}
                   className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
                 />
-                <span>สินค้าชั่งน้ำหนักสด (บาร์โค้ด กก.)</span>
+                <span>{pick('สินค้าชั่งน้ำหนักสด (บาร์โค้ด กก.)', 'ສິນຄ້າຊັ່ງນ້ຳໜັກສົດ (ບາໂຄດ ກກ.)', 'Weighted Scale Item (EAN-13 kg/price)')}</span>
               </label>
             )}
           </div>
@@ -2889,7 +3184,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   className={`inline-flex h-[44px] items-center gap-1.5 rounded-[48px] border border-primary bg-primary-soft px-4 font-google-display text-xs font-medium text-primary-dark hover:bg-primary hover:text-white ${UI_INTERACTION.focusButton}`}
                 >
                   <Printer className="h-3.5 w-3.5" />
-                  <span>พิมพ์บาร์โค้ด</span>
+                  <span>{pick('พิมพ์บาร์โค้ด', 'ພິມບາໂຄດ', 'Print Label')}</span>
                 </button>
                 <button
                   type="button"
@@ -2903,7 +3198,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                   className={`inline-flex h-[44px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
-                  <span>ลบสินค้านี้</span>
+                  <span>{pick('ลบสินค้านี้', 'ລຶບສິນຄ້ານີ້', 'Delete Item')}</span>
                 </button>
               </>
             )}
@@ -2914,7 +3209,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               onClick={() => setProductModalOpen(false)}
               className={`h-[46px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
             >
-              ยกเลิก
+              {t('common.cancel')}
             </button>
             <button
               type="button"
@@ -2922,7 +3217,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               onClick={() => void handleSaveProduct()}
               className={`h-[46px] rounded-[48px] bg-primary px-7 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
-              บันทึกรายการสินค้า
+              {pick('บันทึกรายการสินค้า', 'ບັນທຶກລາຍການສິນຄ້າ', 'Save Product')}
             </button>
           </div>
         </div>
@@ -2940,10 +3235,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             <div className="border-b border-hairline px-6 py-4 flex items-start justify-between gap-2 shrink-0">
               <div>
                 <h3 id={`${uid}-adj-modal-title`} className="font-google-display text-[20px] font-normal text-ink">
-                  ปรับปรุงสต็อก ({adjTarget.itemName})
+                  {pick('ปรับปรุงสต็อก', 'ປັບປຸງສະຕັອກ', 'Adjust Stock')} ({adjTarget.itemName})
                 </h3>
                 <p className="text-xs text-ink-muted mt-1">
-                  คงเหลือปัจจุบัน:{' '}
+                  {pick('คงเหลือปัจจุบัน:', 'ຄົງເຫຼືອປັດຈຸບັນ:', 'Current on hand:')}{' '}
                   <strong className="font-medium text-ink tabular-nums-google">
                     {formatMilliUnitsToQtyString(adjTarget.inStockMilli, adjTarget.unitName)}
                   </strong>
@@ -2951,7 +3246,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               </div>
               <button
                 type="button"
-                aria-label="ปิดหน้าต่างปรับปรุงสต็อก"
+                aria-label={pick('ปิดหน้าต่างปรับปรุงสต็อก', 'ປິດໜ້າຕ່າງປັບປຸງສະຕັອກ', 'Close stock adjustment modal')}
                 onClick={() => setAdjTarget(null)}
                 className={`flex h-9 w-9 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink shrink-0 ${UI_INTERACTION.focusButton}`}
               >
@@ -2961,7 +3256,11 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             <div className="p-6 space-y-4 text-xs overflow-y-auto flex-1">
               <div>
                 <label htmlFor={`${uid}-adj-delta`} className="block text-ink-muted mb-1">
-                  ปริมาณที่ต้องการเพิ่ม/ลด (เช่น -1.500 หรือ 5.000)
+                  {pick(
+                    'ปริมาณที่ต้องการเพิ่ม/ลด (เช่น -1.500 หรือ 5.000)',
+                    'ປະລິມານທີ່ຕ້ອງການເພີ່ມ/ຫຼຸດ (ເຊັ່ນ -1.500 ຫຼື 5.000)',
+                    'Quantity Adjustment Delta (e.g. -1.500 or 5.000)'
+                  )}
                 </label>
                 <input
                   id={`${uid}-adj-delta`}
@@ -2973,7 +3272,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               </div>
               <div>
                 <label htmlFor={`${uid}-adj-reason`} className="block text-ink-muted mb-1">
-                  สาเหตุการปรับปรุง
+                  {pick('สาเหตุการปรับปรุง', 'ສາເຫດການປັບປຸງ', 'Adjustment Reason')}
                 </label>
                 <input
                   id={`${uid}-adj-reason`}
@@ -2990,7 +3289,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onClick={() => setAdjTarget(null)}
                 className={`h-[44px] rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
-                ยกเลิก
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -2998,7 +3297,7 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
                 onClick={() => void handleConfirmAdjustment()}
                 className={`h-[44px] rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                ยืนยันบันทึกสมุดสต็อก
+                {pick('ยืนยันบันทึกสมุดสต็อก', 'ຢືນຢັນບັນທຶກປຶ້ມສະຕັອກ', 'Commit Stock Adjustment')}
               </button>
             </div>
           </>
@@ -3041,7 +3340,10 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         onBarcodeDetected={(code) => {
           if (cameraModal?.target === 'MODAL_BARCODE') {
             setProdBarcode(code);
-            onToast(`สแกนบาร์โค้ด "${code}" จากกล้องสำเร็จ`, 'success');
+            onToast(
+              pick(`สแกนบาร์โค้ด "${code}" จากกล้องสำเร็จ`, `ສະແກນບາໂຄດ "${code}" ຈາກກ້ອງສຳເລັດ`, `Scanned barcode "${code}"`),
+              'success'
+            );
           } else {
             handleWarehouseBarcodeLookupOrCreate(code);
           }
@@ -3049,15 +3351,26 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         onPhotoCaptured={(dataUrl) => {
           setProdImagePreviewUrl(dataUrl);
           setProdImagePendingDataUrl(dataUrl);
-          onToast('ถ่ายรูปภาพสินค้าสำเร็จ กดบันทึกเพื่อยืนยัน', 'success');
+          onToast(
+            pick('ถ่ายรูปภาพสินค้าสำเร็จ กดบันทึกเพื่อยืนยัน', 'ຖ່າຍຮູບສິນຄ້າສຳເລັດ ກົດບັນທຶກເພື່ອຢືນຢັນ', 'Photo captured — click Save to confirm'),
+            'success'
+          );
         }}
       />
 
       <ConfirmDialog
         open={Boolean(confirmDeleteVariant)}
-        title={`ยืนยันลบสินค้า "${confirmDeleteVariant?.itemName ?? ''}" ออกจากระบบ?`}
-        description="ระบบจะลบสินค้านี้ออกจากหน้าขาย POS และทะเบียนคลังทันที ปลดล็อกรหัสบาร์โค้ด/SKU ให้ใช้งานใหม่ได้ และปรับสมดุลสมุดบัญชีสต็อกให้ตรงตามมาตรฐาน 100%"
-        confirmLabel="ยืนยันลบสินค้า"
+        title={pick(
+          `ยืนยันลบสินค้า "${confirmDeleteVariant?.itemName ?? ''}" ออกจากระบบ?`,
+          `ຢືນຢັນລຶບສິນຄ້າ "${confirmDeleteVariant?.itemName ?? ''}" ອອກຈາກລະບົບ?`,
+          `Delete product "${confirmDeleteVariant?.itemName ?? ''}"?`
+        )}
+        description={pick(
+          'ระบบจะลบสินค้านี้ออกจากหน้าขาย POS และทะเบียนคลังทันที ปลดล็อกรหัสบาร์โค้ด/SKU ให้ใช้งานใหม่ได้ และปรับสมดุลสมุดบัญชีสต็อกให้ตรงตามมาตรฐาน 100%',
+          'ລະບົບຈະລຶບສິນຄ້ານີ້ອອກຈາກໜ້າຂາຍ POS ແລະ ທະບຽນສາງທັນທີ, ປົດລັອກລະຫັດບາໂຄດ/SKU ແລະ ປັບສົມດຸນປຶ້ມບັນຊີສະຕັອກ 100%',
+          'Removes this item from POS and Warehouse, frees its SKU/barcode for reuse, and keeps ledger conservation intact'
+        )}
+        confirmLabel={pick('ยืนยันลบสินค้า', 'ຢືນຢັນລຶບສິນຄ້າ', 'Delete Product')}
         tone="danger"
         busy={deletingVariant}
         onCancel={() => {
@@ -3077,8 +3390,16 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               await onRefreshState();
               onToast(
                 res.mode === 'HARD_DELETED'
-                  ? `ลบสินค้า "${confirmDeleteVariant.itemName}" ออกจากฐานข้อมูลเรียบร้อยแล้ว`
-                  : `ลบสินค้า "${confirmDeleteVariant.itemName}" ออกจากคลังและปลดล็อกบาร์โค้ดแล้ว (คงประวัติบัญชีเดิมไว้ 100%)`,
+                  ? pick(
+                      `ลบสินค้า "${confirmDeleteVariant.itemName}" ออกจากฐานข้อมูลเรียบร้อยแล้ว`,
+                      `ລຶບສິນຄ້າ "${confirmDeleteVariant.itemName}" ອອກຈາກຖານຂໍ້ມູນຮຽບຮ້ອຍແລ້ວ`,
+                      `Deleted "${confirmDeleteVariant.itemName}" from catalog`
+                    )
+                  : pick(
+                      `ลบสินค้า "${confirmDeleteVariant.itemName}" ออกจากคลังและปลดล็อกบาร์โค้ดแล้ว (คงประวัติบัญชีเดิมไว้ 100%)`,
+                      `ລຶບສິນຄ້າ "${confirmDeleteVariant.itemName}" ອອກຈາກສາງ ແລະ ປົດລັອກບາໂຄດແລ້ວ (ຮັກສາປະຫວັດບັນຊີເດີມໄວ້ 100%)`,
+                      `Archived "${confirmDeleteVariant.itemName}" and freed barcode (historical ledger preserved)`
+                    ),
                 'warn'
               );
             })
@@ -3092,9 +3413,17 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
 
       <ConfirmDialog
         open={Boolean(confirmDeleteCategory)}
-        title={`ยืนยันลบหมวดหมู่ "${confirmDeleteCategory?.name ?? ''}"?`}
-        description="หมวดหมู่ที่ไม่มีสินค้าใช้งานอยู่จะถูกลบออกทันที หากยังมีสินค้าอยู่ในหมวดหมู่นี้กรุณาย้ายหรือลบสินค้าก่อน"
-        confirmLabel="ยืนยันลบหมวดหมู่"
+        title={pick(
+          `ยืนยันลบหมวดหมู่ "${confirmDeleteCategory?.name ?? ''}"?`,
+          `ຢືນຢັນລຶບໝວດໝູ່ "${confirmDeleteCategory?.name ?? ''}"?`,
+          `Delete category "${confirmDeleteCategory?.name ?? ''}"?`
+        )}
+        description={pick(
+          'หมวดหมู่ที่ไม่มีสินค้าใช้งานอยู่จะถูกลบออกทันที หากยังมีสินค้าอยู่ในหมวดหมู่นี้กรุณาย้ายหรือลบสินค้าก่อน',
+          'ໝວດໝູ່ທີ່ບໍ່ມີສິນຄ້າໃຊ້ງານຢູ່ຈະຖືກລຶບອອກທັນທີ ຫາກຍັງມີສິນຄ້າຢູ່ກະລຸນາຍ້າຍ ຫຼື ລຶບສິນຄ້າກ່ອນ',
+          'Empty categories will be permanently deleted; move or delete assigned items first if any remain'
+        )}
+        confirmLabel={pick('ยืนยันลบหมวดหมู่', 'ຢືນຢັນລຶບໝວດໝູ່', 'Delete Category')}
         tone="danger"
         busy={deletingCategory}
         onCancel={() => {
@@ -3107,7 +3436,14 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
             .deleteCategory(confirmDeleteCategory.id)
             .then(async () => {
               await onRefreshState();
-              onToast(`ลบหมวดหมู่ "${confirmDeleteCategory.name}" เรียบร้อยแล้ว`, 'warn');
+              onToast(
+                pick(
+                  `ลบหมวดหมู่ "${confirmDeleteCategory.name}" เรียบร้อยแล้ว`,
+                  `ລຶບໝວດໝູ່ "${confirmDeleteCategory.name}" ຮຽບຮ້ອຍແລ້ວ`,
+                  `Deleted category "${confirmDeleteCategory.name}"`
+                ),
+                'warn'
+              );
             })
             .catch((err) => onToast(err instanceof Error ? err.message : String(err), 'error'))
             .finally(() => {
@@ -3121,15 +3457,31 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
         open={Boolean(confirmDeleteMod)}
         title={
           confirmDeleteMod?.kind === 'group'
-            ? `ยืนยันลบกลุ่มตัวเลือก "${confirmDeleteMod.name}"?`
-            : `ยืนยันลบตัวเลือก "${confirmDeleteMod?.name ?? ''}"?`
+            ? pick(
+                `ยืนยันลบกลุ่มตัวเลือก "${confirmDeleteMod.name}"?`,
+                `ຢືນຢັນລຶບກຸ່ມຕົວເລືອກ "${confirmDeleteMod.name}"?`,
+                `Delete modifier group "${confirmDeleteMod.name}"?`
+              )
+            : pick(
+                `ยืนยันลบตัวเลือก "${confirmDeleteMod?.name ?? ''}"?`,
+                `ຢືນຢັນລຶບຕົວເລືອກ "${confirmDeleteMod?.name ?? ''}"?`,
+                `Delete modifier option "${confirmDeleteMod?.name ?? ''}"?`
+              )
         }
         description={
           confirmDeleteMod?.kind === 'group'
-            ? 'ตัวเลือกย่อยทั้งหมดภายในกลุ่มนี้จะถูกลบออกจากหน้าจอขาย POS ด้วย'
-            : 'ตัวเลือกนี้จะไม่สามารถเลือกใช้จากหน้าจอขาย POS ได้อีกต่อไป'
+            ? pick(
+                'ตัวเลือกย่อยทั้งหมดภายในกลุ่มนี้จะถูกลบออกจากหน้าจอขาย POS ด้วย',
+                'ຕົວເລືອກຍ່ອຍທັງໝົດພາຍໃນກຸ່ມນີ້ຈະຖືກລຶບອອກຈາກໜ້າຈໍຂາຍ POS ນຳ',
+                'All options inside this group will also be removed from the POS register'
+              )
+            : pick(
+                'ตัวเลือกนี้จะไม่สามารถเลือกใช้จากหน้าจอขาย POS ได้อีกต่อไป',
+                'ຕົວເລືອກນີ້ຈະບໍ່ສາມາດເລືອກໃຊ້ຈາກໜ້າຈໍຂາຍ POS ໄດ້ອີກຕໍ່ໄປ',
+                'This option will no longer be selectable at checkout'
+              )
         }
-        confirmLabel="ยืนยันการลบ"
+        confirmLabel={pick('ยืนยันการลบ', 'ຢືນຢັນການລຶບ', 'Confirm Delete')}
         tone="danger"
         busy={deletingMod}
         onCancel={() => {
@@ -3147,8 +3499,16 @@ export const WarehouseWorkspace: React.FC<WarehouseWorkspaceProps> = ({
               await onRefreshState();
               onToast(
                 confirmDeleteMod.kind === 'group'
-                  ? `ลบกลุ่มตัวเลือก "${confirmDeleteMod.name}" แล้ว`
-                  : `ลบตัวเลือก "${confirmDeleteMod.name}" แล้ว`,
+                  ? pick(
+                      `ลบกลุ่มตัวเลือก "${confirmDeleteMod.name}" แล้ว`,
+                      `ລຶບກຸ່ມຕົວເລືອກ "${confirmDeleteMod.name}" ແລ້ວ`,
+                      `Deleted modifier group "${confirmDeleteMod.name}"`
+                    )
+                  : pick(
+                      `ลบตัวเลือก "${confirmDeleteMod.name}" แล้ว`,
+                      `ລຶບຕົວເລືອກ "${confirmDeleteMod.name}" ແລ້ວ`,
+                      `Deleted modifier option "${confirmDeleteMod.name}"`
+                    ),
                 'warn'
               );
             })

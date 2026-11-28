@@ -688,4 +688,49 @@ export class LocalIpcBridge {
     this.totalWritesRouted++;
     return this.engine.rejectGuestOrder(input);
   }
+
+  public listHeldBills(outletId = 'OUTLET-HQ') {
+    this.totalReadsRouted++;
+    return this.engine.listHeldBills(outletId);
+  }
+
+  public async upsertHeldBill(
+    input: Parameters<SqliteReadWritePoolEngine['upsertHeldBill']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.upsertHeldBill(input);
+  }
+
+  public async claimHeldBill(
+    input: Parameters<SqliteReadWritePoolEngine['claimHeldBill']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.claimHeldBill(input);
+  }
+
+  public async releaseHeldBillClaim(
+    input: Parameters<SqliteReadWritePoolEngine['releaseHeldBillClaim']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.releaseHeldBillClaim(input);
+  }
+
+  public async voidHeldBill(
+    input: Parameters<SqliteReadWritePoolEngine['voidHeldBill']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.voidHeldBill(input);
+  }
+
+  public async voidHeldBillItem(
+    input: Parameters<SqliteReadWritePoolEngine['voidHeldBillItem']>[0]
+  ) {
+    this.assertNotQuarantined();
+    this.totalWritesRouted++;
+    return this.engine.voidHeldBillItem(input);
+  }
 }

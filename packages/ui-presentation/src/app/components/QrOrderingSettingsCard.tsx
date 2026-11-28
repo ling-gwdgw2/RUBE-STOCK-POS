@@ -58,7 +58,7 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
   onRefreshState,
   onToast,
 }) => {
-  const { fiscal, pick } = useI18n();
+  const { fiscal, locale, pick } = useI18n();
   const uid = useId();
 
   const initialCfg: QrOrderingConfigDto =
@@ -420,7 +420,8 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
       const res = await writeNfcPackageViaBrowserReader(
         pkg,
         25_000,
-        controller.signal
+        controller.signal,
+        locale
       );
       if (!isMountedRef.current || controller.signal.aborted) return;
       onToast(
@@ -600,8 +601,12 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
                 onChange={(e) => setWifiSecurity(e.target.value as QrWifiSecurityType)}
                 className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink disabled:bg-surface-1 ${UI_INTERACTION.focusSelect}`}
               >
-                <option value="WPA">WPA / WPA2 / WPA3 (มีรหัสผ่าน)</option>
-                <option value="NOPASS">Open Wi-Fi (ไม่มีรหัสผ่าน)</option>
+                <option value="WPA">
+                  {pick('WPA / WPA2 / WPA3 (มีรหัสผ่าน)', 'WPA / WPA2 / WPA3 (ມີລະຫັດຜ່ານ)', 'WPA / WPA2 / WPA3 (Password Required)')}
+                </option>
+                <option value="NOPASS">
+                  {pick('Open Wi-Fi (ไม่มีรหัสผ่าน)', 'Open Wi-Fi (ບໍ່ມີລະຫັດຜ່ານ)', 'Open Wi-Fi (No Password)')}
+                </option>
               </select>
             </div>
             <div>
@@ -1249,7 +1254,13 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
         {showRouterGuide && (
           <div className="space-y-2.5 pt-2 border-t border-hairline text-ink-soft leading-relaxed">
             <div>
-              <strong>1. Windows Firewall (รันใน PowerShell แบบ Administrator ครั้งเดียว):</strong>
+              <strong>
+                {pick(
+                  '1. Windows Firewall (รันใน PowerShell แบบ Administrator ครั้งเดียว):',
+                  '1. Windows Firewall (ລັນໃນ PowerShell ແບບ Administrator ຄັ້ງດຽວ):',
+                  '1. Windows Firewall (run once in elevated PowerShell):'
+                )}
+              </strong>
               <div className="mt-1 flex items-center gap-2">
                 <code className="flex-1 rounded-[4px] border border-hairline bg-canvas px-2.5 py-1.5 font-mono-num text-[11px] text-ink overflow-x-auto">
                   {firewallCmd}
@@ -1265,17 +1276,55 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
               </div>
             </div>
             <div>
-              <strong>2. หากต้องการให้เด้งหน้าเมนูอัตโนมัติเมื่อลูกค้าต่อ Wi-Fi (Captive Portal):</strong>
+              <strong>
+                {pick(
+                  '2. หากต้องการให้เด้งหน้าเมนูอัตโนมัติเมื่อลูกค้าต่อ Wi-Fi (Captive Portal):',
+                  '2. ຖ້າຕ້ອງການໃຫ້ເປີດໜ້າເມນູອັດຕະໂນມັດເມື່ອລູກຄ້າເຊື່ອມ Wi-Fi (Captive Portal):',
+                  '2. Optional auto-popup menu when joining Wi-Fi (Captive Portal):'
+                )}
+              </strong>
               <ul className="list-disc pl-5 mt-1 space-y-1 text-[11px]">
                 <li>
-                  ตั้งค่า Static LAN IP ให้เครื่อง POS (เช่น <code>{effectiveHost}</code>) บน Router (DHCP Reservation)
+                  {pick(
+                    'ตั้งค่า Static LAN IP ให้เครื่อง POS (เช่น',
+                    'ຕັ້ງຄ່າ Static LAN IP ໃຫ້ເຄື່ອງ POS (ເຊັ່ນ',
+                    'Assign a static LAN IP for the POS PC (e.g.,'
+                  )}{' '}
+                  <code>{effectiveHost}</code>
+                  {pick(
+                    ') บน Router (DHCP Reservation)',
+                    ') ເທິງ Router (DHCP Reservation)',
+                    ') on your router (DHCP Reservation)'
+                  )}
                 </li>
                 <li>
-                  <strong>MikroTik Hotspot / OpenWrt / UniFi Guest Portal</strong>: ตั้ง Redirect URL / Captive Portal Landing Page ไปที่{' '}
-                  <code>{`${effectiveBaseUrl}/m?captive=1`}</code> และเพิ่ม IP เครื่อง POS ใน Walled Garden
+                  <strong>MikroTik Hotspot / OpenWrt / UniFi Guest Portal</strong>:{' '}
+                  {pick(
+                    'ตั้ง Redirect URL / Captive Portal Landing Page ไปที่',
+                    'ຕັ້ງ Redirect URL / Captive Portal Landing Page ໄປທີ່',
+                    'Set Redirect URL / Captive Portal Landing Page to'
+                  )}{' '}
+                  <code>{`${effectiveBaseUrl}/m?captive=1`}</code>{' '}
+                  {pick(
+                    'และเพิ่ม IP เครื่อง POS ใน Walled Garden',
+                    'ແລະ ເພີ່ມ IP ເຄື່ອງ POS ໃນ Walled Garden',
+                    'and add the POS IP to your Walled Garden allowlist'
+                  )}
                 </li>
                 <li>
-                  <strong>กรณีใช้ Wi-Fi Router ทั่วไป (ไม่ต้องตั้ง Captive Portal)</strong>: ใช้ปุ่ม &ldquo;เปิดโต๊ะ / พิมพ์ใบ QR โต๊ะ&rdquo; ที่หน้าขาย POS หรือพิมพ์ป้ายตั้งโต๊ะ A4 — ลูกค้าสแกน Wi-Fi QR แล้วสแกน Table QR ได้ทันที!
+                  <strong>
+                    {pick(
+                      'กรณีใช้ Wi-Fi Router ทั่วไป (ไม่ต้องตั้ง Captive Portal)',
+                      'ກໍລະນີໃຊ້ Wi-Fi Router ທົ່ວໄປ (ບໍ່ຕ້ອງຕັ້ງ Captive Portal)',
+                      'Standard Wi-Fi router (no Captive Portal needed)'
+                    )}
+                  </strong>
+                  :{' '}
+                  {pick(
+                    'ใช้ปุ่ม "เปิดโต๊ะ / พิมพ์ใบ QR โต๊ะ" ที่หน้าขาย POS หรือพิมพ์ป้ายตั้งโต๊ะ A4 — ลูกค้าสแกน Wi-Fi QR แล้วสแกน Table QR ได้ทันที!',
+                    'ໃຊ້ປຸ່ມ "ເປີດໂຕະ / ພິມໃບ QR ໂຕະ" ທີ່ໜ້າຂາຍ POS ຫຼື ພິມປ້າຍຕັ້ງໂຕະ A4 — ລູກຄ້າສະແກນ Wi-Fi QR ແລ້ວສະແກນ Table QR ໄດ້ທັນທີ!',
+                    'Use "Open Table / Print Table QR" in POS Register or print A4 tent cards — guests scan the Wi-Fi QR, then the Table QR.'
+                  )}
                 </li>
               </ul>
             </div>

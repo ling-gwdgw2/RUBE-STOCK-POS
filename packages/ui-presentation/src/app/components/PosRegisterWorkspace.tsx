@@ -13,6 +13,7 @@ import {
   Layers,
   LayoutGrid,
   List,
+  Lock,
   Minus,
   PauseCircle,
   PlayCircle,
@@ -65,6 +66,7 @@ import {
   getOrderReferenceFieldMeta,
   isVariantInProfileDomain,
 } from '../utils/profile-domain.ts';
+import { canApproveVoidWithoutOverride } from '../utils/rbac.ts';
 import { renderThaiReceiptTo203DpiCanvasRaster } from '../utils/thai-canvas-rasterizer.ts';
 import type {
   BootstrapPayload,
@@ -116,23 +118,45 @@ interface PosRegisterWorkspaceProps {
 const HELD_BILLS_LEGACY_STORAGE_KEY = 'rube_pos_v3_held_bills';
 const MULTIPLIER_PRESETS = [1, 2, 6, 12] as const;
 
-const SLIP_PRESETS: ReadonlyArray<{ label: string; sub: string; raw: string }> = [
+const SLIP_PRESETS_RAW: ReadonlyArray<{ id: string; raw: string }> = [
   {
-    label: 'สลิปธนาคารกสิกรไทย (KBANK)',
-    sub: 'โครงสร้าง TLV ถูกต้อง',
+    id: 'KBANK',
     raw: '0041000600000101030040220KBANK2026112590015102TH9104ABCD',
   },
   {
-    label: 'สลิปธนาคารไทยพาณิชย์ (SCB)',
-    sub: 'โครงสร้าง TLV ถูกต้อง',
+    id: 'SCB',
     raw: '0041000600000101030140220SCB202611259988775102TH9104EF01',
   },
   {
-    label: 'บาร์โค้ดสินค้าปลอมเป็นสลิป',
-    sub: 'ทดสอบระบบบล็อก TLV',
+    id: 'FAKE',
     raw: '8851952350161',
   },
 ];
+
+function getSlipPresetLabel(
+  id: string,
+  pickFn: (th: string, lo: string, en: string) => string
+): string {
+  if (id === 'KBANK') {
+    return pickFn(
+      'สลิปธนาคารกสิกรไทย (KBANK)',
+      'ສະລິບທະນາຄານກະສິກອນໄທ (KBANK)',
+      'KBANK Slip Preset (Valid TLV)'
+    );
+  }
+  if (id === 'SCB') {
+    return pickFn(
+      'สลิปธนาคารไทยพาณิชย์ (SCB)',
+      'ສະລິບທະນາຄານໄທພານິດ (SCB)',
+      'SCB Slip Preset (Valid TLV)'
+    );
+  }
+  return pickFn(
+    'บาร์โค้ดสินค้าปลอมเป็นสลิป',
+    'ບາໂຄດສິນຄ້າປອມເປັນສະລິບ',
+    'Fake Product Barcode (TLV Block Test)'
+  );
+}
 
 interface PreBurstSlipSnapshot {
   el: HTMLInputElement | null;
@@ -204,6 +228,7 @@ const ProductEditorialArtwork: React.FC<{
   item: CatalogVariantDetailDto;
   inCartQtyMilli: number;
 }> = React.memo(({ item, inCartQtyMilli }) => {
+  const { pick } = useI18n();
   const isCafe = item.categoryId === 'CAT-CAFE' || item.isComposite || item.kitchenStation === 'BAR' || item.kitchenStation === 'MAIN';
   const isScale = item.isWeightedScale;
   const outOfStock = !item.isComposite && item.inStockMilli <= 0;
@@ -310,18 +335,18 @@ const ProductEditorialArtwork: React.FC<{
       <div className="absolute left-3 top-3 flex flex-wrap items-center gap-1.5">
         <span className="rounded-[4px] bg-white/95 px-2 py-0.5 text-[11px] font-medium text-ink">
           {item.isComposite
-            ? 'สูตร BOM'
+            ? pick('สูตร BOM', 'ສູດ BOM', 'BOM Recipe')
             : item.isWeightedScale
-              ? 'ชั่งน้ำหนัก กก.'
+              ? pick('ชั่งน้ำหนัก กก.', 'ຊັ່ງນ້ຳໜັກ ກກ.', 'Weighted kg')
               : item.sku}
         </span>
         {outOfStock ? (
           <span className="rounded-[4px] bg-ink px-2 py-0.5 text-[11px] font-medium text-white">
-            สินค้าหมด
+            {pick('สินค้าหมด', 'ສິນຄ້າໝົດ', 'Out of Stock')}
           </span>
         ) : lowStock ? (
           <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-[11px] font-medium text-ink">
-            ใกล้หมด
+            {pick('ใกล้หมด', 'ໃກ້ໝົດ', 'Low Stock')}
           </span>
         ) : null}
       </div>
@@ -329,7 +354,7 @@ const ProductEditorialArtwork: React.FC<{
       {/* Active In-Cart Counter Pill (Google Blue #1a73e8 48px pill) */}
       {inCartQtyMilli > 0 && (
         <div className="absolute right-3 top-3 rounded-[48px] bg-primary px-3 py-1 text-xs font-medium text-white tabular-nums-google">
-          ในบิล{' '}
+          {pick('ในบิล', 'ໃນບິນ', 'In Bill')}{' '}
           {item.isWeightedScale
             ? formatMilliUnitsToQtyString(inCartQtyMilli, item.unitName)
             : `${Math.round(inCartQtyMilli / 1000)} ${item.unitName}`}
@@ -410,6 +435,16 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     () => bootstrap.heldBills ?? []
   );
   const [syncingHeldBills, setSyncingHeldBills] = useState<boolean>(false);
+  const [activeHeldBillMeta, setActiveHeldBillMeta] = useState<{
+    id: string;
+    referenceLabel: string;
+    version: number;
+    claimToken: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setActiveHeldBillMeta(null);
+  }, [outletId]);
 
   // Local LAN QR Table Ordering Inbox & Table QR Slip Modal
   const [qrGuestOrders, setQrGuestOrders] = useState<GuestOrderRecordDto[]>(
@@ -628,7 +663,17 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   } | null>(null);
 
   // Void Authorization Modal state (Mandatory Reason + Stateless Manager PIN Override)
-  const [voidTargetOrder, setVoidTargetOrder] = useState<VoidTargetOrderSummary | null>(null);
+  const [voidAuthContext, setVoidAuthContext] = useState<{
+    summary: VoidTargetOrderSummary;
+    onConfirmVoid: (params: {
+      salesOrderId: string;
+      receiptNumber: string;
+      voidedByUserId: string;
+      voidReason: string;
+      overrideToken?: string | undefined;
+    }) => Promise<void>;
+  } | null>(null);
+  const voidTargetOrder = voidAuthContext?.summary ?? null;
 
   // Receipt Preview Dialog & 203-DPI Canvas Rasterizer
   const [receiptModalOpen, setReceiptModalOpen] = useState(false);
@@ -657,12 +702,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   const discountInputRef = useRef<HTMLInputElement | null>(null);
 
   const allowedOrderTypes = useMemo(
-    () => getAllowedOrderTypesForProfile(bootstrap.profile),
-    [bootstrap.profile]
+    () => getAllowedOrderTypesForProfile(bootstrap.profile, locale),
+    [bootstrap.profile, locale]
   );
   const orderRefMeta = useMemo(
-    () => getOrderReferenceFieldMeta(bootstrap.profile),
-    [bootstrap.profile]
+    () => getOrderReferenceFieldMeta(bootstrap.profile, locale),
+    [bootstrap.profile, locale]
   );
 
   useEffect(() => {
@@ -881,7 +926,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     addVariantToCartDirect(variant, qtyMilli, []);
     if (!variant.isComposite && variant.inStockMilli <= 0) {
       onToast(
-        `"${variant.itemName}" สต็อกในระบบเหลือ 0 — เพิ่มลงบิลแล้ว (โปรดตรวจสอบสินค้าหน้าร้าน)`,
+        pick(
+          `"${variant.itemName}" สต็อกในระบบเหลือ 0 — เพิ่มลงบิลแล้ว (โปรดตรวจสอบสินค้าหน้าร้าน)`,
+          `"${variant.itemName}" ສະຕັອກໃນລະບົບເຫຼືອ 0 — ເພີ່ມລົງບິນແລ້ວ (ກະລຸນາກວດສອບສິນຄ້າໜ້າຮ້ານ)`,
+          `"${variant.itemName}" has 0 recorded stock — added to bill (please verify physical shelf)`
+        ),
         'warn'
       );
     }
@@ -935,61 +984,502 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     }
   }, [cartSignature]);
 
+  const hasLockedHeldLines = useMemo(
+    () => cart.some((c) => Boolean(c.heldLineLocked || c.kdsDispatched)),
+    [cart]
+  );
+
+  const latestActiveHeldBill = useMemo(
+    () =>
+      activeHeldBillMeta
+        ? (heldBills.find((b) => b.id === activeHeldBillMeta.id) ?? null)
+        : null,
+    [activeHeldBillMeta, heldBills]
+  );
+
+  const heldBillHasNewerServerVersion = Boolean(
+    activeHeldBillMeta &&
+      latestActiveHeldBill &&
+      Number(latestActiveHeldBill.version ?? 1) > activeHeldBillMeta.version
+  );
+
+  const getLineLockedMinMilli = useCallback((line: CartItem): number => {
+    if (!line.heldLineLocked && !line.kdsDispatched) return 0;
+    return Math.max(1, line.lockedMinQtyMilli ?? line.quantityMilli);
+  }, []);
+
+  const reconcileCartFromHeldBill = useCallback(
+    (held: HeldBillRecordDto) => {
+      const droppedNames: string[] = [];
+      const repricedNames: string[] = [];
+      let droppedModifiersCount = 0;
+      const reconciledCart: CartItem[] = [];
+
+      for (const line of held.cart) {
+        const variant = bootstrap.catalogDetailed.find((v) => v.id === line.variantId);
+        if (!variant || !variant.active) {
+          droppedNames.push(line.itemName);
+          continue;
+        }
+        const validModIds = line.selectedModifierIds.filter((id) => modifiersById.has(id));
+        if (validModIds.length < line.selectedModifierIds.length) {
+          droppedModifiersCount += line.selectedModifierIds.length - validModIds.length;
+        }
+        const sortedMods = [...validModIds].sort();
+        const hasScaleOverride = line.overrideLineTotalSatang !== undefined;
+        const isLockedLine = Boolean(line.heldLineLocked ?? true);
+        const nextUnitPriceSatang =
+          hasScaleOverride || isLockedLine || line.kdsDispatched
+            ? line.unitPriceSatang
+            : variant.priceSatang;
+        if (!hasScaleOverride && !isLockedLine && line.unitPriceSatang !== variant.priceSatang) {
+          repricedNames.push(variant.itemName);
+        }
+        const nextCartKey =
+          hasScaleOverride || line.scaleBadgeText || line.kdsDispatched || line.guestNote || line.cartKey
+            ? line.cartKey
+            : `${variant.id}::${sortedMods.join(',')}`;
+
+        const reconciledLine: CartItem = {
+          cartKey: nextCartKey,
+          variantId: variant.id,
+          itemName: variant.itemName,
+          variantName: variant.variantName,
+          sku: variant.sku,
+          unitName: variant.unitName,
+          quantityMilli: line.quantityMilli,
+          unitPriceSatang: nextUnitPriceSatang,
+          selectedModifierIds: sortedMods,
+          isWeightedScale: variant.isWeightedScale,
+          ...(line.scaleBadgeText !== undefined ? { scaleBadgeText: line.scaleBadgeText } : {}),
+          ...(line.overrideLineTotalSatang !== undefined
+            ? { overrideLineTotalSatang: line.overrideLineTotalSatang }
+            : {}),
+          ...(line.kdsDispatched === true ? { kdsDispatched: true } : {}),
+          ...(line.guestNote !== undefined ? { guestNote: line.guestNote } : {}),
+          heldLineLocked: isLockedLine,
+          lockedMinQtyMilli: Math.max(1, line.lockedMinQtyMilli ?? line.quantityMilli),
+          heldBillOriginId: held.id,
+        };
+        reconciledCart.push(reconciledLine);
+      }
+
+      const warnings: string[] = [];
+      if (droppedNames.length > 0) {
+        warnings.push(
+          pick(
+            `ตัดสินค้าที่ลบ/พักขาย ${droppedNames.length} รายการ (${droppedNames.join(', ')})`,
+            `ຕັດສິນຄ້າທີ່ລຶບ/ພັກຂາຍ ${droppedNames.length} ລາຍການ (${droppedNames.join(', ')})`,
+            `Removed ${droppedNames.length} discontinued/paused item(s) (${droppedNames.join(', ')})`
+          )
+        );
+      }
+      if (repricedNames.length > 0) {
+        warnings.push(
+          pick(
+            `ปรับราคาตามปัจจุบัน ${repricedNames.length} รายการ`,
+            `ປັບລາຄາຕາມປັດຈຸບັນ ${repricedNames.length} ລາຍການ`,
+            `Updated current price for ${repricedNames.length} item(s)`
+          )
+        );
+      }
+      if (droppedModifiersCount > 0) {
+        warnings.push(
+          pick(
+            `ตัดตัวเลือกเสริมที่ถูกลบ ${droppedModifiersCount} รายการ`,
+            `ຕັດຕົວເລືອກເສີມທີ່ຖືກລຶບ ${droppedModifiersCount} ລາຍການ`,
+            `Removed ${droppedModifiersCount} deleted modifier(s)`
+          )
+        );
+      }
+      return { reconciledCart, warnings };
+    },
+    [bootstrap.catalogDetailed, modifiersById, pick]
+  );
+
+  const parkActiveHeldBillBackToQueue = useCallback(
+    async (meta: { id: string; referenceLabel: string; claimToken: string; version: number }) => {
+      const serverBill = heldBills.find((b) => b.id === meta.id);
+      const hasAdditions =
+        !serverBill ||
+        cart.some((c) => !c.heldLineLocked || c.quantityMilli > getLineLockedMinMilli(c)) ||
+        discountInput !== (serverBill.discountInput ?? '0') ||
+        taxMode !== serverBill.taxMode;
+      if (hasAdditions && cart.length > 0) {
+        const res = await posTransport.saveHeldBill({
+          outletId,
+          actorUserId: currentUser.id,
+          claimToken: meta.claimToken,
+          bill: {
+            id: meta.id,
+            outletId,
+            referenceLabel: queueOrTableLabel.trim() || meta.referenceLabel,
+            orderType,
+            taxMode,
+            discountMode,
+            discountInput,
+            cart,
+            totalSatang: cartSummary.totalSatang,
+            heldByName: serverBill?.heldByName ?? currentUser.displayName,
+            heldAtIso: serverBill?.heldAtIso ?? new Date().toISOString(),
+          },
+        });
+        setHeldBills(res.heldBills);
+      } else {
+        const rel = await posTransport.releaseHeldBillClaim({
+          outletId,
+          id: meta.id,
+          claimToken: meta.claimToken,
+        });
+        setHeldBills(rel.heldBills);
+      }
+    },
+    [
+      cart,
+      cartSummary.totalSatang,
+      currentUser.displayName,
+      currentUser.id,
+      discountInput,
+      discountMode,
+      getLineLockedMinMilli,
+      heldBills,
+      orderType,
+      outletId,
+      queueOrTableLabel,
+      taxMode,
+    ]
+  );
+
+  const handleReleaseActiveHeldBill = useCallback(async () => {
+    if (!activeHeldBillMeta || holdRecallInFlightRef.current) return;
+    holdRecallInFlightRef.current = true;
+    try {
+      await parkActiveHeldBillBackToQueue(activeHeldBillMeta);
+      setActiveHeldBillMeta(null);
+      setCart([]);
+      setQueueOrTableLabel('');
+      setDiscountInput('0');
+      void onRefreshState();
+      onToast(
+        pick(
+          `วางบิล "${activeHeldBillMeta.referenceLabel}" กลับเข้าคิวบิลพักเรียบร้อย (ข้อมูลครบถ้วน)`,
+          `ວາງບິນ "${activeHeldBillMeta.referenceLabel}" ກັບຄືນຄິວບິນພັກແລ້ວ`,
+          `Returned "${activeHeldBillMeta.referenceLabel}" back to held bills safely`
+        ),
+        'success'
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('409') || msg.includes('บิลพัก') || msg.includes('ບິນພັກ') || msg.includes('Held bill')) {
+        void refreshServerHeldBills();
+      }
+      onToast(msg, 'error');
+    } finally {
+      holdRecallInFlightRef.current = false;
+    }
+  }, [activeHeldBillMeta, onRefreshState, onToast, parkActiveHeldBillBackToQueue, pick, setCart]);
+
+  const handleSyncUpdatedHeldBillFromServer = useCallback(() => {
+    if (!activeHeldBillMeta || !latestActiveHeldBill) return;
+    const { reconciledCart, warnings } = reconcileCartFromHeldBill(latestActiveHeldBill);
+    const unlockedLocal = cart.filter(
+      (c) => !c.heldLineLocked && !c.kdsDispatched && !reconciledCart.some((r) => r.cartKey === c.cartKey)
+    );
+    setCart([...reconciledCart, ...unlockedLocal]);
+    setActiveHeldBillMeta({
+      ...activeHeldBillMeta,
+      version: Number(latestActiveHeldBill.version ?? activeHeldBillMeta.version + 1),
+    });
+    onToast(
+      warnings.length > 0
+        ? pick(
+            `อัปเดตรายการล่าสุดของ "${latestActiveHeldBill.referenceLabel}" แล้ว (${warnings.join(' · ')})`,
+            `ອັບເດດລາຍການຫຼ້າສຸດຂອງ "${latestActiveHeldBill.referenceLabel}" ແລ້ວ (${warnings.join(' · ')})`,
+            `Synced latest items for "${latestActiveHeldBill.referenceLabel}" (${warnings.join(' · ')})`
+          )
+        : pick(
+            `อัปเดตรายการสั่งเพิ่มล่าสุดของ "${latestActiveHeldBill.referenceLabel}" เข้ารวมในบิลแล้ว`,
+            `ອັບເດດລາຍການສັ່ງເພີ່ມຫຼ້າສຸດຂອງ "${latestActiveHeldBill.referenceLabel}" ເຂົ້າລວມໃນບິນແລ້ວ`,
+            `Synced latest add-on items for "${latestActiveHeldBill.referenceLabel}" into the bill`
+          ),
+      'success'
+    );
+  }, [activeHeldBillMeta, cart, latestActiveHeldBill, onToast, pick, reconcileCartFromHeldBill, setCart]);
+
+  const handleOpenVoidHeldBillModal = useCallback(
+    (held: HeldBillRecordDto) => {
+      setVoidAuthContext({
+        summary: {
+          mode: 'HELD_BILL_VOID',
+          salesOrderId: held.id,
+          receiptNumber: held.referenceLabel,
+          abbTaxInvoiceNo: null,
+          totalSatang: held.totalSatang,
+          subtitle: `${held.cart.length} ${t('pos.itemsUnit')} (${money(held.totalSatang)}) · ${pick(
+            'ยกเลิกบิลพักทั้งหมดและตั๋วครัวที่เชื่อมอยู่',
+            'ຍົກເລີກບິນພັກທັງໝົດ ແລະ ປີ້ຄົວທີ່ເຊື່ອມຢູ່',
+            'Void full held bill & cancel linked kitchen tickets'
+          )}`,
+        },
+        onConfirmVoid: async (params) => {
+          const res = await posTransport.voidHeldBill({
+            outletId,
+            id: held.id,
+            actorUserId: params.voidedByUserId,
+            voidReason: params.voidReason,
+            ...(params.overrideToken ? { overrideToken: params.overrideToken } : {}),
+          });
+          setHeldBills(res.heldBills);
+          if (activeHeldBillMeta?.id === held.id) {
+            setActiveHeldBillMeta(null);
+            setCart([]);
+            setQueueOrTableLabel('');
+            setDiscountInput('0');
+          }
+          await onRefreshState();
+          onToast(
+            `${pick(
+              `ยกเลิกบิลพัก "${held.referenceLabel}" และบันทึก Audit Log เรียบร้อย`,
+              `ຍົກເລີກບິນພັກ "${held.referenceLabel}" ແລະ ບັນທຶກ Audit Log ແລ້ວ`,
+              `Voided held bill "${held.referenceLabel}" and recorded to Audit Log`
+            )}${
+              res.cancelledKdsOrderIds.length > 0
+                ? pick(
+                    ` (ยกเลิกตั๋วครัว ${res.cancelledKdsOrderIds.length} ใบ)`,
+                    ` (ຍົກເລີກປີ້ຄົວ ${res.cancelledKdsOrderIds.length} ໃບ)`,
+                    ` (${res.cancelledKdsOrderIds.length} KDS ticket(s) cancelled)`
+                  )
+                : ''
+            }`,
+            'warn'
+          );
+        },
+      });
+    },
+    [activeHeldBillMeta?.id, money, onRefreshState, onToast, outletId, pick, setCart, t]
+  );
+
+  const handleRequestReduceOrRemoveCartLine = useCallback(
+    (line: CartItem, nextQuantityMilli: number) => {
+      const clampedNext = Math.max(0, nextQuantityMilli);
+      const minLocked = getLineLockedMinMilli(line);
+      if (minLocked <= 0 || clampedNext >= minLocked) {
+        if (clampedNext <= 0) {
+          setCart((prev) => prev.filter((c) => c.cartKey !== line.cartKey));
+        } else {
+          setCart((prev) =>
+            prev.map((c) => (c.cartKey === line.cartKey ? withManualCartLineQty(c, clampedNext) : c))
+          );
+        }
+        return;
+      }
+
+      const curQtyLabel = line.isWeightedScale
+        ? formatMilliUnitsToQtyString(line.quantityMilli, line.unitName)
+        : `${Math.round(line.quantityMilli / 1000)} ${line.unitName}`;
+      const nextQtyLabel =
+        clampedNext <= 0
+          ? pick('ลบออกจากบิล', 'ລຶບອອກຈາກບິນ', 'Remove from bill')
+          : line.isWeightedScale
+            ? formatMilliUnitsToQtyString(clampedNext, line.unitName)
+            : `${Math.round(clampedNext / 1000)} ${line.unitName}`;
+
+      setVoidAuthContext({
+        summary: {
+          mode: 'HELD_BILL_ITEM_VOID',
+          salesOrderId: activeHeldBillMeta?.id ?? line.cartKey,
+          receiptNumber: activeHeldBillMeta?.referenceLabel || queueOrTableLabel.trim() || line.itemName,
+          abbTaxInvoiceNo: null,
+          totalSatang: cartSummary.totalSatang,
+          subtitle: `${line.itemName}: ${curQtyLabel} -> ${nextQtyLabel}${
+            line.kdsDispatched
+              ? pick(' (ส่งเข้าครัว KDS แล้ว)', ' (ສົ່ງເຂົ້າຄົວ KDS ແລ້ວ)', ' (Dispatched to KDS)')
+              : pick(' (รายการบิลพัก)', ' (ລາຍການບິນພັກ)', ' (Held bill item)')
+          }`,
+        },
+        onConfirmVoid: async (params) => {
+          if (activeHeldBillMeta) {
+            const res = await posTransport.voidHeldBillItem({
+              outletId,
+              id: activeHeldBillMeta.id,
+              expectedVersion: activeHeldBillMeta.version,
+              targetCartKey: line.cartKey,
+              nextQuantityMilli: clampedNext,
+              voidReason: params.voidReason,
+              voidedByUserId: params.voidedByUserId,
+              ...(params.overrideToken ? { overrideToken: params.overrideToken } : {}),
+            });
+            setHeldBills(res.heldBills);
+            if (res.billVoidedCompletely || !res.heldBill) {
+              setActiveHeldBillMeta(null);
+              setCart([]);
+              setQueueOrTableLabel('');
+              setDiscountInput('0');
+              await onRefreshState();
+              onToast(
+                pick(
+                  `ยกเลิกรายการสุดท้ายของบิล "${activeHeldBillMeta.referenceLabel}" และปิดบิลพักพร้อม Audit Log แล้ว`,
+                  `ຍົກເລີກລາຍການສຸດທ້າຍຂອງບິນ "${activeHeldBillMeta.referenceLabel}" ແລະ ປິດບິນພັກພ້ອມ Audit Log ແລ້ວ`,
+                  `Voided last item of "${activeHeldBillMeta.referenceLabel}" and closed held bill (logged to Audit Log)`
+                ),
+                'warn'
+              );
+            } else {
+              const { reconciledCart } = reconcileCartFromHeldBill(res.heldBill);
+              const unlockedAdditions = cart.filter(
+                (c) =>
+                  !c.heldLineLocked &&
+                  !c.kdsDispatched &&
+                  !reconciledCart.some((r) => r.cartKey === c.cartKey)
+              );
+              setCart([...reconciledCart, ...unlockedAdditions]);
+              setActiveHeldBillMeta({
+                ...activeHeldBillMeta,
+                version: Number(res.heldBill.version ?? activeHeldBillMeta.version + 1),
+              });
+              await onRefreshState();
+              onToast(
+                pick(
+                  `อนุมัติลด/ลบ "${line.itemName}" และบันทึกลง Audit Log แล้ว`,
+                  `ອະນຸມັດຫຼຸດ/ລຶບ "${line.itemName}" ແລະ ບັນທຶກລົງ Audit Log ແລ້ວ`,
+                  `Authorized reduction/removal of "${line.itemName}" (logged to Audit Log)`
+                ),
+                'warn'
+              );
+            }
+            return;
+          }
+
+          if (clampedNext <= 0) {
+            setCart((prev) => prev.filter((c) => c.cartKey !== line.cartKey));
+          } else {
+            setCart((prev) =>
+              prev.map((c) => (c.cartKey === line.cartKey ? withManualCartLineQty(c, clampedNext) : c))
+            );
+          }
+          onToast(
+            pick(
+              `อนุมัติปรับแก้ "${line.itemName}" เรียบร้อย`,
+              `ອະນຸມັດປັບແກ້ "${line.itemName}" ສຳເລັດ`,
+              `Authorized adjustment for "${line.itemName}"`
+            ),
+            'warn'
+          );
+        },
+      });
+    },
+    [
+      activeHeldBillMeta,
+      cart,
+      cartSummary.totalSatang,
+      getLineLockedMinMilli,
+      onRefreshState,
+      onToast,
+      outletId,
+      pick,
+      queueOrTableLabel,
+      reconcileCartFromHeldBill,
+      setCart,
+    ]
+  );
+
   const handleHoldCurrentBill = useCallback(async () => {
     if (holdRecallInFlightRef.current) return;
     if (cart.length === 0) {
       if (heldBills.length > 0) {
         setPosSubView('HELD_BILLS');
       } else {
-        onToast('ยังไม่มีรายการในบิลสำหรับพักบิล', 'warn');
+        onToast(
+          pick(
+            'ยังไม่มีรายการในบิลสำหรับพักบิล',
+            'ຍັງບໍ່ມີລາຍການໃນບິນສຳລັບພັກບິນ',
+            'No items in cart to hold'
+          ),
+          'warn'
+        );
       }
       return;
     }
     holdRecallInFlightRef.current = true;
+    const isExistingHeld = activeHeldBillMeta !== null;
     const refLabel =
-      queueOrTableLabel.trim() || `คิวพัก #${String(heldBills.length + 1).padStart(2, '0')}`;
+      queueOrTableLabel.trim() ||
+      activeHeldBillMeta?.referenceLabel ||
+      `${pick('คิวพัก', 'ຄິວພັກ', 'Hold')} #${String(heldBills.length + 1).padStart(2, '0')}`;
+    const recordId =
+      activeHeldBillMeta?.id ?? `HOLD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const lockedCart: CartItem[] = cart.map((c) => ({
+      ...c,
+      heldLineLocked: true,
+      lockedMinQtyMilli: Math.max(c.lockedMinQtyMilli ?? 0, c.quantityMilli),
+      heldBillOriginId: recordId,
+    }));
+    const existingServer = isExistingHeld
+      ? heldBills.find((b) => b.id === activeHeldBillMeta.id)
+      : undefined;
     const record: HeldBillRecordDto = {
-      id: `HOLD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: recordId,
       outletId,
       referenceLabel: refLabel,
       orderType,
       taxMode,
       discountMode,
       discountInput,
-      cart,
+      cart: lockedCart,
       totalSatang: cartSummary.totalSatang,
-      heldByName: currentUser.displayName,
-      heldAtIso: new Date().toISOString(),
+      heldByName: existingServer?.heldByName ?? currentUser.displayName,
+      heldAtIso: existingServer?.heldAtIso ?? new Date().toISOString(),
     };
     try {
       const saved = await posTransport.saveHeldBill({
         outletId,
         actorUserId: currentUser.id,
+        ...(activeHeldBillMeta?.claimToken ? { claimToken: activeHeldBillMeta.claimToken } : {}),
         bill: record,
       });
       setHeldBills(saved.heldBills);
+      setActiveHeldBillMeta(null);
       setCart([]);
       setQueueOrTableLabel('');
       setDiscountInput('0');
       void onRefreshState();
-      onToast(`พักบิล "${refLabel}" ลงเซิร์ฟเวอร์เรียบร้อยแล้ว (เรียกข้ามเครื่องได้ · F8)`, 'success');
+      onToast(
+        isExistingHeld
+          ? pick(
+              `บันทึกอัปเดตบิลพัก "${refLabel}" กลับเข้าคิวแล้ว (ข้อมูลถูกล็อกป้องกันการลบ)`,
+              `ບັນທຶກອັບເດດບິນພັກ "${refLabel}" ກັບເຂົ້າຄິວແລ້ວ (ຂໍ້ມູນຖືກລັອກປ້ອງກັນການລຶບ)`,
+              `Updated held bill "${refLabel}" and returned to queue (lines locked)`
+            )
+          : pick(
+              `พักบิล "${refLabel}" ลงเซิร์ฟเวอร์เรียบร้อยแล้ว (เรียกข้ามเครื่องได้ · F8)`,
+              `ພັກບິນ "${refLabel}" ລົງເຊີບເວີສຳເລັດແລ້ວ (ເອີ້ນຂ້າມເຄື່ອງໄດ້ · F8)`,
+              `Held bill "${refLabel}" synced to server (F8)`
+            ),
+        'success'
+      );
     } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err), 'error');
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('409') || msg.includes('บิลพัก') || msg.includes('ບິນພັກ') || msg.includes('Held bill')) {
+        void refreshServerHeldBills();
+      }
+      onToast(msg, 'error');
     } finally {
       holdRecallInFlightRef.current = false;
     }
   }, [
+    activeHeldBillMeta,
     cart,
     cartSummary.totalSatang,
     currentUser.displayName,
     currentUser.id,
     discountInput,
     discountMode,
-    heldBills.length,
+    heldBills,
     onRefreshState,
     onToast,
     orderType,
     outletId,
+    pick,
     queueOrTableLabel,
     setCart,
     taxMode,
@@ -997,35 +1487,101 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
   const executeRecallHeldBill = async (
     held: HeldBillRecordDto,
-    reconciledCart: CartItem[],
-    warnings: string[]
+    forceTakeover = false
   ) => {
     if (holdRecallInFlightRef.current) return;
     holdRecallInFlightRef.current = true;
+    const claimToken =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `CLAIM-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
-      const removed = await posTransport.deleteHeldBill({
+      if (activeHeldBillMeta && activeHeldBillMeta.id !== held.id) {
+        await parkActiveHeldBillBackToQueue(activeHeldBillMeta);
+      }
+      const claimed = await posTransport.claimHeldBill({
         outletId,
-        actorUserId: currentUser.id,
         id: held.id,
-        recall: true,
+        claimToken,
+        claimedByUserId: currentUser.id,
+        claimedByName: currentUser.displayName,
+        forceTakeover,
       });
-      setHeldBills(removed.heldBills);
+      const targetHeld = claimed.heldBill;
+      const { reconciledCart, warnings } = reconcileCartFromHeldBill(targetHeld);
+      if (reconciledCart.length === 0) {
+        await posTransport
+          .releaseHeldBillClaim({ outletId, id: targetHeld.id, claimToken })
+          .catch(() => {});
+        onToast(
+          pick(
+            `ไม่สามารถเรียกบิล "${targetHeld.referenceLabel}" ได้ เนื่องจากสินค้าทั้งหมดถูกลบหรือพักการขายไปแล้ว`,
+            `ບໍ່ສາມາດເອີ້ນບິນ "${targetHeld.referenceLabel}" ໄດ້ ເນື່ອງຈາກສິນຄ້າທັງໝົດຖືກລຶບ ຫຼື ພັກຂາຍແລ້ວ`,
+            `Cannot recall bill "${targetHeld.referenceLabel}" because all items were deleted or paused.`
+          ),
+          'warn'
+        );
+        return;
+      }
+
+      setHeldBills(claimed.heldBills);
+      setActiveHeldBillMeta({
+        id: targetHeld.id,
+        referenceLabel: targetHeld.referenceLabel,
+        version: Number(targetHeld.version ?? 1),
+        claimToken,
+      });
       setCart(reconciledCart);
-      setOrderType(held.orderType);
-      setTaxMode(held.taxMode);
-      if (held.discountMode) setDiscountMode(held.discountMode);
-      if (held.discountInput !== undefined) setDiscountInput(held.discountInput);
-      setQueueOrTableLabel(held.referenceLabel);
+      setOrderType(targetHeld.orderType);
+      setTaxMode(targetHeld.taxMode);
+      if (targetHeld.discountMode) setDiscountMode(targetHeld.discountMode);
+      setDiscountInput(targetHeld.discountInput ?? '0');
+      setQueueOrTableLabel(targetHeld.referenceLabel);
       setPosSubView(bootstrap.profile === 'RETAIL' ? 'SCAN_LEDGER' : 'STUDIO_CARDS');
       void onRefreshState();
       if (warnings.length > 0) {
-        onToast(`เรียกบิล "${held.referenceLabel}" แล้ว (${warnings.join(' · ')})`, 'warn');
+        onToast(
+          pick(
+            `เรียกบิล "${targetHeld.referenceLabel}" แล้ว (${warnings.join(' · ')})`,
+            `ເອີ້ນບິນ "${targetHeld.referenceLabel}" ແລ້ວ (${warnings.join(' · ')})`,
+            `Recalled "${targetHeld.referenceLabel}" (${warnings.join(' · ')})`
+          ),
+          'warn'
+        );
       } else {
-        onToast(`เรียกบิล "${held.referenceLabel}" กลับมาที่หน้าขายแล้ว`, 'success');
+        onToast(
+          pick(
+            `เรียกบิล "${targetHeld.referenceLabel}" มาคิดเงินแล้ว (บิลพักยังคงอยู่จนกว่าจะชำระเงินสำเร็จ)`,
+            `ເອີ້ນບິນ "${targetHeld.referenceLabel}" ມາຄິດເງິນແລ້ວ (ບິນພັກຍັງຄົງຢູ່ຈົນກວ່າຈະຊຳລະສຳເລັດ)`,
+            `Recalled "${targetHeld.referenceLabel}" for checkout (held bill remains protected until paid)`
+          ),
+          'success'
+        );
       }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       void refreshServerHeldBills();
-      onToast(err instanceof Error ? err.message : String(err), 'error');
+      if (!forceTakeover && msg.includes('409')) {
+        setConfirmAction({
+          title: pick(
+            `บิลพัก "${held.referenceLabel}" กำลังค้างสถานะเรียกคิดเงิน`,
+            `ບິນພັກ "${held.referenceLabel}" ກຳລັງຄ້າງສະຖານະເອີ້ນຄິດເງິນ`,
+            `Held bill "${held.referenceLabel}" is currently claimed`
+          ),
+          description: `${msg} · ${pick(
+            'หากเครื่องเดิมรีเฟรชหรือปิดหน้าจอก่อนชำระเงิน กดยืนยันเพื่อเรียกบิลมาคิดเงินต่อ (Takeover)',
+            'ຖ້າເຄື່ອງເດີມໂຫຼດໜ້າໃໝ່ ຫຼື ປິດກ່ອນຊຳລະ ກົດຢືນຢັນເພື່ອດຶງບິນມາຄິດເງິນຕໍ່ (Takeover)',
+            'If the previous terminal refreshed or closed before checkout, confirm to take over the bill.'
+          )}`,
+          confirmLabel: pick('เรียกคิดเงินต่อ (Takeover)', 'ດຶງບິນມາຄິດເງິນຕໍ່ (Takeover)', 'Force Takeover'),
+          tone: 'primary',
+          onConfirm: async () => {
+            await executeRecallHeldBill(held, true);
+          },
+        });
+      } else {
+        onToast(msg, 'error');
+      }
     } finally {
       holdRecallInFlightRef.current = false;
     }
@@ -1034,98 +1590,70 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   const handleRecallHeldBill = async (held: HeldBillRecordDto) => {
     if (holdRecallInFlightRef.current) return;
 
-    const droppedNames: string[] = [];
-    const repricedNames: string[] = [];
-    let droppedModifiersCount = 0;
-    const reconciledCart: CartItem[] = [];
-
-    for (const line of held.cart) {
-      const variant = bootstrap.catalogDetailed.find((v) => v.id === line.variantId);
-      if (!variant || !variant.active) {
-        droppedNames.push(line.itemName);
-        continue;
-      }
-      const validModIds = line.selectedModifierIds.filter((id) => modifiersById.has(id));
-      if (validModIds.length < line.selectedModifierIds.length) {
-        droppedModifiersCount += line.selectedModifierIds.length - validModIds.length;
-      }
-      const sortedMods = [...validModIds].sort();
-      const hasScaleOverride = line.overrideLineTotalSatang !== undefined;
-      const nextUnitPriceSatang = hasScaleOverride ? line.unitPriceSatang : variant.priceSatang;
-      if (!hasScaleOverride && line.unitPriceSatang !== variant.priceSatang) {
-        repricedNames.push(variant.itemName);
-      }
-      const nextCartKey =
-        hasScaleOverride || line.scaleBadgeText || line.kdsDispatched || line.guestNote
-          ? line.cartKey
-          : `${variant.id}::${sortedMods.join(',')}`;
-
-      const reconciledLine: CartItem = {
-        cartKey: nextCartKey,
-        variantId: variant.id,
-        itemName: variant.itemName,
-        variantName: variant.variantName,
-        sku: variant.sku,
-        unitName: variant.unitName,
-        quantityMilli: line.quantityMilli,
-        unitPriceSatang: nextUnitPriceSatang,
-        selectedModifierIds: sortedMods,
-        isWeightedScale: variant.isWeightedScale,
-        ...(line.scaleBadgeText !== undefined ? { scaleBadgeText: line.scaleBadgeText } : {}),
-        ...(line.overrideLineTotalSatang !== undefined
-          ? { overrideLineTotalSatang: line.overrideLineTotalSatang }
-          : {}),
-        ...(line.kdsDispatched === true ? { kdsDispatched: true } : {}),
-        ...(line.guestNote !== undefined ? { guestNote: line.guestNote } : {}),
-      };
-
-      if (!hasScaleOverride && !line.scaleBadgeText && !line.kdsDispatched && !line.guestNote) {
-        const existingIdx = reconciledCart.findIndex((c) => c.cartKey === nextCartKey);
-        if (existingIdx >= 0) {
-          const existing = reconciledCart[existingIdx]!;
-          reconciledCart[existingIdx] = {
-            ...existing,
-            quantityMilli: existing.quantityMilli + reconciledLine.quantityMilli,
-          };
-          continue;
-        }
-      }
-      reconciledCart.push(reconciledLine);
-    }
-
+    const { reconciledCart } = reconcileCartFromHeldBill(held);
     if (reconciledCart.length === 0) {
       onToast(
-        `ไม่สามารถเรียกบิล "${held.referenceLabel}" ได้ เนื่องจากสินค้าทั้งหมดถูกลบหรือพักการขายไปแล้ว`,
+        pick(
+          `ไม่สามารถเรียกบิล "${held.referenceLabel}" ได้ เนื่องจากสินค้าทั้งหมดถูกลบหรือพักการขายไปแล้ว`,
+          `ບໍ່ສາມາດເອີ້ນບິນ "${held.referenceLabel}" ໄດ້ ເນື່ອງຈາກສິນຄ້າທັງໝົດຖືກລຶບ ຫຼື ພັກຂາຍແລ້ວ`,
+          `Cannot recall bill "${held.referenceLabel}" because all items were deleted or paused.`
+        ),
         'warn'
       );
       return;
     }
 
-    const warnings: string[] = [];
-    if (droppedNames.length > 0) {
-      warnings.push(`ตัดสินค้าที่ลบ/พักขาย ${droppedNames.length} รายการ (${droppedNames.join(', ')})`);
+    if (activeHeldBillMeta?.id === held.id) {
+      await executeRecallHeldBill(held, true);
+      return;
     }
-    if (repricedNames.length > 0) {
-      warnings.push(`ปรับราคาตามปัจจุบัน ${repricedNames.length} รายการ`);
-    }
-    if (droppedModifiersCount > 0) {
-      warnings.push(`ตัดตัวเลือกเสริมที่ถูกลบ ${droppedModifiersCount} รายการ`);
+
+    if (activeHeldBillMeta && cart.length > 0) {
+      setConfirmAction({
+        title: pick(
+          `สลับจากบิลพัก "${activeHeldBillMeta.referenceLabel}" ไปยัง "${held.referenceLabel}"?`,
+          `ປ່ຽນຈາກບິນພັກ "${activeHeldBillMeta.referenceLabel}" ໄປຫາ "${held.referenceLabel}"?`,
+          `Switch from held bill "${activeHeldBillMeta.referenceLabel}" to "${held.referenceLabel}"?`
+        ),
+        description: pick(
+          `ระบบจะเก็บบิล "${activeHeldBillMeta.referenceLabel}" ไว้ในคิวบิลพักอย่างปลอดภัย (ไม่ถูกลบทิ้ง)`,
+          `ລະບົບຈະເກັບບິນ "${activeHeldBillMeta.referenceLabel}" ໄວ້ໃນຄິວບິນພັກຢ່າງປອດໄພ`,
+          `"${activeHeldBillMeta.referenceLabel}" will be safely kept in held bills.`
+        ),
+        confirmLabel: pick('สลับและเก็บยอดเดิมไว้', 'ປ່ຽນ ແລະ ເກັບຍອດເດີມໄວ້', 'Switch & Keep Current'),
+        tone: 'primary',
+        onConfirm: async () => {
+          await executeRecallHeldBill(held, false);
+        },
+      });
+      return;
     }
 
     if (cart.length > 0) {
+      if (hasLockedHeldLines) {
+        onToast(
+          pick(
+            'มีรายการที่ส่งครัว/ล็อกอยู่ในตะกร้า กรุณาพักบิลหรือขอ PIN ก่อนสลับบิล',
+            'ມີລາຍການທີ່ສົ່ງຄົວ/ລັອກຢູ່ໃນກະຕ່າ ກະລຸນາພັກບິນ ຫຼື ຂໍ PIN ກ່ອນປ່ຽນບິນ',
+            'Cart contains locked/kitchen-dispatched items — hold or authorize with PIN before switching'
+          ),
+          'warn'
+        );
+        return;
+      }
       setConfirmAction({
         title: `${pick('แทนที่บิลปัจจุบันด้วย', 'ແທນທີ່ບິນປັດຈຸບັນດ້ວຍ', 'Replace current bill with')} "${held.referenceLabel}"?`,
         description: `${cartSummary.totalItemUnitsCount} ${t('pos.itemsUnit')} (${money(cartSummary.totalSatang)})`,
         confirmLabel: t('common.confirm'),
         tone: 'primary',
         onConfirm: async () => {
-          await executeRecallHeldBill(held, reconciledCart, warnings);
+          await executeRecallHeldBill(held, false);
         },
       });
       return;
     }
 
-    await executeRecallHeldBill(held, reconciledCart, warnings);
+    await executeRecallHeldBill(held, false);
   };
 
   const splitCashSatang = useMemo(() => {
@@ -1345,7 +1873,10 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
   const openCheckoutModal = useCallback(
     async (initialTab: 'CASH' | 'PROMPTPAY_QR' | 'CARD' | 'SPLIT') => {
       if (cart.length === 0) {
-        onToast('กรุณาเลือกรายการสินค้าก่อนรับชำระเงิน', 'warn');
+        onToast(
+          pick('กรุณาเลือกรายการสินค้าก่อนรับชำระเงิน', 'ກະລຸນາເລືອກລາຍການສິນຄ້າກ່ອນຮັບຊຳລະເງິນ', 'Please add items before checkout'),
+          'warn'
+        );
         return;
       }
       clearPromptPayQrState();
@@ -1481,7 +2012,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 'ກະລຸນາສະແກນ ຫຼື ປ້ອນເລກອ້າງອີງ Ref / Ticket ສະລິບໂອນເງິນ',
                 'Please scan or enter the transfer slip reference ID'
               )
-            : 'กรุณาสแกนหรือวางข้อมูล BOT Mini-QR จากสลิปธนาคารลูกค้า',
+            : pick(
+                'กรุณาสแกนหรือวางข้อมูล BOT Mini-QR จากสลิปธนาคารลูกค้า',
+                'ກະລຸນາສະແກນ ຫຼື ວາງຂໍ້ມູນ BOT Mini-QR ຈາກສະລິບທະນາຄານ',
+                'Please scan or paste BOT Mini-QR data from the transfer slip'
+              ),
           'warn'
         );
         return;
@@ -1506,7 +2041,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         });
         setSlipVerificationModal(modal);
         if (!modal.valid) {
-          onToast(modal.errorMessageThai || 'สลิปไม่ผ่านการตรวจสอบ', 'error');
+          onToast(
+            modal.errorMessageThai ||
+              pick('สลิปไม่ผ่านการตรวจสอบ', 'ສະລິບບໍ່ຜ່ານການກວດສອບ', 'Transfer slip verification failed'),
+            'error'
+          );
         }
       } catch (err) {
         onToast(err instanceof Error ? err.message : String(err), 'error');
@@ -1761,6 +2300,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         ...(cart.length > 0 && cart.every((l) => l.kdsDispatched === true)
           ? { skipKdsEnqueue: true }
           : {}),
+        ...(activeHeldBillMeta
+          ? {
+              heldBillId: activeHeldBillMeta.id,
+              expectedHeldBillVersion: activeHeldBillMeta.version,
+            }
+          : {}),
         lines: cart.map((l) => ({
           variantId: l.variantId,
           itemName: l.itemName,
@@ -1827,7 +2372,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         hardwareError = printed.hwRes.hardwareOutcome.errorMessage;
       } catch (printErr) {
         onToast(
-          'ไม่สามารถส่งคำสั่งพิมพ์แบบ Canvas 203-DPI ได้ — ใช้ข้อมูลใบเสร็จสำรองแทน',
+          pick(
+            'ไม่สามารถส่งคำสั่งพิมพ์แบบ Canvas 203-DPI ได้ — ใช้ข้อมูลใบเสร็จสำรองแทน',
+            'ບໍ່ສາມາດສົ່ງຄຳສັ່ງພິມ Canvas 203-DPI ໄດ້ — ໃຊ້ຂໍ້ມູນໃບບິນສຳຮອງແທນ',
+            'Unable to render 203-DPI Canvas print — using fallback receipt text'
+          ),
           'warn'
         );
         hardwareDispatched = false;
@@ -1871,12 +2420,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
       cartCheckoutIdemKeyRef.current = null;
       cartCheckoutIdemSigRef.current = '';
+      setActiveHeldBillMeta(null);
       setCart([]);
       setQueueOrTableLabel('');
       setDiscountInput('0');
       setCheckoutModalOpen(false);
       setSlipVerificationModal(null);
       setSlipMiniQrInput('');
+      void refreshServerHeldBills();
       await onRefreshState();
 
       // Only open blocking modal automatically when OS print dialog mode explicitly requires user action
@@ -1893,7 +2444,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         res.spoolResult.status === 'PRINTED_IMMEDIATELY' ? 'success' : 'warn'
       );
     } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err), 'error');
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('409') || msg.includes('บิลพัก') || msg.includes('ບິນພັກ') || msg.includes('Held bill')) {
+        void refreshServerHeldBills();
+      }
+      onToast(msg, 'error');
     } finally {
       checkoutInFlightRef.current = false;
       setProcessingCheckout(false);
@@ -1919,7 +2474,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
     });
     await onRefreshState();
     onToast(
-      `ยกเลิกบิล ${params.receiptNumber} และคืนสต็อกต้นทุนเดิม (${res.reversedLedgerEntries.length} รายการ) สำเร็จ`,
+      pick(
+        `ยกเลิกบิล ${params.receiptNumber} และคืนสต็อกต้นทุนเดิม (${res.reversedLedgerEntries.length} รายการ) สำเร็จ`,
+        `ຍົກເລີກບິນ ${params.receiptNumber} ແລະ ຄືນສະຕັອກຕົ້ນທຶນເດີມ (${res.reversedLedgerEntries.length} ລາຍການ) ສຳເລັດ`,
+        `Voided bill ${params.receiptNumber} and reversed historical stock (${res.reversedLedgerEntries.length} entry/entries)`
+      ),
       'warn'
     );
   };
@@ -2126,7 +2685,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         <div className="border-b border-hairline bg-canvas">
           <div className="flex flex-wrap items-center justify-between gap-4">
             {/* Canonical Google Nav-Link Tabs (4px #1a73e8 bottom-rule indicator, 48px height, zero fill) */}
-            <div className="flex items-center gap-1 overflow-x-auto" role="tablist" aria-label="มุมมองหน้าขาย POS">
+            <div
+              className="flex items-center gap-1 overflow-x-auto"
+              role="tablist"
+              aria-label={pick('มุมมองหน้าขาย POS', 'ມຸມມອງໜ້າຂາຍ POS', 'POS register views')}
+            >
               <button
                 type="button"
                 role="tab"
@@ -2253,7 +2816,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 ref={searchInputRef}
                 data-scanner-allow="true"
                 type="text"
-                aria-label="ค้นหาสินค้าหรือยิงบาร์โค้ด"
+                aria-label={pick('ค้นหาสินค้าหรือยิงบาร์โค้ด', 'ຄົ້ນຫາສິນຄ້າ ຫຼື ຍິງບາໂຄດ', 'Search catalog or scan barcode')}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => {
@@ -2303,17 +2866,17 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
             {/* Category Filter Pills (48px pill radius, minimum 44px touch height) */}
             <div className="flex items-center gap-2 overflow-x-auto pb-1">
-              <button
-                type="button"
-                onClick={() => setSelectedCategoryId('ALL')}
-                className={`min-h-[44px] shrink-0 rounded-[48px] border px-5 font-google-display text-sm font-medium tracking-[0.25px] ${UI_INTERACTION.focusButton} ${
-                  selectedCategoryId === 'ALL'
-                    ? 'border-primary bg-primary text-white hover:bg-primary-hover'
-                    : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
-                }`}
-              >
-                รายการขายทั้งหมด
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedCategoryId('ALL')}
+                  className={`min-h-[44px] shrink-0 rounded-[48px] border px-5 font-google-display text-sm font-medium tracking-[0.25px] ${UI_INTERACTION.focusButton} ${
+                    selectedCategoryId === 'ALL'
+                      ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                      : 'border-hairline bg-canvas text-ink-soft hover:border-primary hover:text-primary'
+                  }`}
+                >
+                  {t('pos.allItems')}
+                </button>
               {visibleCategories.map((cat) => {
                 const active = selectedCategoryId === cat.id;
                 return (
@@ -2345,13 +2908,13 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <Search className="h-9 w-9 text-ink-muted mx-auto" />
               <p className="font-google-display text-[20px] font-normal text-ink">
                 {searchQuery.trim() || selectedCategoryId !== 'ALL'
-                  ? 'ไม่พบสินค้าที่ตรงกับคำค้นหาหรือหมวดหมู่นี้'
-                  : 'ยังไม่มีรายการสินค้าในระบบ'}
+                  ? pick('ไม่พบสินค้าที่ตรงกับคำค้นหาหรือหมวดหมู่นี้', 'ບໍ່ພົບສິນຄ້າທີ່ຕົງກັບຄຳຄົ້ນຫາ ຫຼື ໝວດໝູ່ນີ້', 'No products match your search or category')
+                  : pick('ยังไม่มีรายการสินค้าในระบบ', 'ຍັງບໍ່ມີລາຍການສິນຄ້າໃນລະບົບ', 'No products in catalog yet')}
               </p>
               <p className="text-sm text-ink-muted">
                 {searchQuery.trim() || selectedCategoryId !== 'ALL'
-                  ? 'ลองล้างคำค้นหาหรือเลือกดูรายการขายทั้งหมด'
-                  : 'ไปที่แท็บ “คลังสินค้า & PO” ด้านบนเพื่อเพิ่มสินค้าใหม่เข้าหน้าร้าน'}
+                  ? pick('ลองล้างคำค้นหาหรือเลือกดูรายการขายทั้งหมด', 'ລອງລ້າງຄຳຄົ້ນຫາ ຫຼື ເລືອກເບິ່ງສິນຄ້າທັງໝົດ', 'Try clearing your search filter or viewing all items')
+                  : pick('ไปที่แท็บ “คลังสินค้า & PO” ด้านบนเพื่อเพิ่มสินค้าใหม่เข้าหน้าร้าน', 'ໄປທີ່ແຖບ “ສາງສິນຄ້າ & PO” ດ້ານເທິງເພື່ອເພີ່ມສິນຄ້າໃໝ່', 'Go to "Inventory & PO" above to add new products')}
               </p>
               {(searchQuery.trim() || selectedCategoryId !== 'ALL') && (
                 <button
@@ -2362,7 +2925,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   }}
                   className={`h-[44px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
-                  ล้างคำค้นหา / ตัวกรอง
+                  {pick('ล้างคำค้นหา / ตัวกรอง', 'ລ້າງຄຳຄົ້ນຫາ / ຕົວກອງ', 'Clear Search / Filter')}
                 </button>
               )}
             </div>
@@ -2399,12 +2962,20 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           }`}
                         >
                           {item.isComposite && !item.useProduction
-                            ? 'ตัดวัตถุดิบสดตามสูตร Multi-Level BOM'
+                            ? pick('ตัดวัตถุดิบสดตามสูตร Multi-Level BOM', 'ຕັດວັດຖຸດິບສົດຕາມສູດ Multi-Level BOM', 'Auto-deducts BOM ingredients')
                             : outOfStock
-                              ? `สินค้าหมดสต็อก (0 ${item.unitName})`
+                              ? pick(`สินค้าหมดสต็อก (0 ${item.unitName})`, `ສິນຄ້າໝົດສະຕັອກ (0 ${item.unitName})`, `Out of stock (0 ${item.unitName})`)
                               : lowStock
-                                ? `สต็อกใกล้หมด · เหลือ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`
-                                : `คงเหลือ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`}
+                                ? pick(
+                                    `สต็อกใกล้หมด · เหลือ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`,
+                                    `ສະຕັອກໃກ້ໝົດ · ເຫຼືອ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`,
+                                    `Low stock · ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)} left`
+                                  )
+                                : pick(
+                                    `คงเหลือ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`,
+                                    `ຄົງເຫຼືອ ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`,
+                                    `In stock ${formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}`
+                                  )}
                         </p>
                       </div>
                     </div>
@@ -2438,7 +3009,13 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             <div className="border-b border-hairline bg-surface-1 px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-sm text-ink-soft">
                 <ScanBarcode className="h-4 w-4 text-primary shrink-0" />
-                <span>คลิกแถวสินค้าเพื่อเพิ่มลงบิลทันที (×{scanMultiplier}) หรือยิงปืนบาร์โค้ดต่อเนื่อง</span>
+                <span>
+                  {pick(
+                    `คลิกแถวสินค้าเพื่อเพิ่มลงบิลทันที (×${scanMultiplier}) หรือยิงปืนบาร์โค้ดต่อเนื่อง`,
+                    `ຄລິກແຖວສິນຄ້າເພື່ອເພີ່ມລົງບິນທັນທີ (×${scanMultiplier}) ຫຼື ຍິງບາໂຄດຕໍ່ເນື່ອງ`,
+                    `Click a row to add immediately (×${scanMultiplier}) or scan continuously`
+                  )}
+                </span>
               </div>
 
               {simulationModeEnabled && bootstrap.featureFlags.enableScaleBarcodeParser && (
@@ -2448,7 +3025,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     onClick={() => onScanBarcodeString('2010045012505', 1)}
                     className={`min-h-[38px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                   >
-                    + จำลองตราชั่ง 1.250 กก. (Prefix 20)
+                    {pick('+ จำลองตราชั่ง 1.250 กก. (Prefix 20)', '+ ຈຳລອງຊິງຊັ່ງ 1.250 ກກ. (Prefix 20)', '+ Simulate Scale 1.250 kg (Prefix 20)')}
                   </button>
                   <button
                     type="button"
@@ -2458,8 +3035,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     className={`min-h-[38px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                   >
                     {isLaos
-                      ? '+ ທົດລອງປ້າຍຝັງລາຄາ 150,000 ₭ (Prefix 25)'
-                      : '+ จำลองป้ายฝังราคา ฿225 (Prefix 25)'}
+                      ? pick('+ จำลองป้ายฝังราคา 150,000 ₭ (Prefix 25)', '+ ທົດລອງປ້າຍຝັງລາຄາ 150,000 ₭ (Prefix 25)', '+ Simulate Price-Embedded 150,000 ₭ (Prefix 25)')
+                      : pick('+ จำลองป้ายฝังราคา ฿225 (Prefix 25)', '+ ທົດລອງປ້າຍຝັງລາຄາ ฿225 (Prefix 25)', '+ Simulate Price-Embedded ฿225 (Prefix 25)')}
                   </button>
                 </div>
               )}
@@ -2469,12 +3046,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <table className="w-full text-left text-sm">
                 <thead className="border-b border-hairline bg-surface-1 text-xs font-medium text-ink-muted">
                   <tr>
-                    <th scope="col" className="py-3.5 px-5">รหัสบาร์โค้ด / SKU</th>
-                    <th scope="col" className="py-3.5 px-5">ชื่อสินค้า</th>
-                    <th scope="col" className="py-3.5 px-5">หมวดหมู่</th>
-                    <th scope="col" className="py-3.5 px-5 text-right">สต็อกคงเหลือ</th>
-                    <th scope="col" className="py-3.5 px-5 text-right">ราคาขาย</th>
-                    <th scope="col" className="py-3.5 px-5 text-right">เพิ่มลงบิล</th>
+                    <th scope="col" className="py-3.5 px-5">{pick('รหัสบาร์โค้ด / SKU', 'ລະຫັດບາໂຄດ / SKU', 'Barcode / SKU')}</th>
+                    <th scope="col" className="py-3.5 px-5">{pick('ชื่อสินค้า', 'ຊື່ສິນຄ້າ', 'Item Name')}</th>
+                    <th scope="col" className="py-3.5 px-5">{pick('หมวดหมู่', 'ໝວດໝູ່', 'Category')}</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">{pick('สต็อกคงเหลือ', 'ສະຕັອກຄົງເຫຼືອ', 'In Stock')}</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">{pick('ราคาขาย', 'ລາຄາຂາຍ', 'Price')}</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">{pick('เพิ่มลงบิล', 'ເພີ່ມລົງບິນ', 'Add')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-hairline">
@@ -2482,8 +3059,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     <tr>
                       <td colSpan={6} className="py-14 text-center text-sm text-ink-muted">
                         {searchQuery.trim() || selectedCategoryId !== 'ALL'
-                          ? 'ไม่พบรายการสินค้าที่ตรงกับคำค้นหา'
-                          : 'ยังไม่มีรายการสินค้าในระบบ — กรุณาเพิ่มสินค้าในแท็บ “คลังสินค้า & PO”'}
+                          ? pick('ไม่พบรายการสินค้าที่ตรงกับคำค้นหา', 'ບໍ່ພົບສິນຄ້າທີ່ຕົງກັບຄຳຄົ້ນຫາ', 'No matching products found')
+                          : pick('ยังไม่มีรายการสินค้าในระบบ — กรุณาเพิ่มสินค้าในแท็บ “คลังสินค้า & PO”', 'ຍັງບໍ່ມີສິນຄ້າໃນລະບົບ — ກະລຸນາເພີ່ມໃນແຖບ “ສາງສິນຄ້າ & PO”', 'No products yet — add items in Inventory & PO')}
                       </td>
                     </tr>
                   ) : (
@@ -2519,12 +3096,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                   <span>{item.itemName}</span>
                                   {outOfStock && (
                                     <span className="rounded-[4px] bg-ink px-2 py-0.5 text-[11px] font-medium text-white">
-                                      สินค้าหมด
+                                      {pick('สินค้าหมด', 'ສິນຄ້າໝົດ', 'Out of Stock')}
                                     </span>
                                   )}
                                   {!outOfStock && lowStock && (
                                     <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-[11px] font-medium text-ink">
-                                      ใกล้หมด
+                                      {pick('ใกล้หมด', 'ໃກ້ໝົດ', 'Low Stock')}
                                     </span>
                                   )}
                                   {inCartQty > 0 && (
@@ -2535,7 +3112,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                 </div>
                                 {item.isWeightedScale && (
                                   <div className="text-xs text-ink-muted flex items-center gap-1 mt-0.5">
-                                    <Scale className="h-3 w-3 text-primary" /> รองรับบาร์โค้ดชั่งน้ำหนักสด EAN-13
+                                    <Scale className="h-3 w-3 text-primary" />{' '}
+                                    {pick('รองรับบาร์โค้ดชั่งน้ำหนักสด EAN-13', 'ຮອງຮັບບາໂຄດຊັ່ງນ້ຳໜັກ EAN-13', 'Weighted EAN-13 scale barcode')}
                                   </div>
                                 )}
                               </div>
@@ -2544,7 +3122,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           <td className="py-3.5 px-5 text-xs text-ink-muted">{item.categoryName}</td>
                           <td className="py-3.5 px-5 text-right text-sm text-ink-soft tabular-nums-google">
                             {item.isComposite && !item.useProduction
-                              ? 'ตัดตามสูตร'
+                              ? pick('ตัดตามสูตร', 'ຕັດຕາມສູດ', 'BOM Auto')
                               : formatMilliUnitsToQtyString(item.inStockMilli, item.unitName)}
                           </td>
                           <td className="py-3.5 px-5 text-right font-google-display text-[18px] font-normal text-ink tabular-nums-google">
@@ -2553,7 +3131,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           <td className="py-3.5 px-5 text-right">
                             <button
                               type="button"
-                              aria-label={`เพิ่ม ${item.itemName} ลงบิล`}
+                              aria-label={`${pick('เพิ่ม', 'ເພີ່ມ', 'Add')} ${item.itemName}`}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 handleProductSelect(item);
@@ -2581,10 +3159,18 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             <div className="border-b border-hairline bg-surface-1 px-6 py-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 className="font-google-display text-[20px] font-normal text-ink">
-                  รายการบิลที่พักไว้บนเซิร์ฟเวอร์ (Synced Held Bills · {outletId})
+                  {pick(
+                    `รายการบิลที่พักไว้บนเซิร์ฟเวอร์ (Synced Held Bills · ${outletId})`,
+                    `ລາຍການບິນທີ່ພັກໄວ້ໃນເຊີບເວີ (Synced Held Bills · ${outletId})`,
+                    `Synced Held Bills (${outletId})`
+                  )}
                 </h3>
                 <p className="text-sm text-ink-muted">
-                  ซิงค์ลงฐานข้อมูลหลักอัตโนมัติ — พักบิลที่เครื่องจุดขาย 1 แล้วเรียกคิดเงินที่เครื่องจุดขาย 2 ได้ทันที (ปุ่มลัด F8)
+                  {pick(
+                    'ซิงค์ลงฐานข้อมูลหลักอัตโนมัติ — พักบิลที่เครื่องจุดขาย 1 แล้วเรียกคิดเงินที่เครื่องจุดขาย 2 ได้ทันที (ปุ่มลัด F8)',
+                    'ຊິງຄ໌ລົງຖານຂໍ້ມູນຫຼັກອັດຕະໂນມັດ — ພັກບິນທີ່ເຄື່ອງ 1 ແລ້ວເອີ້ນຄິດເງິນທີ່ເຄື່ອງ 2 ໄດ້ທັນທີ (ປຸ່ມລັດ F8)',
+                    'Synced to local database automatically — hold at one terminal and recall at another (F8)'
+                  )}
                 </p>
               </div>
               <button
@@ -2593,7 +3179,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 className={`inline-flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${syncingHeldBills ? 'animate-spin' : ''}`} />
-                <span>รีเฟรชบิลพักข้ามเครื่อง</span>
+                <span>{pick('รีเฟรชบิลพักข้ามเครื่อง', 'ໂຫຼດບິນພັກຄືນໃໝ່', 'Refresh Held Bills')}</span>
               </button>
             </div>
 
@@ -2601,81 +3187,97 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <div className="py-16 text-center px-6">
                 <PauseCircle className="h-10 w-10 text-ink-muted mx-auto mb-3" />
                 <p className="font-google-display text-[18px] text-ink">
-                  ไม่มีรายการบิลที่พักไว้ขณะนี้
+                  {pick('ไม่มีรายการบิลที่พักไว้ขณะนี้', 'ບໍ່ມີລາຍການບິນທີ່ພັກໄວ້ໃນຂະນະນີ້', 'No held bills at the moment')}
                 </p>
                 <p className="text-sm text-ink-muted mt-1">
-                  เมื่อมีสินค้าในตะกร้า สามารถกดปุ่ม &ldquo;พักบิล (F8)&rdquo; เพื่อเก็บรายการไว้ชั่วคราวได้ทันที
+                  {pick(
+                    'เมื่อมีสินค้าในตะกร้า สามารถกดปุ่ม "พักบิล (F8)" เพื่อเก็บรายการไว้ชั่วคราวได้ทันที',
+                    'ເມື່ອມີສິນຄ້າໃນກະຕ່າ ສາມາດກົດປຸ່ມ "ພັກບິນ (F8)" ເພື່ອເກັບລາຍການໄວ້ຊົ່ວຄາວໄດ້ທັນທີ',
+                    'With items in the cart, press "Hold (F8)" to park the bill safely.'
+                  )}
                 </p>
               </div>
             ) : (
               <div className="divide-y divide-hairline">
-                {heldBills.map((h) => (
-                  <div
-                    key={h.id}
-                    className="p-6 flex flex-wrap items-center justify-between gap-4 hover:bg-surface-1 transition-colors duration-200"
-                  >
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2.5">
-                        <span className="font-google-display text-[20px] font-normal text-ink">
-                          {h.referenceLabel}
-                        </span>
-                        <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-xs text-ink-muted">
-                          {h.orderType}
-                        </span>
-                      </div>
-                      <p className="text-sm text-ink-muted">
-                        {h.cart.map((c) => c.itemName).join(', ')}
-                      </p>
-                      <div className="text-xs text-ink-muted flex items-center gap-2">
-                        <Clock className="h-3.5 w-3.5" />
-                        <span>พักเมื่อ {new Date(h.heldAtIso).toLocaleTimeString('th-TH')}</span>
-                        <span>·</span>
-                        <span>โดย {h.heldByName}</span>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-3">
-                      <div className="text-right mr-2">
-                        <div className="text-xs text-ink-muted">{t('pos.netPayable')}</div>
-                        <div className="font-google-display text-[24px] font-normal text-ink tabular-nums-google">
-                          {money(h.totalSatang)}
+                {heldBills.map((h) => {
+                  const hasKdsItems = h.cart.some((c) => c.kdsDispatched);
+                  const isCurrentlyClaimed = Boolean(h.activeClaimToken);
+                  const requiresPinToVoidHeld = !canApproveVoidWithoutOverride(currentUser.role);
+                  return (
+                    <div
+                      key={h.id}
+                      className="p-6 flex flex-wrap items-center justify-between gap-4 hover:bg-surface-1 transition-colors duration-200"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-google-display text-[20px] font-normal text-ink">
+                            {h.referenceLabel}
+                          </span>
+                          <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 text-xs text-ink-muted">
+                            {h.orderType}
+                          </span>
+                          <span className="inline-flex items-center gap-1 rounded-[4px] border border-primary/30 bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary-dark">
+                            <Lock className="h-3 w-3" />
+                            {hasKdsItems
+                              ? pick('ส่งครัว KDS (ล็อก)', 'ສົ່ງຄົວ KDS (ລັອກ)', 'KDS Sent (Locked)')
+                              : pick('บิลพัก (ล็อก)', 'ບິນພັກ (ລັອກ)', 'Held Bill (Locked)')}
+                          </span>
+                          {isCurrentlyClaimed && (
+                            <span className="inline-flex items-center gap-1 rounded-[4px] border border-danger/40 bg-danger-soft px-2 py-0.5 text-[11px] font-medium text-danger">
+                              {pick('กำลังคิดเงิน', 'ກຳລັງຄິດເງິນ', 'Claimed')} ({h.activeClaimedByName ?? 'POS'})
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-sm text-ink-muted">
+                          {h.cart.map((c) => c.itemName).join(', ')}
+                        </p>
+                        <div className="text-xs text-ink-muted flex items-center gap-2">
+                          <Clock className="h-3.5 w-3.5" />
+                          <span>
+                            {pick('พักเมื่อ', 'ພັກເມື່ອ', 'Held at')} {dateTime(h.heldAtIso)}
+                          </span>
+                          <span>·</span>
+                          <span>
+                            {pick('โดย', 'ໂດຍ', 'By')} {h.heldByName}
+                          </span>
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setConfirmAction({
-                            title: `${pick('ลบบิลที่พักไว้', 'ລຶບບິນພັກໄວ້', 'Delete held bill')} "${h.referenceLabel}"?`,
-                            description: `${h.cart.length} ${t('pos.itemsUnit')} (${money(h.totalSatang)})`,
-                            confirmLabel: 'ยืนยันลบบิลที่พัก',
-                            tone: 'danger',
-                            onConfirm: async () => {
-                              const removed = await posTransport.deleteHeldBill({
-                                outletId,
-                                actorUserId: currentUser.id,
-                                id: h.id,
-                              });
-                              setHeldBills(removed.heldBills);
-                              void onRefreshState();
-                              onToast(`ลบบิลที่พัก "${h.referenceLabel}" แล้ว`, 'warn');
-                            },
-                          })
-                        }
-                        className={`h-[46px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-sm font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
-                      >
-                        ลบทิ้ง
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleRecallHeldBill(h)}
-                        className={`flex h-[46px] items-center gap-2 rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
-                      >
-                        <PlayCircle className="h-4 w-4" />
-                        เรียกบิลคิดเงิน
-                      </button>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="text-right mr-2">
+                          <div className="text-xs text-ink-muted">{t('pos.netPayable')}</div>
+                          <div className="font-google-display text-[24px] font-normal text-ink tabular-nums-google">
+                            {money(h.totalSatang)}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenVoidHeldBillModal(h)}
+                          className={`inline-flex h-[46px] items-center gap-1.5 rounded-[48px] border border-danger/40 bg-canvas px-4 font-google-display text-sm font-medium text-danger hover:bg-danger-soft ${UI_INTERACTION.focusButton}`}
+                        >
+                          <Lock className="h-3.5 w-3.5" />
+                          <span>
+                            {requiresPinToVoidHeld
+                              ? pick('ยกเลิกบิลพัก (PIN)', 'ຍົກເລີກບິນພັກ (PIN)', 'Void Bill (PIN)')
+                              : pick('ยกเลิกบิลพัก', 'ຍົກເລີກບິນພັກ', 'Void Held Bill')}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleRecallHeldBill(h)}
+                          className={`flex h-[46px] items-center gap-2 rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                        >
+                          <PlayCircle className="h-4 w-4" />
+                          <span>
+                            {isCurrentlyClaimed
+                              ? pick('เรียกคิดเงินต่อ', 'ດຶງມາຄິດເງິນຕໍ່', 'Resume Claim')
+                              : pick('เรียกบิลคิดเงิน', 'ເອີ້ນບິນຄິດເງິນ', 'Recall Bill')}
+                          </span>
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -2715,10 +3317,18 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h3 className="font-google-display text-[20px] font-normal text-ink">
-                    ประวัติใบเสร็จรับเงิน &amp; ใบกำกับภาษีอย่างย่อ (ABB)
+                    {pick(
+                      'ประวัติใบเสร็จรับเงิน & ใบกำกับภาษีอย่างย่อ (ABB)',
+                      'ປະຫວັດໃບບິນ & ໃບເກັບເງິນ (Receipts)',
+                      'Receipt & Tax Invoice History'
+                    )}
                   </h3>
                   <p className="text-sm text-ink-muted">
-                    ค้นหาเลขใบเสร็จ / เลขใบกำกับภาษี ABB / ป้ายโต๊ะ / ชื่อเมนู พร้อมพิมพ์ซ้ำหรือยกเลิกบิลคืนสต็อกต้นทุนเดิม
+                    {pick(
+                      'ค้นหาเลขใบเสร็จ / เลขใบกำกับภาษี ABB / ป้ายโต๊ะ / ชื่อเมนู พร้อมพิมพ์ซ้ำหรือยกเลิกบิลคืนสต็อกต้นทุนเดิม',
+                      'ຄົ້ນຫາເລກໃບບິນ / ປ້າຍໂຕະ / ຊື່ເມນູ ພ້ອມພິມຊ້ຳ ຫຼື ຍົກເລີກບິນຄືນສະຕັອກຕົ້ນທຶນເດີມ',
+                      'Search by receipt no., invoice no., table, or item — reprint or void with stock reversal'
+                    )}
                   </p>
                 </div>
               </div>
@@ -2728,16 +3338,20 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-muted" />
                   <input
                     type="text"
-                    aria-label="ค้นหาใบเสร็จย้อนหลัง"
+                    aria-label={pick('ค้นหาใบเสร็จย้อนหลัง', 'ຄົ້ນຫາໃບບິນຍ້ອນຫຼັງ', 'Search past receipts')}
                     value={orderHistoryQuery}
                     onChange={(e) => setOrderHistoryQuery(e.target.value)}
-                    placeholder="ค้นหาเลขใบเสร็จ, เลข ABB, ป้ายโต๊ะ/คิว, ชื่อเมนู หรือ Ref สลิป..."
+                    placeholder={pick(
+                      'ค้นหาเลขใบเสร็จ, เลข ABB, ป้ายโต๊ะ/คิว, ชื่อเมนู หรือ Ref สลิป...',
+                      'ຄົ້ນຫາເລກໃບບິນ, ປ້າຍໂຕະ/ຄິວ, ຊື່ເມນູ ຫຼື Ref ສະລິບ...',
+                      'Search receipt, invoice, table/queue, item or slip ref...'
+                    )}
                     className={`h-10 w-full rounded-[48px] border border-hairline bg-canvas pl-10 pr-9 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                   />
                   {orderHistoryQuery && (
                     <button
                       type="button"
-                      aria-label="ล้างคำค้นหาใบเสร็จ"
+                      aria-label={pick('ล้างคำค้นหาใบเสร็จ', 'ລ້າງຄຳຄົ້ນຫາໃບບິນ', 'Clear receipt search')}
                       onClick={() => setOrderHistoryQuery('')}
                       className={`absolute right-2 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
                     >
@@ -2749,14 +3363,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 <div className="flex flex-wrap items-center gap-1.5">
                   {(
                     [
-                      { id: 'ALL', label: `ทั้งหมด (${bootstrap.recentOrders.length})` },
+                      { id: 'ALL', label: `${pick('ทั้งหมด', 'ທັງໝົດ', 'All')} (${bootstrap.recentOrders.length})` },
                       {
                         id: 'COMPLETED',
-                        label: `สำเร็จ (${bootstrap.recentOrders.filter((o) => o.status === 'COMPLETED').length})`,
+                        label: `${pick('สำเร็จ', 'ສຳເລັດ', 'Completed')} (${bootstrap.recentOrders.filter((o) => o.status === 'COMPLETED').length})`,
                       },
                       {
                         id: 'VOIDED',
-                        label: `ยกเลิก (${bootstrap.recentOrders.filter((o) => o.status === 'VOIDED').length})`,
+                        label: `${pick('ยกเลิก', 'ຍົກເລີກ', 'Voided')} (${bootstrap.recentOrders.filter((o) => o.status === 'VOIDED').length})`,
                       },
                     ] as const
                   ).map((f) => {
@@ -2784,12 +3398,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <table className="w-full text-left text-sm">
                 <thead className="border-b border-hairline bg-surface-1 text-xs font-medium text-ink-muted">
                   <tr>
-                    <th scope="col" className="py-3.5 px-5">เลขที่ใบเสร็จ / ABB</th>
-                    <th scope="col" className="py-3.5 px-5">รายการที่ขาย</th>
-                    <th scope="col" className="py-3.5 px-5">วิธีชำระ</th>
-                    <th scope="col" className="py-3.5 px-5 text-right">ยอดสุทธิ</th>
-                    <th scope="col" className="py-3.5 px-5 text-center">สถานะ</th>
-                    <th scope="col" className="py-3.5 px-5 text-right">การทำงาน</th>
+                    <th scope="col" className="py-3.5 px-5">{pick('เลขที่ใบเสร็จ / ABB', 'ເລກທີໃບບິນ / ABB', 'Receipt / Tax No.')}</th>
+                    <th scope="col" className="py-3.5 px-5">{pick('รายการที่ขาย', 'ລາຍການທີ່ຂາຍ', 'Items Sold')}</th>
+                    <th scope="col" className="py-3.5 px-5">{pick('วิธีชำระ', 'ວິທີຊຳລະ', 'Payment')}</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">{pick('ยอดสุทธิ', 'ຍອດສຸດທິ', 'Total')}</th>
+                    <th scope="col" className="py-3.5 px-5 text-center">{pick('สถานะ', 'ສະຖານະ', 'Status')}</th>
+                    <th scope="col" className="py-3.5 px-5 text-right">{pick('การทำงาน', 'ການທຳງານ', 'Actions')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-hairline">
@@ -2797,8 +3411,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     <tr>
                       <td colSpan={6} className="py-14 text-center text-ink-muted">
                         {orderHistoryQuery.trim() || orderStatusFilter !== 'ALL'
-                          ? 'ไม่พบใบเสร็จที่ตรงกับเงื่อนไขการค้นหา'
-                          : 'ยังไม่มีรายการขายในกะนี้'}
+                          ? pick('ไม่พบใบเสร็จที่ตรงกับเงื่อนไขการค้นหา', 'ບໍ່ພົບໃບບິນທີ່ຕົງກັບເງື່ອນໄຂການຄົ້ນຫາ', 'No matching receipts found')
+                          : pick('ยังไม่มีรายการขายในกะนี้', 'ຍັງບໍ່ມີລາຍການຂາຍໃນກະນີ້', 'No sales in this shift yet')}
                       </td>
                     </tr>
                   ) : (
@@ -2888,22 +3502,26 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             }
                             className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                           >
-                            <Printer className="h-3.5 w-3.5" /> พิมพ์ซ้ำ
+                            <Printer className="h-3.5 w-3.5" /> {pick('พิมพ์ซ้ำ', 'ພິມຊ້ຳ', 'Reprint')}
                           </button>
                           {ord.status === 'COMPLETED' && (
                             <button
                               type="button"
                               onClick={() =>
-                                setVoidTargetOrder({
-                                  salesOrderId: ord.salesOrderId,
-                                  receiptNumber: ord.receiptNumber,
-                                  abbTaxInvoiceNo: ord.abbTaxInvoiceNo,
-                                  totalSatang: ord.totalSatang,
+                                setVoidAuthContext({
+                                  summary: {
+                                    mode: 'SALES_ORDER_VOID',
+                                    salesOrderId: ord.salesOrderId,
+                                    receiptNumber: ord.receiptNumber,
+                                    abbTaxInvoiceNo: ord.abbTaxInvoiceNo,
+                                    totalSatang: ord.totalSatang,
+                                  },
+                                  onConfirmVoid: handleAuthorizedVoidOrder,
                                 })
                               }
                               className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                             >
-                              <RotateCcw className="h-3.5 w-3.5" /> ยกเลิกบิล
+                              <RotateCcw className="h-3.5 w-3.5" /> {pick('ยกเลิกบิล', 'ຍົກເລີກບິນ', 'Void Bill')}
                             </button>
                           )}
                         </td>
@@ -2947,7 +3565,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             {/* Order Context Controls on Hero Band (Strictly Scoped to Active Shop Profile) */}
             <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <select
-                aria-label="รูปแบบออเดอร์"
+                aria-label={pick('รูปแบบออเดอร์', 'ຮູບແບບອໍເດີ', 'Order type')}
                 value={orderType}
                 onChange={(e) => setOrderType(e.target.value as CheckoutOrderRequest['orderType'])}
                 className="h-10 rounded-[4px] border border-white/25 bg-white/10 px-3 text-xs font-medium text-white transition-colors duration-200 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary cursor-pointer"
@@ -2980,11 +3598,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <div className="flex items-center justify-between gap-2">
                 <span className="inline-flex items-center gap-1.5 text-xs font-medium text-primary-dark">
                   <CheckCircle2 className="h-4 w-4 shrink-0" />
-                  <span>ปิดบิลสำเร็จ · {lastCompletedSaleSummary.abbTaxInvoiceNo}</span>
+                  <span>
+                    {pick('ปิดบิลสำเร็จ', 'ປິດບິນສຳເລັດ', 'Sale Completed')} ·{' '}
+                    {lastCompletedSaleSummary.abbTaxInvoiceNo}
+                  </span>
                 </span>
                 <button
                   type="button"
-                  aria-label="ปิดแถบสรุปเงินทอน"
+                  aria-label={pick('ปิดแถบสรุปเงินทอน', 'ປິດແຖບສະຫຼຸບເງິນທອນ', 'Dismiss change summary')}
                   onClick={() => setLastCompletedSaleSummary(null)}
                   className={`flex h-10 w-10 items-center justify-center rounded-full text-ink-muted hover:bg-canvas hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
@@ -3007,13 +3628,63 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               )}
 
               <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-[11px] text-ink-muted">
-                <span>ยิงบาร์โค้ดหรือแตะสินค้าชิ้นถัดไปเพื่อเริ่มบิลใหม่ทันที</span>
+                <span>
+                  {pick(
+                    'ยิงบาร์โค้ดหรือแตะสินค้าชิ้นถัดไปเพื่อเริ่มบิลใหม่ทันที',
+                    'ຍິງບາໂຄດ ຫຼື ແຕະສິນຄ້າຊິ້ນຕໍ່ໄປເພື່ອເລີ່ມບິນໃໝ່ທັນທີ',
+                    'Scan or tap next item to start a new order'
+                  )}
+                </span>
                 <button
                   type="button"
                   onClick={() => setReceiptModalOpen(true)}
                   className={`inline-flex items-center gap-1 rounded-[48px] border border-primary bg-canvas px-3 py-1 text-xs font-medium text-primary-dark hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                 >
-                  <Printer className="h-3 w-3" /> ดูใบเสร็จ / พิมพ์ซ้ำ
+                  <Printer className="h-3 w-3" />{' '}
+                  {pick('ดูใบเสร็จ / พิมพ์ซ้ำ', 'ເບິ່ງໃບບິນ / ພິມຊ້ຳ', 'View / Reprint Receipt')}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 1.8 ACTIVE HELD BILL PROTECTION STATUS STRIP */}
+          {activeHeldBillMeta && (
+            <div className="border-b border-primary/25 bg-primary-soft/60 px-5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <Lock className="h-3.5 w-3.5 text-primary-dark shrink-0" />
+                <div className="min-w-0">
+                  <span className="font-medium text-primary-dark">
+                    {pick('กำลังคิดเงินบิลพัก', 'ກຳລັງຄິດເງິນບິນພັກ', 'Settling Held Bill')}:{' '}
+                    {activeHeldBillMeta.referenceLabel}
+                  </span>
+                  <span className="text-ink-soft ml-1.5">
+                    ·{' '}
+                    {pick(
+                      'รายการเดิมถูกล็อก (ลด/ลบต้องใช้ PIN ผู้จัดการ)',
+                      'ລາຍການເດີມຖືກລັອກ (ຫຼຸດ/ລຶບຕ້ອງໃຊ້ PIN ຜູ້ຈັດການ)',
+                      'Original lines locked (reduction/removal requires Manager PIN)'
+                    )}
+                  </span>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {heldBillHasNewerServerVersion && (
+                  <button
+                    type="button"
+                    onClick={handleSyncUpdatedHeldBillFromServer}
+                    className={`inline-flex items-center gap-1 rounded-[48px] bg-primary px-3 py-1 text-[11px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    <span>{pick('ดึงออเดอร์ QR ล่าสุด', 'ດຶງອໍເດີ QR ຫຼ້າສຸດ', 'Sync Latest QR Orders')}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void handleReleaseActiveHeldBill()}
+                  className={`inline-flex items-center gap-1 rounded-[48px] border border-primary/40 bg-canvas px-3 py-1 text-[11px] font-medium text-primary-dark hover:border-primary ${UI_INTERACTION.focusButton}`}
+                >
+                  <PauseCircle className="h-3 w-3" />
+                  <span>{pick('วางกลับเข้าบิลพัก', 'ວາງກັບຄືນບິນພັກ', 'Return to Held Bills')}</span>
                 </button>
               </div>
             </div>
@@ -3034,31 +3705,53 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
             ) : (
               cartSummary.lines.map((line) => {
                 const isEditingQty = editingCartKey === line.cartKey;
+                const minLockedMilli = getLineLockedMinMilli(line);
+                const isLineLocked = minLockedMilli > 0;
                 return (
                   <div key={line.cartKey} className="px-5 py-3.5 hover:bg-surface-1 transition-colors duration-150">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (isEditingQty) {
-                              setEditingCartKey(null);
-                            } else {
-                              setEditingCartKey(line.cartKey);
-                              setEditingQtyInput(
-                                line.isWeightedScale
-                                  ? formatMilliUnitsToQtyString(line.quantityMilli)
-                                  : String(Math.round(line.quantityMilli / 1000))
-                              );
-                            }
-                          }}
-                          className={`font-google-display text-[16px] font-medium text-ink hover:text-primary text-left rounded-[4px] ${UI_INTERACTION.focusButton}`}
-                        >
-                          {line.itemName}
-                        </button>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (isEditingQty) {
+                                setEditingCartKey(null);
+                              } else {
+                                setEditingCartKey(line.cartKey);
+                                setEditingQtyInput(
+                                  line.isWeightedScale
+                                    ? formatMilliUnitsToQtyString(line.quantityMilli)
+                                    : String(Math.round(line.quantityMilli / 1000))
+                                );
+                              }
+                            }}
+                            className={`font-google-display text-[16px] font-medium text-ink hover:text-primary text-left rounded-[4px] ${UI_INTERACTION.focusButton}`}
+                          >
+                            {line.itemName}
+                          </button>
+                          {isLineLocked && (
+                            <span
+                              title={pick(
+                                'รายการนี้ถูกบันทึกในบิลพัก/ส่งครัวแล้ว — เพิ่มจำนวนได้ แต่ลด/ลบต้องใช้ PIN ผู้จัดการ',
+                                'ລາຍການນີ້ຖືກບັນທຶກໃນບິນພັກ/ສົ່ງຄົວແລ້ວ — ເພີ່ມຈຳນວນໄດ້ ແຕ່ຫຼຸດ/ລຶບຕ້ອງໃຊ້ PIN ຜູ້ຈັດການ',
+                                'Locked held/KDS line — extra units can be added, but reducing/removing requires Manager PIN'
+                              )}
+                              className="inline-flex items-center gap-1 rounded-[4px] border border-primary/30 bg-primary-soft px-1.5 py-0.5 text-[10px] font-medium text-primary-dark"
+                            >
+                              <Lock className="h-2.5 w-2.5" />
+                              <span>
+                                {line.kdsDispatched
+                                  ? pick('ส่งครัว KDS', 'ສົ່ງຄົວ KDS', 'Sent to KDS')
+                                  : pick('บิลพัก', 'ບິນພັກ', 'Held Bill')}
+                              </span>
+                            </span>
+                          )}
+                        </div>
 
                         {(line.mods.length > 0 ||
-                          (bootstrap.featureFlags.enableRoleBasedModifiers &&
+                          (!isLineLocked &&
+                            bootstrap.featureFlags.enableRoleBasedModifiers &&
                             bootstrap.modifierGroups.length > 0 &&
                             bootstrap.catalogDetailed.find((v) => v.id === line.variantId)
                               ?.isComposite)) && (
@@ -3074,7 +3767,8 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                   : ''}
                               </span>
                             ))}
-                            {bootstrap.featureFlags.enableRoleBasedModifiers &&
+                            {!isLineLocked &&
+                              bootstrap.featureFlags.enableRoleBasedModifiers &&
                               bootstrap.modifierGroups.length > 0 &&
                               bootstrap.catalogDetailed.find((v) => v.id === line.variantId)
                                 ?.isComposite && (
@@ -3084,7 +3778,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                   className={`inline-flex items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-2.5 py-0.5 text-[11px] font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
                                 >
                                   <SlidersHorizontal className="h-3 w-3" />
-                                  <span>แก้ตัวเลือก</span>
+                                  <span>{pick('แก้ตัวเลือก', 'ແກ້ຕົວເລືອກ', 'Edit Options')}</span>
                                 </button>
                               )}
                           </div>
@@ -3110,17 +3804,29 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          aria-label={`ลดจำนวน ${line.itemName}`}
+                          aria-label={pick(
+                            `ลดจำนวน ${line.itemName}`,
+                            `ຫຼຸດຈຳນວນ ${line.itemName}`,
+                            `Decrease quantity of ${line.itemName}`
+                          )}
+                          title={
+                            isLineLocked && line.quantityMilli <= minLockedMilli
+                              ? pick(
+                                  'ลดต่ำกว่ายอดที่พักไว้ต้องใช้ PIN ผู้จัดการ',
+                                  'ຫຼຸດຕ່ຳກວ່າຍອດທີ່ພັກໄວ້ຕ້ອງໃຊ້ PIN ຜູ້ຈັດການ',
+                                  'Reducing below held quantity requires Manager PIN'
+                                )
+                              : pick(
+                                  `ลดจำนวน ${line.itemName}`,
+                                  `ຫຼຸດຈຳນວນ ${line.itemName}`,
+                                  `Decrease quantity of ${line.itemName}`
+                                )
+                          }
                           onClick={() => {
                             const step = line.isWeightedScale ? 250 : 1_000;
-                            setCart((prev) =>
-                              prev
-                                .map((c) =>
-                                  c.cartKey === line.cartKey
-                                    ? withManualCartLineQty(c, c.quantityMilli - step)
-                                    : c
-                                )
-                                .filter((c) => c.quantityMilli > 0)
+                            handleRequestReduceOrRemoveCartLine(
+                              line,
+                              Math.max(0, line.quantityMilli - step)
                             );
                           }}
                           className={`flex h-11 w-11 items-center justify-center rounded-full border border-hairline bg-canvas text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
@@ -3137,29 +3843,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                   editingQtyInput,
                                   3
                                 );
-                                if (parsedMilli <= 0) {
-                                  setCart((prev) =>
-                                    prev.filter((c) => c.cartKey !== line.cartKey)
-                                  );
-                                } else {
-                                  setCart((prev) =>
-                                    prev.map((c) =>
-                                      c.cartKey === line.cartKey
-                                        ? withManualCartLineQty(c, parsedMilli)
-                                        : c
-                                    )
-                                  );
-                                }
                                 setEditingCartKey(null);
+                                handleRequestReduceOrRemoveCartLine(line, parsedMilli);
                               } catch {
-                                onToast('รูปแบบจำนวนไม่ถูกต้อง', 'error');
+                                onToast(
+                                  pick('รูปแบบจำนวนไม่ถูกต้อง', 'ຮູບແບບຈຳນວນບໍ່ຖືກຕ້ອງ', 'Invalid quantity format'),
+                                  'error'
+                                );
                               }
                             }}
                             className="flex items-center gap-1"
                           >
                             <input
                               type="text"
-                              aria-label={`แก้ไขจำนวน ${line.itemName}`}
+                              aria-label={pick(
+                                `แก้ไขจำนวน ${line.itemName}`,
+                                `ແກ້ໄຂຈຳນວນ ${line.itemName}`,
+                                `Edit quantity for ${line.itemName}`
+                              )}
                               autoFocus
                               value={editingQtyInput}
                               onChange={(e) => setEditingQtyInput(e.target.value)}
@@ -3167,7 +3868,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             />
                             <button
                               type="submit"
-                              aria-label={`ยืนยันจำนวน ${line.itemName}`}
+                              aria-label={pick(
+                                `ยืนยันจำนวน ${line.itemName}`,
+                                `ຢືນຢັນຈຳນວນ ${line.itemName}`,
+                                `Confirm quantity for ${line.itemName}`
+                              )}
                               className={`flex h-11 w-11 items-center justify-center rounded-full bg-primary text-white hover:bg-primary-hover ${UI_INTERACTION.focusButton}`}
                             >
                               <Check className="h-4 w-4" />
@@ -3176,7 +3881,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         ) : (
                           <button
                             type="button"
-                            title="คลิกเพื่อพิมพ์จำนวนเอง"
+                            title={pick('คลิกเพื่อพิมพ์จำนวนเอง', 'ຄລິກເພື່ອປ້ອນຈຳນວນເອງ', 'Click to enter quantity')}
                             onClick={() => {
                               setEditingCartKey(line.cartKey);
                               setEditingQtyInput(
@@ -3195,7 +3900,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
                         <button
                           type="button"
-                          aria-label={`เพิ่มจำนวน ${line.itemName}`}
+                          aria-label={pick(
+                            `เพิ่มจำนวน ${line.itemName}`,
+                            `ເພີ່ມຈຳນວນ ${line.itemName}`,
+                            `Increase quantity of ${line.itemName}`
+                          )}
                           onClick={() => {
                             const step = line.isWeightedScale ? 250 : 1_000;
                             setCart((prev) =>
@@ -3214,13 +3923,32 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
                       <button
                         type="button"
-                        aria-label={`ลบ ${line.itemName}`}
-                        onClick={() =>
-                          setCart((prev) => prev.filter((c) => c.cartKey !== line.cartKey))
+                        aria-label={
+                          isLineLocked
+                            ? pick(
+                                `ขอยกเลิกรายการ ${line.itemName} (ต้องใช้ PIN ผู้จัดการ)`,
+                                `ຂໍຍົກເລີກລາຍການ ${line.itemName} (ຕ້ອງໃຊ້ PIN ຜູ້ຈັດການ)`,
+                                `Request removal of ${line.itemName} (Manager PIN required)`
+                              )
+                            : pick(`ลบ ${line.itemName}`, `ລຶບ ${line.itemName}`, `Remove ${line.itemName}`)
                         }
-                        className={`flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
+                        title={
+                          isLineLocked
+                            ? pick(
+                                'รายการในบิลพัก/ส่งครัวแล้ว — ต้องใช้ PIN ผู้จัดการเพื่อลบออก',
+                                'ລາຍການໃນບິນພັກ/ສົ່ງຄົວແລ້ວ — ຕ້ອງໃຊ້ PIN ຜູ້ຈັດການເພື່ອລຶບ',
+                                'Locked held/KDS item — removing requires Manager PIN'
+                              )
+                            : pick(`ลบ ${line.itemName}`, `ລຶບ ${line.itemName}`, `Remove ${line.itemName}`)
+                        }
+                        onClick={() => handleRequestReduceOrRemoveCartLine(line, 0)}
+                        className={`flex h-11 w-11 items-center justify-center rounded-full ${
+                          isLineLocked
+                            ? 'text-danger hover:bg-danger-soft'
+                            : 'text-ink-muted hover:bg-surface-1 hover:text-ink'
+                        } ${UI_INTERACTION.focusButton}`}
                       >
-                        <Trash2 className="h-4 w-4" />
+                        {isLineLocked ? <Lock className="h-4 w-4" /> : <Trash2 className="h-4 w-4" />}
                       </button>
                     </div>
                   </div>
@@ -3383,7 +4111,34 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 <button
                   type="button"
                   disabled={cart.length === 0}
-                  onClick={() =>
+                  onClick={() => {
+                    if (hasLockedHeldLines) {
+                      if (activeHeldBillMeta) {
+                        const targetHeld =
+                          heldBills.find((b) => b.id === activeHeldBillMeta.id) ?? {
+                            id: activeHeldBillMeta.id,
+                            outletId,
+                            referenceLabel: activeHeldBillMeta.referenceLabel,
+                            orderType,
+                            taxMode,
+                            cart,
+                            totalSatang: cartSummary.totalSatang,
+                            heldByName: currentUser.displayName,
+                            heldAtIso: new Date().toISOString(),
+                          };
+                        handleOpenVoidHeldBillModal(targetHeld);
+                      } else {
+                        onToast(
+                          pick(
+                            'มีรายการที่ส่งเข้าครัวแล้วในบิล — กรุณากดปุ่มแม่กุญแจรายบรรทัดเพื่อขอ PIN ผู้จัดการก่อนลบ',
+                            'ມີລາຍການທີ່ສົ່ງເຂົ້າຄົວແລ້ວໃນບິນ — ກະລຸນາກົດປຸ່ມກະແຈແຕ່ລະແຖວເພື່ອຂໍ PIN ຜູ້ຈັດການກ່ອນລຶບ',
+                            'Bill contains kitchen-dispatched items — use the per-line lock button with Manager PIN to void'
+                          ),
+                          'warn'
+                        );
+                      }
+                      return;
+                    }
                     setConfirmAction({
                       title: pick('ล้างรายการสินค้าทั้งหมดในบิล?', 'ລ້າງລາຍການສິນຄ້າທັງໝົດໃນບິນ?', 'Clear entire bill?'),
                       description: `${cartSummary.totalItemUnitsCount} ${t('pos.itemsUnit')} (${money(cartSummary.totalSatang)})`,
@@ -3394,12 +4149,29 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         setDiscountInput('0');
                         onToast(pick('ล้างรายการในตะกร้าเรียบร้อยแล้ว', 'ລ້າງລາຍການໃນກະຕ່າແລ້ວ', 'Cart cleared'), 'warn');
                       },
-                    })
-                  }
-                  className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 font-google-display text-xs font-medium tracking-[0.25px] text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
+                    });
+                  }}
+                  className={`flex h-[44px] items-center justify-center gap-1.5 rounded-[48px] border px-3 font-google-display text-xs font-medium tracking-[0.25px] ${UI_INTERACTION.focusButton} ${
+                    hasLockedHeldLines
+                      ? 'border-danger/40 bg-canvas text-danger hover:bg-danger-soft'
+                      : 'border-hairline bg-canvas text-ink-muted hover:border-ink hover:text-ink'
+                  }`}
                 >
-                  <Trash2 className="h-4 w-4 shrink-0" />
-                  <span>{t('pos.clearCart')}</span>
+                  {hasLockedHeldLines ? (
+                    <>
+                      <Lock className="h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        {canApproveVoidWithoutOverride(currentUser.role)
+                          ? pick('ยกเลิกบิลพัก', 'ຍົກເລີກບິນພັກ', 'Void Held Bill')
+                          : pick('ยกเลิก (PIN)', 'ຍົກເລີກ (PIN)', 'Void (PIN)')}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="h-4 w-4 shrink-0" />
+                      <span>{t('pos.clearCart')}</span>
+                    </>
+                  )}
                 </button>
               </div>
               {cart.length > 0 && cartSummary.totalSatang <= 0 && (
@@ -3434,17 +4206,21 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
               <div>
                 <h3 id={`${uid}-modifier-title`} className="font-google-display text-[22px] font-normal text-ink">
                   {editingModifierCartKey
-                    ? `แก้ไขตัวเลือก: ${customizingVariant.itemName}`
+                    ? `${pick('แก้ไขตัวเลือก:', 'ແກ້ໄຂຕົວເລືອກ:', 'Edit options:')} ${customizingVariant.itemName}`
                     : customizingVariant.itemName}
                 </h3>
                 <p className="text-xs text-ink-muted flex items-center gap-1.5 mt-0.5">
                   <Sparkles className="h-3.5 w-3.5 text-primary" />
-                  ปรับสัดส่วนวัตถุดิบอัตโนมัติตามบทบาทในสูตร (Stock-Aware Modifiers)
+                  {pick(
+                    'ปรับสัดส่วนวัตถุดิบอัตโนมัติตามบทบาทในสูตร (Stock-Aware Modifiers)',
+                    'ປັບສັດສ່ວນວັດຖຸດິບອັດຕະໂນມັດຕາມບົດບາດໃນສູດ (Stock-Aware Modifiers)',
+                    'Automatically scales recipe ingredients by modifier role'
+                  )}
                 </p>
               </div>
               <button
                 type="button"
-                aria-label="ปิดหน้าต่างตัวเลือกเสริม"
+                aria-label={pick('ปิดหน้าต่างตัวเลือกเสริม', 'ປິດໜ້າຕ່າງຕົວເລືອກເສີມ', 'Close modifiers dialog')}
                 onClick={() => {
                   setCustomizingVariant(null);
                   setEditingModifierCartKey(null);
@@ -3463,7 +4239,9 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       {group.name}
                     </span>
                     <span className="text-xs text-ink-muted">
-                      {group.selectionType === 'SINGLE' ? 'เลือก 1 รายการ' : 'เลือกได้หลายรายการ'}
+                      {group.selectionType === 'SINGLE'
+                        ? pick('เลือก 1 รายการ', 'ເລືອກ 1 ລາຍການ', 'Choose 1')
+                        : pick('เลือกได้หลายรายการ', 'ເລືອກໄດ້ຫຼາຍລາຍການ', 'Choose multiple')}
                     </span>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
@@ -3513,12 +4291,12 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
 
               <div className="flex items-center justify-between pt-3 border-t border-hairline">
                 <label htmlFor={`${uid}-mod-qty`} className="font-google-display text-sm font-medium text-ink">
-                  จำนวน ({customizingVariant.unitName})
+                  {pick('จำนวน', 'ຈຳນວນ', 'Quantity')} ({customizingVariant.unitName})
                 </label>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    aria-label="ลดจำนวน"
+                    aria-label={pick('ลดจำนวน', 'ຫຼຸດຈຳນວນ', 'Decrease quantity')}
                     onClick={() =>
                       setDraftQtyInput((prev) => {
                         const parsed = Number.parseInt(prev, 10);
@@ -3533,14 +4311,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   <input
                     id={`${uid}-mod-qty`}
                     type="text"
-                    aria-label="จำนวนแก้ว"
+                    aria-label={pick('จำนวนที่สั่ง', 'ຈຳນວນທີ່ສັ່ງ', 'Order quantity')}
                     value={draftQtyInput}
                     onChange={(e) => setDraftQtyInput(e.target.value)}
                     className={`h-11 w-20 rounded-[4px] border border-hairline text-center font-google-display text-base text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                   />
                   <button
                     type="button"
-                    aria-label="เพิ่มจำนวน"
+                    aria-label={pick('เพิ่มจำนวน', 'ເພີ່ມຈຳນວນ', 'Increase quantity')}
                     onClick={() =>
                       setDraftQtyInput((prev) => {
                         const parsed = Number.parseInt(prev, 10);
@@ -3565,7 +4343,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 }}
                 className={`h-[50px] rounded-[48px] border border-hairline bg-canvas px-6 font-google-display text-[15px] font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
-                ยกเลิก
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -3611,7 +4389,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     setCustomizingVariant(null);
                     setEditingModifierCartKey(null);
                   } catch {
-                    onToast('รูปแบบจำนวนสินค้าไม่ถูกต้อง', 'error');
+                    onToast(
+                      pick(
+                        'รูปแบบจำนวนสินค้าไม่ถูกต้อง',
+                        'ຮູບແບບຈຳນວນສິນຄ້າບໍ່ຖືກຕ້ອງ',
+                        'Invalid item quantity format'
+                      ),
+                      'error'
+                    );
                   }
                 }}
                 className={`h-[50px] rounded-[48px] bg-primary px-8 font-google-display text-[16px] font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
@@ -4073,7 +4858,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                             `ລັອກຍອດ ${money(cartSummary.totalSatang)} ອັດຕະໂນມັດ (Tag 53=418 LAK · CRC16 ${qrCrcHex}) ໃຊ້ງານອອບໄລນ໌ 100%`,
                             `Amount locked at ${money(cartSummary.totalSatang)} (EMVCo 418 LAK · CRC16 ${qrCrcHex}) — 100% offline.`
                           )
-                        : `ล็อกยอดเงินตรงตามบิลอัตโนมัติ คำนวณรหัสตรวจสอบ CRC16 (${qrCrcHex}) โดยไม่ต้องพึ่งอินเทอร์เน็ต`}
+                        : pick(
+                            `ล็อกยอดเงินตรงตามบิลอัตโนมัติ คำนวณรหัสตรวจสอบ CRC16 (${qrCrcHex}) โดยไม่ต้องพึ่งอินเทอร์เน็ต`,
+                            `ລັອກຍອດເງິນຕົງຕາມບິນອັດຕະໂນມັດ ຄຳນວນລະຫັດ CRC16 (${qrCrcHex}) ແບບອອບໄລນ໌`,
+                            `Exact bill amount locked offline with EMVCo CRC16 checksum (${qrCrcHex}).`
+                          )}
                     </p>
                     {qrPayloadText && (
                       <p className="text-[11px] text-ink-muted break-all line-clamp-2">
@@ -4114,7 +4903,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           'ກວດສອບສະລິບປ້ອງກັນການໂອນຊ້ຳ: ສະແກນ ຫຼື ປ້ອນເລກ Ref / Ticket ຈາກສະລິບລູກຄ້າ',
                           'Anti-duplicate slip check: scan or type customer transfer Ticket / Ref ID'
                         )
-                      : 'ขั้นตอนป้องกันสลิปปลอม: ยิงปืนสแกน 2D ที่ Mini-QR บนสลิปลูกค้าได้ทันที (ระบบตรวจให้อัตโนมัติ)'}
+                      : pick(
+                          'ขั้นตอนป้องกันสลิปปลอม: ยิงปืนสแกน 2D ที่ Mini-QR บนสลิปลูกค้าได้ทันที (ระบบตรวจให้อัตโนมัติ)',
+                          'ຂັ້ນຕອນປ້ອງກັນສະລິບປອມ: ຍິງສະແກນ 2D ທີ່ Mini-QR ເທິງສະລິບລູກຄ້າໄດ້ທັນທີ',
+                          'Slip fraud check: scan the customer BOT Mini-QR with your 2D scanner'
+                        )}
                   </label>
                   <input
                     id={`${uid}-slip-miniqr`}
@@ -4128,16 +4921,20 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                     placeholder={
                       isLaos
                         ? t('pos.laoSlipRefPlaceholder')
-                        : 'ยิงปืนสแกน 2D บนสลิปโอนเงินลูกค้าทันทีโดยไม่ต้องคลิกช่องนี้...'
+                        : pick(
+                            'ยิงปืนสแกน 2D บนสลิปโอนเงินลูกค้าทันทีโดยไม่ต้องคลิกช่องนี้...',
+                            'ຍິງສະແກນ 2D ເທິງສະລິບໂອນເງິນໄດ້ທັນທີ...',
+                            'Scan customer slip Mini-QR directly...'
+                          )
                     }
                     className={`h-11 w-full rounded-[4px] border border-hairline px-3.5 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                   />
 
                   {simulationModeEnabled && !isLaos && (
                     <div className="flex flex-wrap gap-2">
-                      {SLIP_PRESETS.map((p) => (
+                      {SLIP_PRESETS_RAW.map((p) => (
                         <button
-                          key={p.label}
+                          key={p.id}
                           type="button"
                           onClick={() => {
                             setSlipMiniQrInput(p.raw);
@@ -4145,7 +4942,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                           }}
                           className={`rounded-[48px] border border-hairline bg-canvas px-3.5 py-1.5 text-xs text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                         >
-                          {p.label}
+                          {getSlipPresetLabel(p.id, pick)}
                         </button>
                       ))}
                     </div>
@@ -4172,7 +4969,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       >
                         {isLaos
                           ? `${t('pos.verifySlipBtn')} LAOQR (Step 1)`
-                          : 'ตรวจสอบโครงสร้างสลิป BOT Mini-QR (Step 1)'}
+                          : pick(
+                              'ตรวจสอบโครงสร้างสลิป BOT Mini-QR (Step 1)',
+                              'ກວດສອບໂຄງສ້າງສະລິບ BOT Mini-QR (Step 1)',
+                              'Verify BOT Mini-QR Slip (Step 1)'
+                            )}
                       </button>
 
                       {isLaos && fiscal.laoQrVerificationPolicy === 'VISUAL_CONFIRM_ALLOWED' && (
@@ -4407,7 +5208,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                                   'ສະແກນ ຫຼື ປ້ອນເລກ Ref ສະລິບສຳລັບຍອດໂອນສ່ວນທີ 2',
                                   'Scan or enter transfer Ref for Part 2'
                                 )
-                              : 'สแกน Mini-QR บนสลิปลูกค้าเพื่อป้องกันสลิปซ้ำ หรือกดตรวจสลิป Step 1'}
+                              : pick(
+                                  'สแกน Mini-QR บนสลิปลูกค้าเพื่อป้องกันสลิปซ้ำ หรือกดตรวจสลิป Step 1',
+                                  'ສະແກນ Mini-QR ເທິງສະລິບລູກຄ້າເພື່ອປ້ອງກັນສະລິບຊ້ຳ ຫຼື ກົດກວດສະລິບ Step 1',
+                                  'Scan slip Mini-QR to prevent duplicate reuse or run Step 1 check'
+                                )}
                           </p>
                         </div>
                       </div>
@@ -4442,7 +5247,11 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                         placeholder={
                           isLaos
                             ? t('pos.laoSlipRefPlaceholder')
-                            : 'ยิงปืน 2D สแกนสลิปส่วนที่ 2 ได้ทันที...'
+                            : pick(
+                                'ยิงปืน 2D สแกนสลิปส่วนที่ 2 ได้ทันที...',
+                                'ຍິງສະແກນ 2D ສະລິບສ່ວນທີ 2 ໄດ້ທັນທີ...',
+                                'Scan Part 2 transfer slip Mini-QR...'
+                              )
                         }
                         className={`h-10 w-full rounded-[4px] border border-hairline px-3 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                       />
@@ -4547,16 +5356,24 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 </h3>
                 <p className="text-xs text-ink-muted">
                   {lastPrintedReceipt.spoolStatus === 'PRINTED_IMMEDIATELY'
-                    ? `ส่งออกชุดคำสั่ง 203-DPI สำเร็จ (${lastPrintedReceipt.packetsCount} แถบ GS v 0)`
-                    : `เก็บเข้าคิวรอพิมพ์อัตโนมัติ (${lastPrintedReceipt.pendingQueueLength} ใบค้างคิว)`}
+                    ? pick(
+                        `ส่งออกชุดคำสั่ง 203-DPI สำเร็จ (${lastPrintedReceipt.packetsCount} แถบ GS v 0)`,
+                        `ສົ່ງອອກຄຳສັ່ງພິມ 203-DPI ສຳເລັດ (${lastPrintedReceipt.packetsCount} ແຖບ GS v 0)`,
+                        `Dispatched 203-DPI print job (${lastPrintedReceipt.packetsCount} GS v 0 band(s))`
+                      )
+                    : pick(
+                        `เก็บเข้าคิวรอพิมพ์อัตโนมัติ (${lastPrintedReceipt.pendingQueueLength} ใบค้างคิว)`,
+                        `ເກັບເຂົ້າຄິວລໍຖ້າພິມອັດຕະໂນມັດ (${lastPrintedReceipt.pendingQueueLength} ໃບຄ້າງຄິວ)`,
+                        `Queued for printing (${lastPrintedReceipt.pendingQueueLength} receipt(s) pending)`
+                      )}
                   {canvasRasterStats?.transportMode
-                    ? ` · พอร์ต ${canvasRasterStats.transportMode}`
+                    ? ` · ${pick('พอร์ต', 'ພອດ', 'Port')} ${canvasRasterStats.transportMode}`
                     : ''}
                 </p>
               </div>
               <button
                 type="button"
-                aria-label="ปิดหน้าต่างตัวอย่างใบเสร็จ"
+                aria-label={pick('ปิดหน้าต่างตัวอย่างใบเสร็จ', 'ປິດໜ້າຕ່າງຕົວຢ່າງໃບບິນ', 'Close receipt preview')}
                 onClick={() => setReceiptModalOpen(false)}
                 className={`flex h-11 w-11 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
               >
@@ -4587,7 +5404,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       : 'text-ink-muted hover:text-ink'
                   }`}
                 >
-                  ข้อความ (Text)
+                  {pick('ข้อความ (Text)', 'ຂໍ້ຄວາມ (Text)', 'Plain Text')}
                 </button>
               </div>
 
@@ -4659,8 +5476,16 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                       .then((r) =>
                         onToast(
                           r.outcome.dispatchedToHardware
-                            ? 'ส่งพัลส์เปิดลิ้นชักเก็บเงิน RJ11 สำเร็จ'
-                            : 'จำลองคำสั่งเปิดลิ้นชัก RJ11 (ไม่ได้ต่อพอร์ตจริง)',
+                            ? pick(
+                                'ส่งพัลส์เปิดลิ้นชักเก็บเงิน RJ11 สำเร็จ',
+                                'ສົ່ງສັນຍານເປີດລິ້ນຊັກເງິນ RJ11 ສຳເລັດ',
+                                'Sent RJ11 cash drawer pulse'
+                              )
+                            : pick(
+                                'จำลองคำสั่งเปิดลิ้นชัก RJ11 (ไม่ได้ต่อพอร์ตจริง)',
+                                'ຈຳລອງຄຳສັ່ງເປີດລິ້ນຊັກ RJ11 (ບໍ່ໄດ້ຕໍ່ພອດຈິງ)',
+                                'Simulated RJ11 cash drawer kick (virtual mode)'
+                              ),
                           'success'
                         )
                       )
@@ -4668,7 +5493,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                   }}
                   className={`h-[42px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
-                  เตะลิ้นชัก RJ11
+                  {pick('เตะลิ้นชัก RJ11', 'ເປີດລິ້ນຊັກ RJ11', 'Open Drawer')}
                 </button>
               </div>
               <button
@@ -4676,7 +5501,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
                 onClick={() => setReceiptModalOpen(false)}
                 className={`h-[42px] rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                เสร็จสิ้น (บิลถัดไป)
+                {pick('เสร็จสิ้น (บิลถัดไป)', 'ສຳເລັດ (ບິນຕໍ່ໄປ)', 'Done (Next Order)')}
               </button>
             </div>
           </>
@@ -4684,11 +5509,14 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
       </ModalDialog>
 
       <VoidOrderAuthModal
-        open={Boolean(voidTargetOrder)}
-        order={voidTargetOrder}
+        open={Boolean(voidAuthContext)}
+        order={voidAuthContext?.summary ?? null}
         currentUser={currentUser}
-        onClose={() => setVoidTargetOrder(null)}
-        onVoidAuthorized={handleAuthorizedVoidOrder}
+        onClose={() => setVoidAuthContext(null)}
+        onVoidAuthorized={async (params) => {
+          if (!voidAuthContext) return;
+          await voidAuthContext.onConfirmVoid(params);
+        }}
       />
 
       <TableQrSlipModal
@@ -4706,7 +5534,7 @@ export const PosRegisterWorkspace: React.FC<PosRegisterWorkspaceProps> = ({
         open={Boolean(confirmAction)}
         title={confirmAction?.title ?? ''}
         description={confirmAction?.description ?? ''}
-        confirmLabel={confirmAction?.confirmLabel ?? 'ยืนยัน'}
+        confirmLabel={confirmAction?.confirmLabel ?? t('common.confirm')}
         tone={confirmAction?.tone ?? 'danger'}
         busy={confirmBusy}
         onCancel={() => {

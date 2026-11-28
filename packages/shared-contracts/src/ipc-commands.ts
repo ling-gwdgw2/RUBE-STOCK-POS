@@ -109,6 +109,15 @@ export interface CheckoutOrderRequest {
    * were already dispatched to KDS when a QR Table Order was accepted.
    */
   skipKdsEnqueue?: boolean | undefined;
+  /**
+   * Optional ID of a server-held bill being settled atomically at checkout.
+   * When provided, checkout verifies committed lines were not removed/shrunk and removes the held bill upon commit.
+   */
+  heldBillId?: string | undefined;
+  /**
+   * Optional expected version of `heldBillId` so late QR additions trigger a clean HTTP 409 refresh prompt before payment.
+   */
+  expectedHeldBillVersion?: number | undefined;
   lines: ReadonlyArray<{
     variantId: string;
     quantityMilli: MilliUnit;
@@ -118,6 +127,47 @@ export interface CheckoutOrderRequest {
     skipKds?: boolean | undefined;
     notes?: string | undefined;
   }>;
+}
+
+export interface HeldBillCartLineDto {
+  cartKey: string;
+  variantId: string;
+  itemName: string;
+  variantName: string;
+  sku: string;
+  unitName: string;
+  quantityMilli: MilliUnit;
+  unitPriceSatang: Satang;
+  overrideLineTotalSatang?: Satang | undefined;
+  selectedModifierIds: string[];
+  isWeightedScale: boolean;
+  scaleBadgeText?: string | undefined;
+  kdsDispatched?: boolean | undefined;
+  guestNote?: string | undefined;
+  heldLineLocked?: boolean | undefined;
+  lockedMinQtyMilli?: MilliUnit | undefined;
+  heldBillOriginId?: string | undefined;
+}
+
+export interface HeldBillRecordDto {
+  id: string;
+  outletId: string;
+  referenceLabel: string;
+  orderType: CheckoutOrderRequest['orderType'];
+  taxMode: TaxMode;
+  discountMode?: 'BAHT' | 'PERCENT' | undefined;
+  discountInput?: string | undefined;
+  cart: HeldBillCartLineDto[];
+  totalSatang: Satang;
+  heldByName: string;
+  heldAtIso: string;
+  version?: number | undefined;
+  activeClaimToken?: string | undefined;
+  activeClaimedByUserId?: string | undefined;
+  activeClaimedByName?: string | undefined;
+  activeClaimedAtIso?: string | undefined;
+  linkedGuestOrderIds?: string[] | undefined;
+  linkedKdsSalesOrderIds?: string[] | undefined;
 }
 
 /**

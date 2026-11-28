@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
+import { useI18n } from '../../i18n/index.tsx';
 
 /**
  * Shared accessible interaction primitives conforming to `ui-ux-pro-max`
@@ -302,12 +303,14 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   title,
   description,
   confirmLabel,
-  cancelLabel = 'ยกเลิก',
+  cancelLabel,
   tone = 'danger',
   busy = false,
   onConfirm,
   onCancel,
 }) => {
+  const { t } = useI18n();
+  const resolvedCancelLabel = cancelLabel ?? t('common.cancel');
   const modalIdRef = useRef<symbol | null>(null);
   if (!modalIdRef.current) {
     modalIdRef.current = Symbol('ConfirmDialog');
@@ -433,7 +436,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             onClick={onCancel}
             className={`h-[44px] rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-ink-soft hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
           >
-            {cancelLabel}
+            {resolvedCancelLabel}
           </button>
           <button
             type="button"

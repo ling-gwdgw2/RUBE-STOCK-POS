@@ -1529,7 +1529,7 @@ describe('Interactive POS & Warehouse Desktop/Web Application Server (E2E)', () 
       assert.equal(slipDto.transRefLast4, 'RE01');
       assert.equal(slipDto.expectedAmountFormatted, '฿7.00');
 
-      // 4. Atomic Held Bill Recall Claim (`recall: true` blocks second terminal with HTTP 409)
+      // 4. Atomic Non-Destructive Held Bill Claim (`POST /api/pos/held-bills/claim` blocks second terminal with HTTP 409 while keeping bill in SQLite)
       const holdSaveRes = await fetch(`${url}/api/pos/held-bills`, {
         method: 'POST',
         headers: authHeaders,
@@ -1550,19 +1550,42 @@ describe('Interactive POS & Warehouse Desktop/Web Application Server (E2E)', () 
       assert.equal(holdSaveRes.status, 200);
 
       const [recall1, recall2] = await Promise.all([
-        fetch(`${url}/api/pos/held-bills`, {
-          method: 'DELETE',
+        fetch(`${url}/api/pos/held-bills/claim`, {
+          method: 'POST',
           headers: authHeaders,
-          body: JSON.stringify({ outletId: 'OUTLET-HQ', id: 'HOLD-RACE-001', recall: true }),
+          body: JSON.stringify({ outletId: 'OUTLET-HQ', id: 'HOLD-RACE-001', claimToken: 'TERM-1' }),
         }),
-        fetch(`${url}/api/pos/held-bills`, {
-          method: 'DELETE',
+        fetch(`${url}/api/pos/held-bills/claim`, {
+          method: 'POST',
           headers: authHeaders,
-          body: JSON.stringify({ outletId: 'OUTLET-HQ', id: 'HOLD-RACE-001', recall: true }),
+          body: JSON.stringify({ outletId: 'OUTLET-HQ', id: 'HOLD-RACE-001', claimToken: 'TERM-2' }),
         }),
       ]);
       const statuses = [recall1.status, recall2.status].sort();
       assert.deepEqual(statuses, [200, 409]);
+
+      // Bill MUST remain in server held_bills until actual checkout or manager void
+      const heldAfterClaim = (await (
+        await fetch(`${url}/api/pos/held-bills?outletId=OUTLET-HQ`, { headers: authHeaders })
+      ).json()) as { heldBills: Array<{ id: string; activeClaimToken?: string }> };
+      assert.equal(heldAfterClaim.heldBills.some((b) => b.id === 'HOLD-RACE-001' && Boolean(b.activeClaimToken)), true);
+
+      const relRes = await fetch(`${url}/api/pos/held-bills/release`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ outletId: 'OUTLET-HQ', id: 'HOLD-RACE-001', force: true }),
+      });
+      assert.equal(relRes.status, 200);
+      const cleanVoidRes = await fetch(`${url}/api/pos/held-bills/void`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          outletId: 'OUTLET-HQ',
+          id: 'HOLD-RACE-001',
+          voidReason: 'Cleanup race test held bill',
+        }),
+      });
+      assert.equal(cleanVoidRes.status, 200);
 
       // 5. KDS Voided Order Resurrection Guard + Menu Gross Margin Discount Proration
       const cafeOrderRes = await fetch(`${url}/api/pos/checkout`, {

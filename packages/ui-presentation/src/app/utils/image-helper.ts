@@ -4,6 +4,9 @@
  * suitable for offline local disk persistence and fast POS card rendering.
  */
 
+import type { LocaleCode } from '../../../../shared-contracts/src/currency.ts';
+import { pickLocaleText } from '../i18n/translations.ts';
+
 const MAX_IMAGE_WIDTH = 640;
 const MAX_IMAGE_HEIGHT = 480;
 const JPEG_QUALITY = 0.84;
@@ -25,9 +28,19 @@ function computeScaledDimensions(srcW: number, srcH: number): { width: number; h
   return { width, height };
 }
 
-export async function compressImageFileToDataUrl(file: File): Promise<string> {
+export async function compressImageFileToDataUrl(
+  file: File,
+  locale: LocaleCode = 'th'
+): Promise<string> {
   if (!file.type.startsWith('image/')) {
-    throw new Error('กรุณาเลือกไฟล์รูปภาพ (.jpg, .png, .webp) เท่านั้น');
+    throw new Error(
+      pickLocaleText(
+        locale,
+        'กรุณาเลือกไฟล์รูปภาพ (.jpg, .png, .webp) เท่านั้น',
+        'ກະລຸນາເລືອກໄຟລ໌ຮູບພາບ (.jpg, .png, .webp) ເທົ່ານັ້ນ',
+        'Please select a valid image file (.jpg, .png, .webp) only.'
+      )
+    );
   }
 
   const objectUrl = URL.createObjectURL(file);
@@ -35,7 +48,17 @@ export async function compressImageFileToDataUrl(file: File): Promise<string> {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const el = new Image();
       el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error('ไม่สามารถอ่านไฟล์รูปภาพนี้ได้'));
+      el.onerror = () =>
+        reject(
+          new Error(
+            pickLocaleText(
+              locale,
+              'ไม่สามารถอ่านไฟล์รูปภาพนี้ได้',
+              'ບໍ່ສາມາດອ່ານໄຟລ໌ຮູບພາບນີ້ໄດ້',
+              'Unable to read the selected image file.'
+            )
+          )
+        );
       el.src = objectUrl;
     });
 
@@ -45,7 +68,14 @@ export async function compressImageFileToDataUrl(file: File): Promise<string> {
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-      throw new Error('ไม่สามารถประมวลผลรูปภาพผ่าน Canvas ได้');
+      throw new Error(
+        pickLocaleText(
+          locale,
+          'ไม่สามารถประมวลผลรูปภาพผ่าน Canvas ได้',
+          'ບໍ່ສາມາດປະມວນຜົນຮູບພາບຜ່ານ Canvas ໄດ້',
+          'Unable to process image on HTML5 Canvas.'
+        )
+      );
     }
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, width, height);
@@ -56,7 +86,10 @@ export async function compressImageFileToDataUrl(file: File): Promise<string> {
   }
 }
 
-export function captureVideoFrameToDataUrl(video: HTMLVideoElement): string {
+export function captureVideoFrameToDataUrl(
+  video: HTMLVideoElement,
+  locale: LocaleCode = 'th'
+): string {
   const srcW = video.videoWidth || 640;
   const srcH = video.videoHeight || 480;
   const { width, height } = computeScaledDimensions(srcW, srcH);
@@ -65,7 +98,14 @@ export function captureVideoFrameToDataUrl(video: HTMLVideoElement): string {
   canvas.height = height;
   const ctx = canvas.getContext('2d');
   if (!ctx) {
-    throw new Error('ไม่สามารถบันทึกภาพจากกล้องได้');
+    throw new Error(
+      pickLocaleText(
+        locale,
+        'ไม่สามารถบันทึกภาพจากกล้องได้',
+        'ບໍ່ສາມາດບັນທຶກພາບຈາກກ້ອງໄດ້',
+        'Unable to capture video frame from camera.'
+      )
+    );
   }
   ctx.drawImage(video, 0, 0, width, height);
   return canvas.toDataURL('image/jpeg', JPEG_QUALITY);

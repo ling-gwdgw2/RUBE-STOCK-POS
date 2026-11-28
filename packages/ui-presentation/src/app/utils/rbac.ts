@@ -1,15 +1,24 @@
+import type { LocaleCode } from '../../../../shared-contracts/src/currency.ts';
+import { translateKey } from '../i18n/translations.ts';
 import type { BootstrapPayload, UserRole, WorkspaceTabId } from '../types.ts';
 
 export const SIMULATION_MODE_STORAGE_KEY = 'rube_pos_v3_simulation_mode';
 export const ACTIVE_SESSION_USER_STORAGE_KEY = 'rube_pos_v3_active_session_user_id';
 
-export const ROLE_DISPLAY_LABELS: Readonly<Record<UserRole, string>> = {
-  OWNER: 'เจ้าของร้าน (Owner)',
-  MANAGER: 'ผู้จัดการร้าน (Manager)',
-  CASHIER: 'แคชเชียร์ (Cashier)',
-  WAREHOUSE: 'คลังสินค้า (Warehouse)',
-  KITCHEN: 'ฝ่ายครัว/บาร์ (Kitchen)',
-};
+export function getLocalizedRoleLabel(role: UserRole, locale: LocaleCode = 'th'): string {
+  switch (role) {
+    case 'OWNER':
+      return translateKey('role.OWNER', locale);
+    case 'MANAGER':
+      return translateKey('role.MANAGER', locale);
+    case 'CASHIER':
+      return translateKey('role.CASHIER', locale);
+    case 'WAREHOUSE':
+      return translateKey('role.WAREHOUSE', locale);
+    case 'KITCHEN':
+      return translateKey('role.KITCHEN', locale);
+  }
+}
 
 const BASE_ROLE_TABS: Readonly<Record<UserRole, readonly WorkspaceTabId[]>> = {
   OWNER: ['POS', 'KDS', 'WAREHOUSE', 'BOM', 'SHIFTS_REPORTS', 'SETTINGS'],

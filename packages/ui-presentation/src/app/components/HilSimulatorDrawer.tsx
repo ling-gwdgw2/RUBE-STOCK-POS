@@ -49,7 +49,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
   const modalId = modalIdRef.current;
 
   const uid = useId();
-  const { countryCode } = useI18n();
+  const { countryCode, pick } = useI18n();
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const prevFocusRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
@@ -123,7 +123,11 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
     try {
       const res = await posTransport.simulateHardwareScan(barcode);
       onInjectScannedBarcodeToPos(barcode);
-      const summary = `KeyCode Burst "${barcode}" -> Rollback ภาษาไทย 'ค' สำเร็จ (${res.firstCharRollbackCount} ครั้ง)`;
+      const summary = pick(
+        `KeyCode Burst "${barcode}" -> Rollback ภาษาไทย 'ค' สำเร็จ (${res.firstCharRollbackCount} ครั้ง)`,
+        `KeyCode Burst "${barcode}" -> Rollback ພາສາໄທ 'ຄ' ສຳເລັດ (${res.firstCharRollbackCount} ຄັ້ງ)`,
+        `KeyCode Burst "${barcode}" -> Thai/Lao layout rollback succeeded (${res.firstCharRollbackCount}x)`
+      );
       setLastHilLog(summary);
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
@@ -138,8 +142,16 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
       const res = await posTransport.setPrinterReadyState(ready);
       await onRefreshState();
       const msg = ready
-        ? `ใส่กระดาษเครื่องพิมพ์แล้ว · พิมพ์ใบเสร็จค้างคิวอัตโนมัติ ${res.autoFlushedCount} ใบ`
-        : 'จำลองฝาเครื่องพิมพ์เปิด / กระดาษหมด · บิลถัดไปจะถูกเก็บเข้าคิว Spooler';
+        ? pick(
+            `ใส่กระดาษเครื่องพิมพ์แล้ว · พิมพ์ใบเสร็จค้างคิวอัตโนมัติ ${res.autoFlushedCount} ใบ`,
+            `ໃສ່ກະດາດເຄື່ອງພິມແລ້ວ · ພິມໃບບິນຄ້າງຄິວອັດຕະໂນມັດ ${res.autoFlushedCount} ໃບ`,
+            `Printer paper loaded · Auto-flushed ${res.autoFlushedCount} queued receipt(s)`
+          )
+        : pick(
+            'จำลองฝาเครื่องพิมพ์เปิด / กระดาษหมด · บิลถัดไปจะถูกเก็บเข้าคิว Spooler',
+            'ຈຳລອງຝາເຄື່ອງພິມເປີດ / ກະດາດໝົດ · ບິນຖັດໄປຈະຖືກເກັບເຂົ້າຄິວ Spooler',
+            'Simulated cover open / paper out · Next receipts will queue in spooler'
+          );
       setLastHilLog(msg);
       onToast(msg, ready ? 'success' : 'warn');
     } catch (err) {
@@ -155,7 +167,25 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
       const res = await posTransport.setUpsPowerState({ acPresent, batteryChargePercent });
       await onRefreshState();
       setLastHilLog(`UPS State -> ${res.protectionState} (${batteryChargePercent}%)`);
-      onToast(res.upsBanner.headlineThai, acPresent ? 'success' : 'warn');
+      const upsToast =
+        res.upsBanner.severity === 'NONE'
+          ? pick(
+              `ไฟ AC ปกติ (${res.upsBanner.batteryChargePercent}%)`,
+              `ໄຟ AC ປົກກະຕິ (${res.upsBanner.batteryChargePercent}%)`,
+              `AC power normal (${res.upsBanner.batteryChargePercent}%)`
+            )
+          : res.upsBanner.severity === 'CRITICAL_LOW_BATTERY_LOCK'
+            ? pick(
+                `วิกฤตไฟดับ UPS! แบต ${res.upsBanner.batteryChargePercent}% — กำลังป้องกันข้อมูลก่อนปิดระบบ`,
+                `ວິກິດໄຟດັບ UPS! ແບັດ ${res.upsBanner.batteryChargePercent}% — ກຳລັງປ້ອງກັນຂໍ້ມູນກ່ອນປິດລະບົບ`,
+                `CRITICAL UPS POWER LOSS! Battery ${res.upsBanner.batteryChargePercent}% — Protecting transactions`
+              )
+            : pick(
+                `แจ้งเตือนไฟดับ: กำลังใช้ไฟสำรอง UPS (${res.upsBanner.batteryChargePercent}%)`,
+                `ແຈ້ງເຕືອນໄຟດັບ: ກຳລັງໃຊ້ໄຟສຳຮອງ UPS (${res.upsBanner.batteryChargePercent}%)`,
+                `Power outage: Running on UPS battery (${res.upsBanner.batteryChargePercent}%)`
+              );
+      onToast(upsToast, acPresent ? 'success' : 'warn');
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -169,7 +199,14 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
       const res = await posTransport.simulateYankUsb();
       await onRefreshState();
       setLastHilLog(`${res.message} -> ${res.corruptFilename}`);
-      onToast('สร้างไฟล์ .part จำลอง USB หลุดกลางคันแล้ว', 'warn');
+      onToast(
+        pick(
+          'สร้างไฟล์ .part จำลอง USB หลุดกลางคันแล้ว',
+          'ສ້າງໄຟລ໌ .part ຈຳລອງ USB ຫຼຸດກາງຄັນແລ້ວ',
+          'Simulated interrupted .part USB backup file created'
+        ),
+        'warn'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -202,16 +239,24 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
             </div>
             <div className="min-w-0">
               <h2 id={`${uid}-hil-title`} className="font-google-display text-[18px] font-normal text-ink truncate">
-                แผงจำลองฮาร์ดแวร์ (HIL Hardware Bench)
+                {pick(
+                  'แผงจำลองฮาร์ดแวร์ (HIL Hardware Bench)',
+                  'ແຜງຈຳລອງຮາດແວ (HIL Hardware Bench)',
+                  'HIL Hardware Simulator Bench'
+                )}
               </h2>
               <p className="text-xs text-ink-muted truncate">
-                ทดสอบปืนบาร์โค้ดคีย์ไทย, ตราชั่ง EAN-13, เครื่องพิมพ์ 203-DPI, UPS และ USB
+                {pick(
+                  'ทดสอบปืนบาร์โค้ดคีย์ไทย, ตราชั่ง EAN-13, เครื่องพิมพ์ 203-DPI, UPS และ USB',
+                  'ທົດສອບປືນບາໂຄດ, ຊິງຊັ່ງ EAN-13, ເຄື່ອງພິມ 203-DPI, UPS ແລະ USB',
+                  'Test HID barcode scanner, EAN-13 scale, 203-DPI printer, UPS & USB'
+                )}
               </p>
             </div>
           </div>
           <button
             type="button"
-            aria-label="ปิดแผงจำลองฮาร์ดแวร์"
+            aria-label={pick('ปิดแผงจำลองฮาร์ดแวร์', 'ປິດແຜງຈຳລອງຮາດແວ', 'Close hardware simulator drawer')}
             onClick={onClose}
             className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
           >
@@ -231,21 +276,43 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
             <div className="flex items-center justify-between gap-2">
               <h3 className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
                 <ScanBarcode className="h-4 w-4 text-primary shrink-0" />
-                1. ปืนยิงบาร์โค้ด USB &amp; บาร์โค้ดตราชั่งสด
+                {pick(
+                  '1. ปืนยิงบาร์โค้ด USB & บาร์โค้ดตราชั่งสด',
+                  '1. ປືນຍິງບາໂຄດ USB & ບາໂຄດຊິງຊັ່ງສົດ',
+                  '1. USB Barcode Scanner & Fresh Scale Barcodes'
+                )}
               </h3>
               <span className="text-xs text-ink-muted shrink-0">&lt; 50ms KeyCode</span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {(countryCode === 'LA'
                 ? [
-                    { title: 'ນ້ຳດື່ມ 600ml', code: '8851952350161' },
-                    { title: 'ຊີ້ນໝູສາມຊັ້ນ 1.50 ກກ.', code: '2010045015004' },
-                    { title: 'ຊີ້ນໝູສາມຊັ້ນ 150,000 ₭', code: '2510045015009' },
+                    {
+                      title: pick('น้ำดื่ม 600ml', 'ນ້ຳດື່ມ 600ml', 'Drinking Water 600ml'),
+                      code: '8851952350161',
+                    },
+                    {
+                      title: pick('หมูสามชั้น 1.50 กก.', 'ຊີ້ນໝູສາມຊັ້ນ 1.50 ກກ.', 'Pork Belly 1.50 kg'),
+                      code: '2010045015004',
+                    },
+                    {
+                      title: pick('หมูสามชั้น 150,000 ₭', 'ຊີ້ນໝູສາມຊັ້ນ 150,000 ₭', 'Pork Belly 150,000 ₭'),
+                      code: '2510045015009',
+                    },
                   ]
                 : [
-                    { title: 'น้ำดื่ม 600ml', code: '8851952350161' },
-                    { title: 'หมูสามชั้น 1.50 กก.', code: '2010045015004' },
-                    { title: 'หมูสามชั้น ฿225', code: '2510045225009' },
+                    {
+                      title: pick('น้ำดื่ม 600ml', 'ນ້ຳດື່ມ 600ml', 'Drinking Water 600ml'),
+                      code: '8851952350161',
+                    },
+                    {
+                      title: pick('หมูสามชั้น 1.50 กก.', 'ຊີ້ນໝູສາມຊັ້ນ 1.50 ກກ.', 'Pork Belly 1.50 kg'),
+                      code: '2010045015004',
+                    },
+                    {
+                      title: pick('หมูสามชั้น ฿225', 'ຊີ້ນໝູສາມຊັ້ນ ฿225', 'Pork Belly ฿225'),
+                      code: '2510045225009',
+                    },
                   ]
               ).map((preset) => (
                 <button
@@ -265,7 +332,11 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
             <div className="flex gap-2 pt-1">
               <input
                 type="text"
-                aria-label="รหัสบาร์โค้ดสำหรับจำลองยิงสแกน"
+                aria-label={pick(
+                  'รหัสบาร์โค้ดสำหรับจำลองยิงสแกน',
+                  'ລະຫັດບາໂຄດສຳລັບຈຳລອງຍິງສະແກນ',
+                  'Barcode for simulated scan'
+                )}
                 value={customBarcode}
                 onChange={(e) => setCustomBarcode(e.target.value)}
                 className={`h-11 flex-1 rounded-[4px] border border-hairline px-3.5 text-sm text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
@@ -276,7 +347,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
                 onClick={() => void fireSimulatedScan(customBarcode.trim())}
                 className={`h-11 rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                ยิงสแกน
+                {pick('ยิงสแกน', 'ຍິງສະແກນ', 'Scan')}
               </button>
             </div>
           </section>
@@ -286,12 +357,20 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
                 <Printer className="h-4 w-4 text-primary shrink-0" />
-                2. เครื่องพิมพ์ใบเสร็จ 203-DPI (Chunked GS v 0)
+                {pick(
+                  '2. เครื่องพิมพ์ใบเสร็จ 203-DPI (Chunked GS v 0)',
+                  '2. ເຄື່ອງພິມໃບບິນ 203-DPI (Chunked GS v 0)',
+                  '2. 203-DPI Thermal Printer (Chunked GS v 0)'
+                )}
               </h3>
               <span className="text-xs font-medium text-ink-muted">
                 {bootstrap.printer.ready
-                  ? 'พร้อมพิมพ์'
-                  : `กระดาษหมด · ค้าง ${bootstrap.printer.pendingQueueLength} ใบ`}
+                  ? pick('พร้อมพิมพ์', 'ພ້ອມພິມ', 'Ready')
+                  : pick(
+                      `กระดาษหมด · ค้าง ${bootstrap.printer.pendingQueueLength} ใบ`,
+                      `ກະດາດໝົດ · ຄ້າງ ${bootstrap.printer.pendingQueueLength} ໃບ`,
+                      `Paper out · ${bootstrap.printer.pendingQueueLength} queued`
+                    )}
               </span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -301,7 +380,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
                 onClick={() => void togglePrinterPaper(false)}
                 className={`h-11 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink hover:border-ink hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
-                จำลองกระดาษหมด / เปิดฝา
+                {pick('จำลองกระดาษหมด / เปิดฝา', 'ຈຳລອງກະດາດໝົດ / ເປີດຝາ', 'Simulate Paper Out / Cover Open')}
               </button>
               <button
                 type="button"
@@ -309,7 +388,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
                 onClick={() => void togglePrinterPaper(true)}
                 className={`h-11 rounded-[48px] bg-primary px-4 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                ใส่กระดาษ &amp; พิมพ์คิวค้าง
+                {pick('ใส่กระดาษ & พิมพ์คิวค้าง', 'ໃສ່ກະດາດ & ພິມຄິວຄ້າງ', 'Load Paper & Flush Queue')}
               </button>
             </div>
 
@@ -325,10 +404,14 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
             <div className="flex items-center justify-between gap-2">
               <h3 className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
                 <BatteryCharging className="h-4 w-4 text-primary shrink-0" />
-                3. เครื่องสำรองไฟ UPS USB-HID
+                {pick('3. เครื่องสำรองไฟ UPS USB-HID', '3. ເຄື່ອງສຳຮອງໄຟ UPS USB-HID', '3. UPS USB-HID Battery Backup')}
               </h3>
               <span className="text-xs text-ink-muted shrink-0">
-                แบตเตอรี่ {bootstrap.upsBanner.batteryChargePercent}%
+                {pick(
+                  `แบตเตอรี่ ${bootstrap.upsBanner.batteryChargePercent}%`,
+                  `ແບັດເຕີຣີ ${bootstrap.upsBanner.batteryChargePercent}%`,
+                  `Battery ${bootstrap.upsBanner.batteryChargePercent}%`
+                )}
               </span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -339,7 +422,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
                 className={`flex flex-col items-center gap-1 rounded-[4px] border border-hairline p-3 text-xs font-medium text-ink hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 <BatteryCharging className="h-4 w-4 text-primary" />
-                ไฟปกติ (100%)
+                {pick('ไฟปกติ (100%)', 'ໄຟປົກກະຕິ (100%)', 'AC Normal (100%)')}
               </button>
               <button
                 type="button"
@@ -348,7 +431,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
                 className={`flex flex-col items-center gap-1 rounded-[4px] border border-hairline p-3 text-xs font-medium text-ink hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 <ZapOff className="h-4 w-4 text-ink-muted" />
-                ไฟดับ (65%)
+                {pick('ไฟดับ (65%)', 'ໄຟດັບ (65%)', 'On Battery (65%)')}
               </button>
               <button
                 type="button"
@@ -357,7 +440,7 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
                 className={`flex flex-col items-center gap-1 rounded-[4px] border border-hairline p-3 text-xs font-medium text-ink hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 <BatteryWarning className="h-4 w-4 text-ink" />
-                วิกฤต (15%)
+                {pick('วิกฤต (15%)', 'ວິກິດ (15%)', 'Critical (15%)')}
               </button>
             </div>
           </section>
@@ -367,10 +450,18 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-google-display text-[16px] font-medium text-ink flex items-center gap-2">
                 <Usb className="h-4 w-4 text-primary shrink-0" />
-                4. จำลองดึงแฟลชไดรฟ์ USB หลุดกลางคัน
+                {pick(
+                  '4. จำลองดึงแฟลชไดรฟ์ USB หลุดกลางคัน',
+                  '4. ຈຳລອງດຶງແຟລຊໄດຣຟ໌ USB ຫຼຸດກາງຄັນ',
+                  '4. Simulate USB Flash Yank (.part Recovery)'
+                )}
               </h3>
               <span className="text-xs text-ink-muted">
-                สำรองแล้ว {bootstrap.usbBackups.length}/14 กะ
+                {pick(
+                  `สำรองแล้ว ${bootstrap.usbBackups.length}/14 กะ`,
+                  `ສຳຮອງແລ້ວ ${bootstrap.usbBackups.length}/14 ກະ`,
+                  `Backed up ${bootstrap.usbBackups.length}/14 shifts`
+                )}
               </span>
             </div>
             <button
@@ -379,7 +470,11 @@ export const HilSimulatorDrawer: React.FC<HilSimulatorDrawerProps> = ({
               onClick={() => void triggerYankUsb()}
               className={`h-11 w-full rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
             >
-              จำลองดึง USB ออกขณะสำรองข้อมูล (.part)
+              {pick(
+                'จำลองดึง USB ออกขณะสำรองข้อมูล (.part)',
+                'ຈຳລອງດຶງ USB ອອກຂະນະສຳຮອງຂໍ້ມູນ (.part)',
+                'Simulate USB Pull During Backup (.part)'
+              )}
             </button>
             {bootstrap.usbBackups.length > 0 && (
               <div className="space-y-1 max-h-32 overflow-y-auto pt-1">

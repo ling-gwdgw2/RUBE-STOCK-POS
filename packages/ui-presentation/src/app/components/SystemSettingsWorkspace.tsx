@@ -56,6 +56,7 @@ interface SystemSettingsWorkspaceProps {
   currentUser: StaffUserDto;
   simulationModeEnabled: boolean;
   onToggleSimulationMode: (enabled: boolean) => void;
+  onClearLocaleOverride?: (() => void) | undefined;
   onRefreshState: () => Promise<void>;
   onToast: (msg: string, tone?: 'success' | 'warn' | 'error') => void;
 }
@@ -66,10 +67,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
   currentUser,
   simulationModeEnabled,
   onToggleSimulationMode,
+  onClearLocaleOverride,
   onRefreshState,
   onToast,
 }) => {
-  const { fiscal, t, pick } = useI18n();
+  const { dateTime, fiscal, locale, t, pick } = useI18n();
   const uid = useId();
   const isOwner = canManageCriticalStoreSettings(currentUser.role);
   const [storeName, setStoreName] = useState(bootstrap.storeSettings.storeName);
@@ -81,7 +83,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
   const [rdPosRegNo, setRdPosRegNo] = useState(bootstrap.storeSettings.rdPosRegNo);
   const [promptPayId, setPromptPayId] = useState(bootstrap.storeSettings.promptPayId);
   const [countryCode, setCountryCode] = useState<CountryCode>(fiscal.countryCode);
-  const [uiLocale, setUiLocale] = useState<LocaleCode>(fiscal.uiLocale);
+  const [uiLocale, setUiLocale] = useState<LocaleCode>(locale);
   const [receiptLocale, setReceiptLocale] = useState<LocaleCode>(fiscal.receiptLocale);
   const [vatRateBps, setVatRateBps] = useState<number>(fiscal.vatRateBps);
   const [defaultTaxMode, setDefaultTaxMode] = useState<TaxMode>(fiscal.defaultTaxMode);
@@ -159,7 +161,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
     setRdPosRegNo(bootstrap.storeSettings.rdPosRegNo);
     setPromptPayId(bootstrap.storeSettings.promptPayId);
     setCountryCode(fiscal.countryCode);
-    setUiLocale(fiscal.uiLocale);
+    setUiLocale(locale);
     setReceiptLocale(fiscal.receiptLocale);
     setVatRateBps(fiscal.vatRateBps);
     setDefaultTaxMode(fiscal.defaultTaxMode);
@@ -224,7 +226,14 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         autoKickDrawerOnCash: prnAutoDrawer,
       });
       await onRefreshState();
-      onToast('บันทึกพอร์ตเครื่องพิมพ์ใบเสร็จและขนาดกระดาษสำเร็จ', 'success');
+      onToast(
+        pick(
+          'บันทึกพอร์ตเครื่องพิมพ์ใบเสร็จและขนาดกระดาษสำเร็จ',
+          'ບັນທຶກພອດເຄື່ອງພິມໃບບິນ ແລະ ຂະໜາດກະດາດສຳເລັດ',
+          'Saved thermal receipt printer & paper settings'
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -237,7 +246,14 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
     try {
       await posTransport.saveBarcodeLabelConfig(lblCfg);
       await onRefreshState();
-      onToast('บันทึกตั้งค่าเครื่องพิมพ์สติกเกอร์บาร์โค้ดสำเร็จ', 'success');
+      onToast(
+        pick(
+          'บันทึกตั้งค่าเครื่องพิมพ์สติกเกอร์บาร์โค้ดสำเร็จ',
+          'ບັນທຶກຕັ້ງຄ່າເຄື່ອງພິມສະຕິກເກີບາໂຄດສຳເລັດ',
+          'Saved barcode label printer configuration'
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -251,8 +267,16 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
       const res = await posTransport.kickCashDrawer();
       onToast(
         res.outcome.dispatchedToHardware
-          ? `ส่งสัญญาณเตะลิ้นชัก ESC p ออกพอร์ต ${res.outcome.transportMode} สำเร็จ`
-          : `จำลองสัญญาณเตะลิ้นชัก ESC p (${res.outcome.transportMode}) สำเร็จ`,
+          ? pick(
+              `ส่งสัญญาณเตะลิ้นชัก ESC p ออกพอร์ต ${res.outcome.transportMode} สำเร็จ`,
+              `ສົ່ງສັນຍານເປີດລິ້ນຊັກ ESC p ອອກພອດ ${res.outcome.transportMode} ສຳເລັດ`,
+              `Dispatched RJ11 cash drawer pulse via ${res.outcome.transportMode}`
+            )
+          : pick(
+              `จำลองสัญญาณเตะลิ้นชัก ESC p (${res.outcome.transportMode}) สำเร็จ`,
+              `ຈຳລອງສັນຍານເປີດລິ້ນຊັກ ESC p (${res.outcome.transportMode}) ສຳເລັດ`,
+              `Simulated RJ11 cash drawer pulse (${res.outcome.transportMode})`
+            ),
         'success'
       );
     } catch (err) {
@@ -279,7 +303,14 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
     try {
       await posTransport.switchBusinessProfile(profile, currentUser.id);
       await onRefreshState();
-      onToast(`สลับโหมดธุรกิจเป็น ${profile} พร้อมลงนาม HMAC-SHA256 สำเร็จ`, 'success');
+      onToast(
+        pick(
+          `สลับโหมดธุรกิจเป็น ${profile} พร้อมลงนาม HMAC-SHA256 สำเร็จ`,
+          `ສະຫຼັບໂໝດທຸລະກິດເປັນ ${profile} ພ້ອມລົງນາມ HMAC-SHA256 ສຳເລັດ`,
+          `Switched business profile to ${profile} (HMAC signed)`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -290,15 +321,17 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
   const handleCountryToggleInSettings = (nextCountry: CountryCode) => {
     setCountryCode(nextCountry);
     if (nextCountry === 'LA') {
-      setUiLocale(DEFAULT_LA_FISCAL_CONFIG.uiLocale);
-      setReceiptLocale(DEFAULT_LA_FISCAL_CONFIG.receiptLocale);
+      const nextLocale = uiLocale === 'en' ? 'en' : DEFAULT_LA_FISCAL_CONFIG.uiLocale;
+      setUiLocale(nextLocale);
+      setReceiptLocale(nextLocale === 'en' ? 'en' : DEFAULT_LA_FISCAL_CONFIG.receiptLocale);
       setVatRateBps(DEFAULT_LA_FISCAL_CONFIG.vatRateBps);
       setDefaultTaxMode('INCLUSIVE');
       setCashRoundingStepMajor(500);
       setScalePriceEmbeddedMultiplier(10_000);
     } else {
-      setUiLocale(DEFAULT_TH_FISCAL_CONFIG.uiLocale);
-      setReceiptLocale(DEFAULT_TH_FISCAL_CONFIG.receiptLocale);
+      const nextLocale = uiLocale === 'en' ? 'en' : DEFAULT_TH_FISCAL_CONFIG.uiLocale;
+      setUiLocale(nextLocale);
+      setReceiptLocale(nextLocale === 'en' ? 'en' : DEFAULT_TH_FISCAL_CONFIG.receiptLocale);
       setVatRateBps(DEFAULT_TH_FISCAL_CONFIG.vatRateBps);
       setDefaultTaxMode('INCLUSIVE');
       setCashRoundingStepMajor(0);
@@ -381,6 +414,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         },
         updatedByUserId: currentUser.id,
       });
+      onClearLocaleOverride?.();
       await onRefreshState();
       const logs = await posTransport.listSecurityAuditLogs(40);
       setAuditLogs(logs.auditLogs);
@@ -401,11 +435,25 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
 
   const handleCreateOrUpdateStaff = async () => {
     if (!newUsername.trim() || !newDisplayName.trim() || (!editingStaffId && newPin.length < 4)) {
-      onToast('กรุณากรอก Username, ชื่อพนักงาน และรหัส PIN 4–8 หลัก', 'warn');
+      onToast(
+        pick(
+          'กรุณากรอก Username, ชื่อพนักงาน และรหัส PIN 4–8 หลัก',
+          'ກະລຸນາປ້ອນ Username, ຊື່ພະນັກງານ ແລະ ລະຫັດ PIN 4–8 ຫຼັກ',
+          'Please enter Username, Display Name, and 4–8 digit PIN'
+        ),
+        'warn'
+      );
       return;
     }
     if (editingStaffId && newPin && !/^\d{4,8}$/.test(newPin)) {
-      onToast('รหัส PIN ใหม่ต้องเป็นตัวเลข 4–8 หลัก (หรือเว้นว่างเพื่อใช้รหัสเดิม)', 'warn');
+      onToast(
+        pick(
+          'รหัส PIN ใหม่ต้องเป็นตัวเลข 4–8 หลัก (หรือเว้นว่างเพื่อใช้รหัสเดิม)',
+          'ລະຫັດ PIN ໃໝ່ຕ້ອງເປັນຕົວເລກ 4–8 ຫຼັກ (ຫຼື ປະວ່າງເພື່ອໃຊ້ລະຫັດເດີມ)',
+          'New PIN must be 4–8 digits (or leave blank to keep current PIN)'
+        ),
+        'warn'
+      );
       return;
     }
     setBusy(true);
@@ -427,8 +475,16 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
       setAuditLogs(logs.auditLogs);
       onToast(
         editingStaffId
-          ? 'อัปเดตข้อมูลพนักงานและรหัส PIN สำเร็จ'
-          : 'เพิ่มบัญชีผู้ใช้งานพนักงานและเข้ารหัส PIN สำเร็จ',
+          ? pick(
+              'อัปเดตข้อมูลพนักงานและรหัส PIN สำเร็จ',
+              'ອັບເດດຂໍ້ມູນພະນັກງານ ແລະ ລະຫັດ PIN ສຳເລັດ',
+              'Updated staff account and PIN'
+            )
+          : pick(
+              'เพิ่มบัญชีผู้ใช้งานพนักงานและเข้ารหัส PIN สำเร็จ',
+              'ເພີ່ມບັນຊີພະນັກງານ ແລະ ເຂົ້າລະຫັດ PIN ສຳເລັດ',
+              'Created staff account with encrypted PIN'
+            ),
         'success'
       );
     } catch (err) {
@@ -451,8 +507,16 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
       await onRefreshState();
       onToast(
         res.usbBackupConfig.isExternalCustomDir
-          ? `บันทึกปลายทางสำรองข้อมูลลง "${res.usbBackupConfig.activeEffectiveDir}" สำเร็จ`
-          : 'เปลี่ยนกลับใช้โฟลเดอร์สำรองข้อมูลในเครื่องเป็นค่าเริ่มต้นแล้ว',
+          ? pick(
+              `บันทึกปลายทางสำรองข้อมูลลง "${res.usbBackupConfig.activeEffectiveDir}" สำเร็จ`,
+              `ບັນທຶກປາຍທາງສຳຮອງຂໍ້ມູນລົງ "${res.usbBackupConfig.activeEffectiveDir}" ສຳເລັດ`,
+              `Saved backup destination to "${res.usbBackupConfig.activeEffectiveDir}"`
+            )
+          : pick(
+              'เปลี่ยนกลับใช้โฟลเดอร์สำรองข้อมูลในเครื่องเป็นค่าเริ่มต้นแล้ว',
+              'ປ່ຽນກັບມາໃຊ້ໂຟນເດີສຳຮອງຂໍ້ມູນໃນເຄື່ອງເປັນຄ່າເລີ່ມຕົ້ນແລ້ວ',
+              'Reset backup path to default local folder'
+            ),
         'success'
       );
     } catch (err) {
@@ -472,7 +536,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         onToast(res.backupWarningThai, 'warn');
       } else {
         onToast(
-          `สำรองฐานข้อมูลเข้ารหัสสำเร็จ (${res.usbBackup.retainedBackupsCount}/14 กะล่าสุด)`,
+          pick(
+            `สำรองฐานข้อมูลเข้ารหัสสำเร็จ (${res.usbBackup.retainedBackupsCount}/14 กะล่าสุด)`,
+            `ສຳຮອງຖານຂໍ້ມູນເຂົ້າລະຫັດສຳເລັດ (${res.usbBackup.retainedBackupsCount}/14 ກະລ່າສຸດ)`,
+            `Encrypted backup complete (${res.usbBackup.retainedBackupsCount}/14 shifts retained)`
+          ),
           'success'
         );
       }
@@ -492,7 +560,14 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         mdnsRecords: res.mdnsAdvertisement.txtRecords,
       });
       await onRefreshState();
-      onToast(`เปิดหน้าต่างจับคู่เครื่องลูกข่าย mTLS PIN: ${res.pairingPin}`, 'success');
+      onToast(
+        pick(
+          `เปิดหน้าต่างจับคู่เครื่องลูกข่าย mTLS PIN: ${res.pairingPin}`,
+          `ເປີດໜ້າຕ່າງຈັບຄູ່ເຄື່ອງລູກຂ່າຍ mTLS PIN: ${res.pairingPin}`,
+          `LAN Cluster pairing opened — mTLS PIN: ${res.pairingPin}`
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -510,10 +585,18 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           </div>
           <div>
             <h2 className="font-google-display text-[22px] font-normal leading-[28px] text-ink">
-              โหมดรูปแบบธุรกิจอัจฉริยะ (Polymorphic Business Profile · HMAC Protected)
+              {pick(
+                'โหมดรูปแบบธุรกิจอัจฉริยะ (Polymorphic Business Profile · HMAC Protected)',
+                'ໂໝດຮູບແບບທຸລະກິດອັດສະລິຍະ (Polymorphic Business Profile · HMAC Protected)',
+                'Polymorphic Business Profile (HMAC Protected)'
+              )}
             </h2>
             <p className="text-xs text-ink-muted mt-1">
-              ปรับเปลี่ยนหน้าจอขายและเปิด-ปิดฟีเจอร์อัตโนมัติบนฐานข้อมูลชุดเดียวกันโดยข้อมูลไม่สูญหาย
+              {pick(
+                'ปรับเปลี่ยนหน้าจอขายและเปิด-ปิดฟีเจอร์อัตโนมัติบนฐานข้อมูลชุดเดียวกันโดยข้อมูลไม่สูญหาย',
+                'ປັບປ່ຽນໜ້າຈໍຂາຍ ແລະ ເປີດ-ປິດຟີເຈີອັດຕະໂນມັດເທິງຖານຂໍ້ມູນຊຸດດຽວກັນໂດຍຂໍ້ມູນບໍ່ສູນຫາຍ',
+                'Switch POS workspace behavior and active modules seamlessly on the same SQLite database'
+              )}
             </p>
           </div>
         </div>
@@ -522,18 +605,30 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           {[
             {
               id: 'RETAIL' as const,
-              title: 'RETAIL (ค้าปลีก / ซูเปอร์มาร์เก็ต)',
-              desc: 'เน้นตารางยิงบาร์โค้ดความเร็วสูง + บาร์โค้ดตราชั่งสด Prefix 20–29 ซ่อนหน้าจอครัว KDS และสูตร BOM',
+              title: pick('RETAIL (ค้าปลีก / ซูเปอร์มาร์เก็ต)', 'RETAIL (ຂາຍຍ່ອຍ / ຊູເປີມາເກັດ)', 'RETAIL (Retail / Supermarket)'),
+              desc: pick(
+                'เน้นตารางยิงบาร์โค้ดความเร็วสูง + บาร์โค้ดตราชั่งสด Prefix 20–29 ซ่อนหน้าจอครัว KDS และสูตร BOM',
+                'ເນັ້ນຕາຕະລາງຍິງບາໂຄດຄວາມໄວສູງ + ບາໂຄດຊິງຊັ່ງສົດ Prefix 20–29 ຊ່ອນໜ້າຈໍຄົວ KDS ແລະ ສູດ BOM',
+                'High-speed barcode scan grid + Prefix 20–29 scale support; hides KDS & BOM modules'
+              ),
             },
             {
               id: 'HOSPITALITY' as const,
-              title: 'HOSPITALITY (คาเฟ่ / ร้านอาหาร)',
-              desc: 'เน้นปุ่มเมนูสัมผัส + เลือกความหวาน/ท็อปปิ้งตามบทบาท + ตัดสูตร Multi-Level BOM + ส่งออเดอร์เข้าจอครัว KDS',
+              title: pick('HOSPITALITY (คาเฟ่ / ร้านอาหาร)', 'HOSPITALITY (ຄາເຟ່ / ຮ້ານອາຫານ)', 'HOSPITALITY (Café / Restaurant)'),
+              desc: pick(
+                'เน้นปุ่มเมนูสัมผัส + เลือกความหวาน/ท็อปปิ้งตามบทบาท + ตัดสูตร Multi-Level BOM + ส่งออเดอร์เข้าจอครัว KDS',
+                'ເນັ້ນປຸ່ມເມນູສຳຜັດ + ເລືອກຄວາມຫວານ/ທັອບປິ້ງ + ຕັດສູດ Multi-Level BOM + ສົ່ງອໍເດີ້ເຂົ້າຈໍຄົວ KDS',
+                'Touch menu tiles + modifier roles + Multi-Level BOM deductions + Kitchen KDS sync'
+              ),
             },
             {
               id: 'HYBRID' as const,
-              title: 'HYBRID (ร้านค้าผสมครบวงจร)',
-              desc: 'เปิดใช้งานครบทุกโมดูล สลับหน้าจอขายได้ทั้งโหมดตารางสแกนเร็วและปุ่มสัมผัสคาเฟ่ในคลิกเดียว',
+              title: pick('HYBRID (ร้านค้าผสมครบวงจร)', 'HYBRID (ຮ້ານຄ້າປະສົມຄົບວົງຈອນ)', 'HYBRID (All-in-One Complete)'),
+              desc: pick(
+                'เปิดใช้งานครบทุกโมดูล สลับหน้าจอขายได้ทั้งโหมดตารางสแกนเร็วและปุ่มสัมผัสคาเฟ่ในคลิกเดียว',
+                'ເປີດໃຊ້ງານຄົບທຸກໂມດູນ ສະຫຼັບໜ້າຈໍຂາຍໄດ້ທັງໂໝດສະແກນໄວ ແລະ ປຸ່ມສຳຜັດຄາເຟ່ໃນຄລິກດຽວ',
+                'Enables every module — toggle between rapid retail scan and café touch mode in one click'
+              ),
             },
           ].map((prof) => {
             const active = bootstrap.profile === prof.id;
@@ -571,10 +666,18 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             </div>
             <div>
               <h2 className="font-google-display text-[20px] font-normal leading-[28px] text-ink">
-                พอร์ตเครื่องพิมพ์ความร้อนจริง (TCP 9100 / Windows Raw USB) &amp; ลิ้นชักเก็บเงิน RJ11
+                {pick(
+                  'พอร์ตเครื่องพิมพ์ความร้อนจริง (TCP 9100 / Windows Raw USB) & ลิ้นชักเก็บเงิน RJ11',
+                  'ພອດເຄື່ອງພິມຄວາມຮ້ອນຈິງ (TCP 9100 / Windows Raw USB) & ລິ້ນຊັກເກັບເງິນ RJ11',
+                  'Thermal Printer Hardware (TCP 9100 / Windows Raw USB) & RJ11 Drawer'
+                )}
               </h2>
               <p className="text-xs text-ink-muted mt-1">
-                รองรับการวาดฟอนต์ไทยผ่าน HTML5 Canvas 203-DPI แปลงเป็น 1-Bit Monochrome Raster (ไม่สระลอย 100%)
+                {pick(
+                  'รองรับการวาดฟอนต์ไทยผ่าน HTML5 Canvas 203-DPI แปลงเป็น 1-Bit Monochrome Raster (ไม่สระลอย 100%)',
+                  'ຮອງຮັບການແຕ້ມຟອນພາສາລາວ-ໄທ ຜ່ານ HTML5 Canvas 203-DPI ແປງເປັນ 1-Bit Monochrome Raster ຄົມຊັດ 100%',
+                  '203-DPI HTML5 Canvas 1-Bit Monochrome Raster engine for crisp Unicode Lao/Thai/EN printing'
+                )}
               </p>
             </div>
           </div>
@@ -587,7 +690,13 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               className={`flex h-[42px] items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
             >
               <RotateCcw className="h-3.5 w-3.5" />
-              <span>เปิดหน้า First-Run Setup Wizard / ส่งออก .recovery-kit</span>
+              <span>
+                {pick(
+                  'เปิดหน้า First-Run Setup Wizard / ส่งออก .recovery-kit',
+                  'ເປີດໜ້າ First-Run Setup Wizard / ສົ່ງອອກ .recovery-kit',
+                  'Open First-Run Wizard / Export .recovery-kit'
+                )}
+              </span>
             </button>
           )}
         </div>
@@ -595,7 +704,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
           <div>
             <label htmlFor={`${uid}-prn-mode`} className="block text-ink-muted mb-1">
-              โหมดการเชื่อมต่อเครื่องพิมพ์
+              {pick('โหมดการเชื่อมต่อเครื่องพิมพ์', 'ໂໝດການເຊື່ອມຕໍ່ເຄື່ອງພິມ', 'Printer Connection Mode')}
             </label>
             <select
               id={`${uid}-prn-mode`}
@@ -603,9 +712,15 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               onChange={(e) => setPrnMode(e.target.value as PrinterTransportMode)}
               className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
             >
-              <option value="SIMULATED_MEMORY">จำลองในหน่วยความจำ (Preview)</option>
-              <option value="WINDOWS_RAW_USB">สาย USB (Windows Raw Spooler)</option>
-              <option value="LAN_TCP_9100">สายแลน LAN (TCP Port 9100)</option>
+              <option value="SIMULATED_MEMORY">
+                {pick('จำลองในหน่วยความจำ (Preview)', 'ຈຳລອງໃນໜ່ວຍຄວາມຈຳ (Preview)', 'Simulated Memory Preview')}
+              </option>
+              <option value="WINDOWS_RAW_USB">
+                {pick('สาย USB (Windows Raw Spooler)', 'ສາຍ USB (Windows Raw Spooler)', 'USB Raw Spooler (Windows)')}
+              </option>
+              <option value="LAN_TCP_9100">
+                {pick('สายแลน LAN (TCP Port 9100)', 'ສາຍແລນ LAN (TCP Port 9100)', 'LAN / Ethernet (TCP 9100)')}
+              </option>
               <option value="BROWSER_PRINT_DIALOG">Windows Print Dialog (@media print)</option>
             </select>
           </div>
@@ -614,7 +729,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             <>
               <div>
                 <label htmlFor={`${uid}-prn-host`} className="block text-ink-muted mb-1">
-                  IP เครื่องพิมพ์ใบเสร็จ
+                  {pick('IP เครื่องพิมพ์ใบเสร็จ', 'IP ເຄື່ອງພິມໃບບິນ', 'Printer IP Address')}
                 </label>
                 <input
                   id={`${uid}-prn-host`}
@@ -626,7 +741,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               </div>
               <div>
                 <label htmlFor={`${uid}-prn-port`} className="block text-ink-muted mb-1">
-                  พอร์ต TCP
+                  {pick('พอร์ต TCP', 'ພອດ TCP', 'TCP Port')}
                 </label>
                 <input
                   id={`${uid}-prn-port`}
@@ -642,7 +757,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           {prnMode === 'WINDOWS_RAW_USB' && (
             <div className="md:col-span-2">
               <label htmlFor={`${uid}-prn-win`} className="block text-ink-muted mb-1">
-                เลือกเครื่องพิมพ์ USB ใน Windows
+                {pick('เลือกเครื่องพิมพ์ USB ใน Windows', 'ເລືອກເຄື່ອງພິມ USB ໃນ Windows', 'Select Windows USB Printer')}
               </label>
               {winPrinters.length > 0 ? (
                 <select
@@ -651,7 +766,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                   onChange={(e) => setPrnWinName(e.target.value)}
                   className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
                 >
-                  <option value="">-- เลือกเครื่องพิมพ์ --</option>
+                  <option value="">{pick('-- เลือกเครื่องพิมพ์ --', '-- ເລືອກເຄື່ອງພິມ --', '-- Select Printer --')}</option>
                   {winPrinters.map((p) => (
                     <option key={p.name} value={p.name}>
                       {p.name} ({p.portName})
@@ -662,7 +777,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                 <input
                   id={`${uid}-prn-win`}
                   type="text"
-                  placeholder="เช่น XP-80C หรือ EPSON TM-T82"
+                  placeholder={pick('เช่น XP-80C หรือ EPSON TM-T82', 'ເຊັ່ນ XP-80C ຫຼື EPSON TM-T82', 'e.g. XP-80C or EPSON TM-T82')}
                   value={prnWinName}
                   onChange={(e) => setPrnWinName(e.target.value)}
                   className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
@@ -673,7 +788,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
 
           <div>
             <label htmlFor={`${uid}-prn-width`} className="block text-ink-muted mb-1">
-              ขนาดกระดาษความร้อน
+              {pick('ขนาดกระดาษความร้อน', 'ຂະໜາດກະດາດຄວາມຮ້ອນ', 'Thermal Paper Width')}
             </label>
             <select
               id={`${uid}-prn-width`}
@@ -695,7 +810,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               onChange={(e) => setPrnAutoDrawer(e.target.checked)}
               className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
             />
-            ส่งสัญญาณพัลส์เปิดลิ้นชักเก็บเงิน RJ11 อัตโนมัติเมื่อรับเงินสด (ESC p 0 25 250)
+            {pick(
+              'ส่งสัญญาณพัลส์เปิดลิ้นชักเก็บเงิน RJ11 อัตโนมัติเมื่อรับเงินสด (ESC p 0 25 250)',
+              'ສົ່ງສັນຍານເປີດລິ້ນຊັກເກັບເງິນ RJ11 ອັດຕະໂນມັດເມື່ອຮັບເງິນສົດ (ESC p 0 25 250)',
+              'Auto-kick RJ11 cash drawer pulse on cash payments (ESC p 0 25 250)'
+            )}
           </label>
 
           <div className="flex flex-wrap items-center gap-2.5">
@@ -705,7 +824,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               onClick={() => void handleTestKickDrawer()}
               className={`h-[44px] rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
             >
-              ทดสอบเตะลิ้นชัก RJ11
+              {pick('ทดสอบเตะลิ้นชัก RJ11', 'ທົດສອບເປີດລິ້ນຊັກ RJ11', 'Test RJ11 Drawer Kick')}
             </button>
             <button
               type="button"
@@ -713,7 +832,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               onClick={() => void handleSavePrinterHardware()}
               className={`h-[44px] rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
-              บันทึกตั้งค่าเครื่องพิมพ์
+              {pick('บันทึกตั้งค่าเครื่องพิมพ์', 'ບັນທຶກຕັ້ງຄ່າເຄື່ອງພິມ', 'Save Printer Settings')}
             </button>
           </div>
         </div>
@@ -728,10 +847,18 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             </div>
             <div>
               <h2 className="font-google-display text-[20px] font-normal leading-[28px] text-ink">
-                เครื่องพิมพ์บาร์โค้ดสติกเกอร์สินค้า (A4 Sticker / TSPL / ZPL / ESC-POS)
+                {pick(
+                  'เครื่องพิมพ์บาร์โค้ดสติกเกอร์สินค้า (A4 Sticker / TSPL / ZPL / ESC-POS)',
+                  'ເຄື່ອງພິມບາໂຄດສະຕິກເກີສິນຄ້າ (A4 Sticker / TSPL / ZPL / ESC-POS)',
+                  'Barcode Label Printer Defaults (A4 Sticker / TSPL / ZPL / ESC-POS)'
+                )}
               </h2>
               <p className="text-xs text-ink-muted mt-1">
-                กำหนดค่าเริ่มต้นสำหรับแท็บ &ldquo;พิมพ์บาร์โค้ดสินค้า&rdquo; ในคลังสินค้า รองรับทั้งสติกเกอร์ A4, Xprinter/TSC (TSPL2), Zebra (ZPL II) และเครื่องพิมพ์ใบเสร็จ 80/58mm
+                {pick(
+                  'กำหนดค่าเริ่มต้นสำหรับแท็บ "พิมพ์บาร์โค้ดสินค้า" ในคลังสินค้า รองรับทั้งสติกเกอร์ A4, Xprinter/TSC (TSPL2), Zebra (ZPL II) และเครื่องพิมพ์ใบเสร็จ 80/58mm',
+                  'ກຳນົດຄ່າເລີ່ມຕົ້ນສຳລັບແທັບ "ພິມບາໂຄດສິນຄ້າ" ຮອງຮັບທັງສະຕິກເກີ A4, Xprinter/TSC (TSPL2), Zebra (ZPL II) ແລະ ເຄື່ອງພິມໃບບິນ 80/58mm',
+                  'Set defaults for the "Barcode Labels" tab — supports A4 sheets, TSPL2 (Xprinter/TSC), ZPL II (Zebra), and 80/58mm receipt printers'
+                )}
               </p>
             </div>
           </div>
@@ -740,7 +867,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
           <div className="md:col-span-2">
             <label htmlFor={`${uid}-set-lbl-mode`} className="block text-ink-muted mb-1">
-              โหมดเครื่องพิมพ์บาร์โค้ดเริ่มต้น
+              {pick('โหมดเครื่องพิมพ์บาร์โค้ดเริ่มต้น', 'ໂໝດເຄື່ອງພິມບາໂຄດເລີ່ມຕົ້ນ', 'Default Label Printer Mode')}
             </label>
             <select
               id={`${uid}-set-lbl-mode`}
@@ -763,19 +890,25 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               }}
               className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
             >
-              <option value="A4_SHEET">กระดาษสติกเกอร์ A4 (Laser / Inkjet)</option>
-              <option value="THERMAL_LABEL_DIALOG">สติกเกอร์ความร้อน (Windows Print Dialog)</option>
+              <option value="A4_SHEET">
+                {pick('กระดาษสติกเกอร์ A4 (Laser / Inkjet)', 'ກະດາດສະຕິກເກີ A4 (Laser / Inkjet)', 'A4 Sticker Sheet (Laser / Inkjet)')}
+              </option>
+              <option value="THERMAL_LABEL_DIALOG">
+                {pick('สติกเกอร์ความร้อน (Windows Print Dialog)', 'ສະຕິກເກີຄວາມຮ້ອນ (Windows Print Dialog)', 'Thermal Roll Label (Windows Dialog)')}
+              </option>
               <option value="TSPL_RAW_USB">TSPL USB Raw Spooler (Xprinter / TSC / Gprinter)</option>
               <option value="TSPL_LAN_9100">TSPL LAN (TCP Port 9100)</option>
               <option value="ZPL_RAW_USB">ZPL USB Raw Spooler (Zebra)</option>
               <option value="ZPL_LAN_9100">ZPL LAN (TCP Port 9100)</option>
-              <option value="ESCPOS_RECEIPT_PRINTER">พิมพ์ผ่านเครื่องพิมพ์ใบเสร็จ 80mm / 58mm</option>
+              <option value="ESCPOS_RECEIPT_PRINTER">
+                {pick('พิมพ์ผ่านเครื่องพิมพ์ใบเสร็จ 80mm / 58mm', 'ພິມຜ່ານເຄື່ອງພິມໃບບິນ 80mm / 58mm', 'Thermal Receipt Printer (80mm / 58mm)')}
+              </option>
             </select>
           </div>
 
           <div>
             <label htmlFor={`${uid}-set-lbl-preset`} className="block text-ink-muted mb-1">
-              ขนาดป้ายเริ่มต้น
+              {pick('ขนาดป้ายเริ่มต้น', 'ຂະໜາດປ້າຍເລີ່ມຕົ້ນ', 'Default Label Size')}
             </label>
             <select
               id={`${uid}-set-lbl-preset`}
@@ -799,7 +932,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           {(lblCfg.mode === 'TSPL_RAW_USB' || lblCfg.mode === 'ZPL_RAW_USB') && (
             <div>
               <label htmlFor={`${uid}-set-lbl-win`} className="block text-ink-muted mb-1">
-                เครื่องพิมพ์สติกเกอร์ USB
+                {pick('เครื่องพิมพ์สติกเกอร์ USB', 'ເຄື່ອງພິມສະຕິກເກີ USB', 'USB Label Printer')}
               </label>
               {winPrinters.length > 0 ? (
                 <select
@@ -810,7 +943,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                   }
                   className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
                 >
-                  <option value="">-- เลือกเครื่องพิมพ์ --</option>
+                  <option value="">{pick('-- เลือกเครื่องพิมพ์ --', '-- ເລືອກເຄື່ອງພິມ --', '-- Select Printer --')}</option>
                   {winPrinters.map((p) => (
                     <option key={p.name} value={p.name}>
                       {p.name} ({p.portName})
@@ -821,7 +954,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                 <input
                   id={`${uid}-set-lbl-win`}
                   type="text"
-                  placeholder="เช่น Xprinter XP-365B"
+                  placeholder={pick('เช่น Xprinter XP-365B', 'ເຊັ່ນ Xprinter XP-365B', 'e.g. Xprinter XP-365B')}
                   value={lblCfg.windowsPrinterName}
                   onChange={(e) =>
                     setLblCfg((prev) => ({ ...prev, windowsPrinterName: e.target.value }))
@@ -835,7 +968,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           {(lblCfg.mode === 'TSPL_LAN_9100' || lblCfg.mode === 'ZPL_LAN_9100') && (
             <div>
               <label htmlFor={`${uid}-set-lbl-host`} className="block text-ink-muted mb-1">
-                IP:Port เครื่องพิมพ์บาร์โค้ด LAN
+                {pick('IP:Port เครื่องพิมพ์บาร์โค้ด LAN', 'IP:Port ເຄື່ອງພິມບາໂຄດ LAN', 'LAN Barcode Printer IP:Port')}
               </label>
               <div className="flex gap-1.5">
                 <input
@@ -847,7 +980,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                 />
                 <input
                   type="number"
-                  aria-label="พอร์ต TCP เครื่องพิมพ์บาร์โค้ด"
+                  aria-label={pick('พอร์ต TCP เครื่องพิมพ์บาร์โค้ด', 'ພອດ TCP ເຄື່ອງພິມບາໂຄດ', 'Label Printer TCP Port')}
                   value={lblCfg.tcpPort}
                   onChange={(e) =>
                     setLblCfg((prev) => ({
@@ -869,7 +1002,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             onClick={() => void handleSaveBarcodeLabelConfig()}
             className={`h-[44px] rounded-[48px] bg-primary px-6 font-google-display text-xs font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
           >
-            บันทึกตั้งค่าเครื่องพิมพ์บาร์โค้ด
+            {pick('บันทึกตั้งค่าเครื่องพิมพ์บาร์โค้ด', 'ບັນທຶກຕັ້ງຄ່າເຄື່ອງພິມບາໂຄດ', 'Save Label Printer Settings')}
           </button>
         </div>
       </section>
@@ -883,10 +1016,18 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             </div>
             <div>
               <h2 className="font-google-display text-[20px] font-normal leading-[28px] text-ink">
-                โฟลเดอร์ / แฟลชไดรฟ์ USB สำหรับสำรองฐานข้อมูลอัตโนมัติ (14-Shift Off-Disk Backup)
+                {pick(
+                  'โฟลเดอร์ / แฟลชไดรฟ์ USB สำหรับสำรองฐานข้อมูลอัตโนมัติ (14-Shift Off-Disk Backup)',
+                  'ໂຟນເດີ / ແຟລຊໄດຣຟ໌ USB ສຳລັບສຳຮອງຖານຂໍ້ມູນອັດຕະໂນມັດ (14-Shift Off-Disk Backup)',
+                  'Automated Backup Folder / USB Drive (14-Shift Off-Disk Ring)'
+                )}
               </h2>
               <p className="text-xs text-ink-muted mt-1">
-                สำรองข้อมูลเข้ารหัส AES-256 อัตโนมัติทุกครั้งที่ปิดกะ — แนะนำให้เลือกแฟลชไดรฟ์ USB ภายนอกหรือไดรฟ์สำรองแยกจากดิสก์หลัก
+                {pick(
+                  'สำรองข้อมูลเข้ารหัส AES-256 อัตโนมัติทุกครั้งที่ปิดกะ — แนะนำให้เลือกแฟลชไดรฟ์ USB ภายนอกหรือไดรฟ์สำรองแยกจากดิสก์หลัก',
+                  'ສຳຮອງຂໍ້ມູນເຂົ້າລະຫັດ AES-256 ອັດຕະໂນມັດທຸກຄັ້ງທີ່ປິດກະ — ແນະນຳໃຫ້ເລືອກແຟລຊໄດຣຟ໌ USB ພາຍນອກແຍກຈາກດິສກ໌ຫຼັກ',
+                  'Auto-writes AES-256 encrypted backups on shift close — choose an external USB drive separate from the system disk'
+                )}
               </p>
             </div>
           </div>
@@ -895,14 +1036,22 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             {usbBackupCfg?.isExternalCustomDir && usbBackupCfg.targetWritable ? (
               <span className="inline-flex items-center gap-1.5 rounded-[48px] border border-primary bg-primary-soft px-3 py-1 text-xs font-medium text-primary-dark">
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                <span>แยกออกนอกโฟลเดอร์หลักแล้ว</span>
+                <span>{pick('แยกออกนอกโฟลเดอร์หลักแล้ว', 'ແຍກອອກນອກໂຟນເດີຫຼັກແລ້ວ', 'Off-Disk Target Active')}</span>
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 rounded-[48px] border border-hairline bg-surface-1 px-3 py-1 text-xs font-medium text-ink-soft">
                 <span>
                   {usbBackupCfg?.isExternalCustomDir && !usbBackupCfg.targetWritable
-                    ? 'ไดรฟ์ภายนอกไม่พร้อมใช้งาน (ใช้สำรองในเครื่องชั่วคราว)'
-                    : 'ยังเก็บอยู่ในดิสก์เดียวกับฐานข้อมูล — แนะนำเลือก USB ภายนอก'}
+                    ? pick(
+                        'ไดรฟ์ภายนอกไม่พร้อมใช้งาน (ใช้สำรองในเครื่องชั่วคราว)',
+                        'ໄດຣຟ໌ພາຍນອກບໍ່ພ້ອມໃຊ້ງານ (ໃຊ້ສຳຮອງໃນເຄື່ອງຊົ່ວຄາວ)',
+                        'External drive unavailable (falling back to local folder)'
+                      )
+                    : pick(
+                        'ยังเก็บอยู่ในดิสก์เดียวกับฐานข้อมูล — แนะนำเลือก USB ภายนอก',
+                        'ຍັງເກັບຢູ່ໃນດິສກ໌ດຽວກັບຖານຂໍ້ມູນ — ແນະນຳເລືອກ USB ພາຍນອກ',
+                        'Still stored on OS disk — select an external USB drive'
+                      )}
                 </span>
               </span>
             )}
@@ -914,7 +1063,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               className={`inline-flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
             >
               <RefreshCw className={`h-3.5 w-3.5 ${scanningDrives ? 'animate-spin' : ''}`} />
-              <span>ค้นหาไดรฟ์ใหม่</span>
+              <span>{pick('ค้นหาไดรฟ์ใหม่', 'ຄົ້ນຫາໄດຣຟ໌ໃໝ່', 'Rescan Drives')}</span>
             </button>
           </div>
         </div>
@@ -922,7 +1071,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         {usbDrives.length > 0 && (
           <div className="space-y-2">
             <div className="text-xs font-medium text-ink-muted">
-              เลือกด่วนจากไดรฟ์ที่ตรวจพบในเครื่อง (คลิกเพื่อใส่พาธโฟลเดอร์สำรอง):
+              {pick(
+                'เลือกด่วนจากไดรฟ์ที่ตรวจพบในเครื่อง (คลิกเพื่อใส่พาธโฟลเดอร์สำรอง):',
+                'ເລືອກດ່ວນຈາກໄດຣຟ໌ທີ່ກວດພົບໃນເຄື່ອງ (ຄລິກເພື່ອໃສ່ພາດໂຟນເດີສຳຮອງ):',
+                'Quick-select from detected drives (click to fill backup path):'
+              )}
             </div>
             <div className="flex flex-wrap gap-2">
               {usbDrives.map((d) => {
@@ -945,13 +1098,13 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                     <span className="text-ink-muted">
                       {d.volumeName ? `${d.volumeName} · ` : ''}
                       {d.driveKind === 'REMOVABLE_USB'
-                        ? 'USB ภายนอก'
+                        ? pick('USB ภายนอก', 'USB ພາຍນອກ', 'Removable USB')
                         : d.driveKind === 'NETWORK_DRIVE'
-                          ? 'ไดรฟ์เครือข่าย'
-                          : 'ดิสก์ในเครื่อง'}
+                          ? pick('ไดรฟ์เครือข่าย', 'ໄດຣຟ໌ເຄືອຂ່າຍ', 'Network Drive')
+                          : pick('ดิสก์ในเครื่อง', 'ດິສກ໌ໃນເຄື່ອງ', 'Local Disk')}
                     </span>
                     <span className="text-[11px] text-ink-muted tabular-nums-google">
-                      ว่าง {freeGb} GB
+                      {pick('ว่าง', 'ວ່າງ', 'Free')} {freeGb} GB
                     </span>
                   </button>
                 );
@@ -963,7 +1116,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-end text-xs">
           <div className="lg:col-span-7">
             <label htmlFor={`${uid}-usb-backup-dir`} className="block text-ink-muted mb-1">
-              พาธโฟลเดอร์ปลายทางสำหรับไฟล์สำรอง .db.enc (เว้นว่างเพื่อใช้โฟลเดอร์ในเครื่อง)
+              {pick(
+                'พาธโฟลเดอร์ปลายทางสำหรับไฟล์สำรอง .db.enc (เว้นว่างเพื่อใช้โฟลเดอร์ในเครื่อง)',
+                'ພາດໂຟນເດີປາຍທາງສຳລັບໄຟລ໌ສຳຮອງ .db.enc (ປະວ່າງເພື່ອໃຊ້ໂຟນເດີໃນເຄື່ອງ)',
+                'Destination Folder Path for .db.enc Backups (leave blank for local folder)'
+              )}
             </label>
             <input
               id={`${uid}-usb-backup-dir`}
@@ -972,7 +1129,12 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               value={usbDirInput}
               onChange={(e) => setUsbDirInput(e.target.value)}
               placeholder={
-                usbBackupCfg?.defaultLocalBackupDir || 'เช่น E:\\RubePOS_Backups หรือ D:\\Backups'
+                usbBackupCfg?.defaultLocalBackupDir ||
+                pick(
+                  'เช่น E:\\RubePOS_Backups หรือ D:\\Backups',
+                  'ເຊັ່ນ E:\\RubePOS_Backups ຫຼື D:\\Backups',
+                  'e.g. E:\\RubePOS_Backups or D:\\Backups'
+                )
               }
               className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink placeholder:text-ink-muted disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
             />
@@ -987,7 +1149,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                   onClick={() => void handleSaveUsbBackupConfig('')}
                   className={`h-[44px] rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
-                  รีเซ็ตเป็นค่าเริ่มต้น
+                  {pick('รีเซ็ตเป็นค่าเริ่มต้น', 'ຣີເຊັດເປັນຄ່າເລີ່ມຕົ້ນ', 'Reset Default')}
                 </button>
                 <button
                   type="button"
@@ -995,7 +1157,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                   onClick={() => void handleSaveUsbBackupConfig()}
                   className={`h-[44px] rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                 >
-                  บันทึกปลายทางสำรองข้อมูล
+                  {pick('บันทึกปลายทางสำรองข้อมูล', 'ບັນທຶກປາຍທາງສຳຮອງຂໍ້ມູນ', 'Save Backup Target')}
                 </button>
               </>
             )}
@@ -1005,7 +1167,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               onClick={() => void handleRunUsbBackupNow()}
               className={`h-[44px] rounded-[48px] border border-primary bg-canvas px-5 font-google-display text-xs font-medium text-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
             >
-              สำรองข้อมูลเดี๋ยวนี้
+              {pick('สำรองข้อมูลเดี๋ยวนี้', 'ສຳຮອງຂໍ້ມູນດຽວນີ້', 'Back Up Now')}
             </button>
           </div>
         </div>
@@ -1019,12 +1181,16 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               onChange={(e) => setMirrorLocalFallback(e.target.checked)}
               className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
             />
-            สำรองคู่ขนานไว้ในเครื่องด้วยเสมอหากถอดแฟลชไดรฟ์ (Local Fallback Mirror)
+            {pick(
+              'สำรองคู่ขนานไว้ในเครื่องด้วยเสมอหากถอดแฟลชไดรฟ์ (Local Fallback Mirror)',
+              'ສຳຮອງຄູ່ຂະໜານໄວ້ໃນເຄື່ອງນຳສະເໝີຫາກຖອດແຟລຊໄດຣຟ໌ (Local Fallback Mirror)',
+              'Always keep local fallback mirror when USB drive is disconnected'
+            )}
           </label>
 
           {usbBackupCfg && (
             <span className="text-[11px] text-ink-muted truncate max-w-md">
-              ใช้งานจริง: {usbBackupCfg.activeEffectiveDir}
+              {pick('ใช้งานจริง:', 'ໃຊ້ງານຈິງ:', 'Active path:')} {usbBackupCfg.activeEffectiveDir}
             </span>
           )}
         </div>
@@ -1064,7 +1230,9 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                       : 'border-hairline bg-canvas text-ink-soft hover:border-primary'
                   }`}
                 >
-                  {code === 'TH' ? 'TH · ประเทศไทย (THB ฿)' : 'LA · ສປປ.ລາວ (LAK ₭)'}
+                  {code === 'TH'
+                    ? pick('TH · ประเทศไทย (THB ฿)', 'TH · ປະເທດໄທ (THB ฿)', 'TH · Thailand (THB ฿)')
+                    : pick('LA · ສປປ.ລາວ (LAK ₭)', 'LA · ສປປ.ລາວ (LAK ₭)', 'LA · Lao PDR (LAK ₭)')}
                 </button>
               ))}
             </div>
@@ -1126,7 +1294,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                 id={`${uid}-store-address`}
                 type="text"
                 disabled={!isOwner}
-                placeholder={countryCode === 'LA' ? 'ບ້ານ / ເມືອງ / ແຂວງ' : 'ที่อยู่ร้าน (ไม่บังคับ)'}
+                placeholder={
+                  countryCode === 'LA'
+                    ? pick('ບ້ານ / ເມືອງ / ແຂວງ', 'ບ້ານ / ເມືອງ / ແຂວງ', 'Village / District / Province')
+                    : pick('ที่อยู่ร้าน (ไม่บังคับ)', 'ທີ່ຢູ່ຮ້ານ (ບໍ່ບັງຄັບ)', 'Store Address (Optional)')
+                }
                 value={storeAddress}
                 onChange={(e) => setStoreAddress(e.target.value)}
                 className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3.5 text-ink placeholder:text-ink-muted disabled:bg-surface-1 disabled:text-ink-muted ${UI_INTERACTION.focusControl}`}
@@ -1136,7 +1308,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <label htmlFor={`${uid}-tax-id`} className="block text-ink-muted mb-1">
                 {countryCode === 'LA'
                   ? pick('เลขผู้เสียภาษี สปป.ลาว (TIN 12 หลัก)', 'ເລກປະຈຳຕົວຜູ້ເສຍອາກອນ (TIN)', 'Lao TIN')
-                  : 'เลขประจำตัวผู้เสียภาษี 13 หลัก'}
+                  : pick('เลขประจำตัวผู้เสียภาษี 13 หลัก', 'ເລກປະຈຳຕົວຜູ້ເສຍອາກອນ 13 ຫຼັກ', 'Thai Tax ID (13 digits)')}
               </label>
               <input
                 id={`${uid}-tax-id`}
@@ -1151,7 +1323,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <label htmlFor={`${uid}-rd-reg`} className="block text-ink-muted mb-1">
                 {countryCode === 'LA'
                   ? pick('เลขทะเบียนเครื่อง POS / TaxRIS', 'ເລກທະບຽນເຄື່ອງ POS / TaxRIS', 'POS / TaxRIS Reg No.')
-                  : 'เลขทะเบียนเครื่องเก็บเงินกรมสรรพากร'}
+                  : pick('เลขทะเบียนเครื่องเก็บเงินกรมสรรพากร', 'ເລກທະບຽນເຄື່ອງ POS', 'POS Terminal Reg No.')}
               </label>
               <input
                 id={`${uid}-rd-reg`}
@@ -1194,7 +1366,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               <>
                 <div>
                   <label htmlFor={`${uid}-branch-code`} className="block text-ink-muted mb-1">
-                    รหัสสาขา (00000 = สำนักงานใหญ่)
+                    {pick('รหัสสาขา (00000 = สำนักงานใหญ่)', 'ລະຫັດສາຂາ (00000 = ສຳນັກງານໃຫຍ່)', 'Branch Code (00000 = HQ)')}
                   </label>
                   <input
                     id={`${uid}-branch-code`}
@@ -1207,7 +1379,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                 </div>
                 <div className="sm:col-span-2">
                   <label htmlFor={`${uid}-promptpay`} className="block text-primary-dark font-medium mb-1">
-                    เบอร์ / เลขนิติบุคคล PromptPay (ล็อก HMAC)
+                    {pick(
+                      'เบอร์ / เลขนิติบุคคล PromptPay (ล็อก HMAC)',
+                      'ເບີໂທ / ເລກນິຕິບຸກຄົນ PromptPay (ລັອກ HMAC)',
+                      'PromptPay ID / Tax ID (HMAC Locked)'
+                    )}
                   </label>
                   <input
                     id={`${uid}-promptpay`}
@@ -1250,9 +1426,15 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                     onChange={(e) => setScalePriceEmbeddedMultiplier(Number(e.target.value))}
                     className={`h-11 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink disabled:bg-surface-1 ${UI_INTERACTION.focusSelect}`}
                   >
-                    <option value={10_000}>×100 ₭ (01500 = 150,000 ₭ — แนะนำ)</option>
-                    <option value={100_000}>×1,000 ₭ (00150 = 150,000 ₭)</option>
-                    <option value={100}>×1 ₭ (สูงสุด 99,999 ₭)</option>
+                    <option value={10_000}>
+                      {pick('×100 ₭ (01500 = 150,000 ₭ — แนะนำ)', '×100 ₭ (01500 = 150,000 ₭ — ແນະນຳ)', '×100 ₭ (01500 = 150,000 ₭ — Recommended)')}
+                    </option>
+                    <option value={100_000}>
+                      {pick('×1,000 ₭ (00150 = 150,000 ₭)', '×1,000 ₭ (00150 = 150,000 ₭)', '×1,000 ₭ (00150 = 150,000 ₭)')}
+                    </option>
+                    <option value={100}>
+                      {pick('×1 ₭ (สูงสุด 99,999 ₭)', '×1 ₭ (ສູງສຸດ 99,999 ₭)', '×1 ₭ (Max 99,999 ₭)')}
+                    </option>
                   </select>
                 </div>
                 <div>
@@ -1396,13 +1578,19 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         <section className="xl:col-span-6 rounded-[4px] border border-hairline bg-canvas p-6 space-y-5">
           <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
             <UserPlus className="h-5 w-5 text-primary" />
-            <span>จัดการพนักงานและสิทธิ์การใช้งาน (RBAC &amp; PIN)</span>
+            <span>
+              {pick(
+                'จัดการพนักงานและสิทธิ์การใช้งาน (RBAC & PIN)',
+                'ຈັດການພະນັກງານ ແລະ ສິດທິການໃຊ້ງານ (RBAC & PIN)',
+                'Staff Accounts & Permissions (RBAC & PIN)'
+              )}
+            </span>
           </h3>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
             <input
               type="text"
-              aria-label="Username พนักงาน"
+              aria-label={pick('Username พนักงาน', 'Username ພະນັກງານ', 'Staff Username')}
               placeholder="Username"
               value={newUsername}
               onChange={(e) => setNewUsername(e.target.value)}
@@ -1410,14 +1598,14 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             />
             <input
               type="text"
-              aria-label="ชื่อที่แสดงของพนักงาน"
-              placeholder="ชื่อที่แสดง"
+              aria-label={pick('ชื่อที่แสดงของพนักงาน', 'ຊື່ທີ່ສະແດງຂອງພະນັກງານ', 'Staff Display Name')}
+              placeholder={pick('ชื่อที่แสดง', 'ຊື່ທີ່ສະແດງ', 'Display Name')}
               value={newDisplayName}
               onChange={(e) => setNewDisplayName(e.target.value)}
               className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
             />
             <select
-              aria-label="บทบาทสิทธิ์พนักงาน"
+              aria-label={pick('บทบาทสิทธิ์พนักงาน', 'ບົດບາດສິດທິພະນັກງານ', 'Staff Role')}
               value={newRole}
               onChange={(e) => setNewRole(e.target.value as UserRole)}
               className={`h-11 rounded-[4px] border border-hairline bg-canvas px-2.5 text-ink ${UI_INTERACTION.focusSelect}`}
@@ -1432,8 +1620,8 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               type="password"
               inputMode="numeric"
               maxLength={8}
-              aria-label="รหัส PIN พนักงาน 4 ถึง 8 หลัก"
-              placeholder="PIN (4–8 หลัก)"
+              aria-label={pick('รหัส PIN พนักงาน 4 ถึง 8 หลัก', 'ລະຫັດ PIN ພະນັກງານ 4 ເຖິງ 8 ຫຼັກ', 'Staff PIN (4-8 digits)')}
+              placeholder={pick('PIN (4–8 หลัก)', 'PIN (4–8 ຫຼັກ)', 'PIN (4-8 digits)')}
               value={newPin}
               onChange={(e) => setNewPin(sanitizePinInput(e.target.value))}
               className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
@@ -1448,8 +1636,12 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               className={`flex-1 h-[46px] rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
               {editingStaffId
-                ? 'บันทึกการแก้ไข / ตั้งรหัส PIN ใหม่'
-                : '+ เพิ่มพนักงานใหม่'}
+                ? pick(
+                    'บันทึกการแก้ไข / ตั้งรหัส PIN ใหม่',
+                    'ບັນທຶກການແກ້ໄຂ / ຕັ້ງລະຫັດ PIN ໃໝ່',
+                    'Save Changes / Update PIN'
+                  )
+                : pick('+ เพิ่มพนักงานใหม่', '+ ເພີ່ມພະນັກງານໃໝ່', '+ Add Staff Account')}
             </button>
             {editingStaffId && (
               <button
@@ -1463,7 +1655,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                 }}
                 className={`h-[46px] rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
               >
-                ยกเลิกแก้ไข
+                {pick('ยกเลิกแก้ไข', 'ຍົກເລີກແກ້ໄຂ', 'Cancel Edit')}
               </button>
             )}
           </div>
@@ -1471,7 +1663,11 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
           <div className="divide-y divide-hairline rounded-[4px] border border-hairline max-h-48 overflow-y-auto">
             {bootstrap.staffUsers.length === 0 ? (
               <div className="py-6 text-center text-xs text-ink-muted">
-                ยังไม่มีบัญชีผู้ใช้งานพนักงานในระบบ
+                {pick(
+                  'ยังไม่มีบัญชีผู้ใช้งานพนักงานในระบบ',
+                  'ຍັງບໍ່ມີບັນຊີພະນັກງານໃນລະບົບ',
+                  'No staff accounts configured yet'
+                )}
               </div>
             ) : (
               bootstrap.staffUsers.map((u) => (
@@ -1499,7 +1695,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                         }}
                         className={`rounded-[48px] border border-hairline bg-canvas px-3 py-1 text-[11px] font-medium text-primary hover:border-primary hover:bg-primary-soft/40 ${UI_INTERACTION.focusButton}`}
                       >
-                        แก้ไข / PIN
+                        {pick('แก้ไข / PIN', 'ແກ້ໄຂ / PIN', 'Edit / PIN')}
                       </button>
                     )}
                   </div>
@@ -1524,21 +1720,23 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         <section className="xl:col-span-5 rounded-[4px] border border-hairline bg-canvas p-6 space-y-4">
           <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
             <Network className="h-5 w-5 text-primary" />
-            <span>คลัสเตอร์วงแลน mDNS &amp; mTLS Pairing</span>
+            <span>
+              {pick('คลัสเตอร์วงแลน mDNS & mTLS Pairing', 'ຄລັສເຕີວົງແລນ mDNS & mTLS Pairing', 'LAN Cluster mDNS & mTLS Pairing')}
+            </span>
           </h3>
           <div className="rounded-[4px] border border-hairline bg-surface-1 p-4 text-xs space-y-2 tabular-nums-google">
             <div className="flex justify-between">
-              <span className="text-ink-muted">โหมดเครือข่าย:</span>
+              <span className="text-ink-muted">{pick('โหมดเครือข่าย:', 'ໂໝດເຄືອຂ່າຍ:', 'Network Mode:')}</span>
               <span className="font-medium text-ink">{bootstrap.cluster.operatingMode}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-ink-muted">บทบาทโหนด / Epoch:</span>
+              <span className="text-ink-muted">{pick('บทบาทโหนด / Epoch:', 'ບົດບາດໂໜດ / Epoch:', 'Node Role / Epoch:')}</span>
               <span className="font-medium text-primary-hover">
                 {bootstrap.cluster.roleState} (epoch={bootstrap.cluster.currentEpoch})
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-ink-muted">สถิติ IPC (Read / Write):</span>
+              <span className="text-ink-muted">{pick('สถิติ IPC (Read / Write):', 'ສະຖິຕິ IPC (Read / Write):', 'IPC Stats (Read / Write):')}</span>
               <span className="font-medium text-ink">
                 {bootstrap.cluster.ipcStats.readsRouted} / {bootstrap.cluster.ipcStats.writesRouted}
               </span>
@@ -1552,13 +1750,23 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             className={`flex h-[46px] w-full items-center justify-center gap-2 rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
           >
             <KeyRound className="h-4 w-4" />
-            <span>เปิดโหมด LAN Cluster &amp; สร้างรหัสจับคู่ 6-Digit mTLS PIN</span>
+            <span>
+              {pick(
+                'เปิดโหมด LAN Cluster & สร้างรหัสจับคู่ 6-Digit mTLS PIN',
+                'ເປີດໂໝດ LAN Cluster & ສ້າງລະຫັດຈັບຄູ່ 6-Digit mTLS PIN',
+                'Enable LAN Cluster & Generate 6-Digit mTLS Pairing PIN'
+              )}
+            </span>
           </button>
 
           {pairingPinInfo && (
             <div className="rounded-[8px] bg-primary-soft p-5 text-center space-y-1.5">
               <div className="text-xs text-ink-soft">
-                รหัสจับคู่เครื่องลูกข่าย / จอครัว KDS (ใช้ครั้งเดียว)
+                {pick(
+                  'รหัสจับคู่เครื่องลูกข่าย / จอครัว KDS (ใช้ครั้งเดียว)',
+                  'ລະຫັດຈັບຄູ່ເຄື່ອງລູກຂ່າຍ / ຈໍຄົວ KDS (ໃຊ້ຄັ້ງດຽວ)',
+                  'Client / KDS Pairing PIN (Single Use)'
+                )}
               </div>
               <div className="font-google-display text-[36px] font-normal tracking-widest text-ink tabular-nums-google">
                 {pairingPinInfo.pairingPin}
@@ -1573,23 +1781,33 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
         <section className="xl:col-span-7 rounded-[4px] border border-hairline bg-canvas p-6 space-y-4">
           <h3 className="font-google-display text-[20px] font-normal text-ink flex items-center gap-2.5">
             <Shield className="h-5 w-5 text-primary" />
-            <span>บันทึกเหตุการณ์ความปลอดภัยห้ามลบ/แก้ไข (security_audit_logs)</span>
+            <span>
+              {pick(
+                'บันทึกเหตุการณ์ความปลอดภัยห้ามลบ/แก้ไข (security_audit_logs)',
+                'ບັນທຶກເຫດການຄວາມປອດໄພຫ້າມລຶບ/ແກ້ໄຂ (security_audit_logs)',
+                'Immutable Security Audit Trail (security_audit_logs)'
+              )}
+            </span>
           </h3>
           <div className="overflow-x-auto max-h-64 rounded-[4px] border border-hairline">
             <table className="w-full text-left text-xs">
               <thead className="bg-surface-1 text-ink-muted font-medium border-b border-hairline">
                 <tr>
-                  <th scope="col" className="py-2.5 px-3">เวลา</th>
-                  <th scope="col" className="py-2.5 px-3">เหตุการณ์</th>
-                  <th scope="col" className="py-2.5 px-3">ผู้กระทำ</th>
-                  <th scope="col" className="py-2.5 px-3">รายละเอียด</th>
+                  <th scope="col" className="py-2.5 px-3">{pick('เวลา', 'ເວລາ', 'Timestamp')}</th>
+                  <th scope="col" className="py-2.5 px-3">{pick('เหตุการณ์', 'ເຫດການ', 'Event')}</th>
+                  <th scope="col" className="py-2.5 px-3">{pick('ผู้กระทำ', 'ຜູ້ດຳເນີນການ', 'Actor')}</th>
+                  <th scope="col" className="py-2.5 px-3">{pick('รายละเอียด', 'ລາຍລະອຽດ', 'Details')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-hairline bg-canvas tabular-nums-google text-[11px]">
                 {auditLogs.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="py-10 text-center text-xs text-ink-muted">
-                      ยังไม่มีบันทึกเหตุการณ์ด้านความปลอดภัย
+                      {pick(
+                        'ยังไม่มีบันทึกเหตุการณ์ด้านความปลอดภัย',
+                        'ຍັງບໍ່ມີບັນທຶກເຫດການຄວາມປອດໄພ',
+                        'No security audit log entries yet'
+                      )}
                     </td>
                   </tr>
                 ) : (
@@ -1601,7 +1819,7 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
                     return (
                       <tr key={log.id} className="hover:bg-surface-1 transition-colors duration-150">
                         <td className="py-2.5 px-3 text-ink-muted">
-                          {new Date(log.createdAt).toLocaleString('th-TH')}
+                          {dateTime(log.createdAt)}
                         </td>
                         <td className="py-2.5 px-3 font-medium text-ink">{log.eventType}</td>
                         <td className="py-2.5 px-3 text-ink-soft">{actorName}</td>
@@ -1629,10 +1847,18 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             </div>
             <div>
               <h3 className="font-google-display text-[18px] font-normal text-ink">
-                โหมดจำลองฮาร์ดแวร์และปุ่มทดสอบนักพัฒนา (HIL &amp; Demo Controls)
+                {pick(
+                  'โหมดจำลองฮาร์ดแวร์และปุ่มทดสอบนักพัฒนา (HIL & Demo Controls)',
+                  'ໂໝດຈຳລອງຮາດແວ ແລະ ປຸ່ມທົດສອບນັກພັດທະນາ (HIL & Demo Controls)',
+                  'Hardware Simulation & Developer Controls (HIL & Demo)'
+                )}
               </h3>
               <p className="text-xs text-ink-muted mt-1 max-w-2xl">
-                ปิดเป็นค่าเริ่มต้นในการขายหน้าร้านจริงเพื่อซ่อนปุ่ม HIL Bench, ปุ่มสลิปธนาคารตัวอย่าง, ปุ่มจำลองบาร์โค้ดตราชั่ง และรหัส PIN ทดสอบออกจากหน้าจอแคชเชียร์
+                {pick(
+                  'ปิดเป็นค่าเริ่มต้นในการขายหน้าร้านจริงเพื่อซ่อนปุ่ม HIL Bench, ปุ่มสลิปธนาคารตัวอย่าง, ปุ่มจำลองบาร์โค้ดตราชั่ง และรหัส PIN ทดสอบออกจากหน้าจอแคชเชียร์',
+                  'ປິດເປັນຄ່າເລີ່ມຕົ້ນໃນການຂາຍໜ້າຮ້ານຈິງ ເພື່ອຊ່ອນປຸ່ມ HIL Bench, ສະລິບທະນາຄານຕົວຢ່າງ, ປຸ່ມຈຳລອງບາໂຄດຊິງຊັ່ງ ແລະ ລະຫັດ PIN ທົດສອບອອກຈາກໜ້າຈໍແຄັດເຊຍ',
+                  'Disabled by default in live store mode to hide the HIL Bench, sample bank slips, test scale triggers, and demo PINs from cashiers'
+                )}
               </p>
             </div>
           </div>
@@ -1646,8 +1872,16 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
               onToggleSimulationMode(next);
               onToast(
                 next
-                  ? 'เปิดโหมดจำลองฮาร์ดแวร์ (HIL & Demo Controls) สำหรับทดสอบแล้ว'
-                  : 'ปิดโหมดจำลองฮาร์ดแวร์แล้ว — หน้าจออยู่ในโหมดขายหน้าร้านจริง',
+                  ? pick(
+                      'เปิดโหมดจำลองฮาร์ดแวร์ (HIL & Demo Controls) สำหรับทดสอบแล้ว',
+                      'ເປີດໂໝດຈຳລອງຮາດແວ (HIL & Demo Controls) ສຳລັບທົດສອບແລ້ວ',
+                      'Enabled Hardware Simulation & Demo Controls'
+                    )
+                  : pick(
+                      'ปิดโหมดจำลองฮาร์ดแวร์แล้ว — หน้าจออยู่ในโหมดขายหน้าร้านจริง',
+                      'ປິດໂໝດຈຳລອງຮາດແວແລ້ວ — ໜ້າຈໍຢູ່ໃນໂໝດຂາຍໜ້າຮ້ານຈິງ',
+                      'Hardware Simulation disabled — live store mode active'
+                    ),
                 next ? 'warn' : 'success'
               );
             }}
@@ -1658,8 +1892,16 @@ export const SystemSettingsWorkspace: React.FC<SystemSettingsWorkspaceProps> = (
             }`}
           >
             {simulationModeEnabled
-              ? 'กำลังเปิดโหมดจำลอง (คลิกเพื่อปิดเข้าโหมดขายจริง)'
-              : 'ปิดโหมดจำลองอยู่ (คลิกเพื่อเปิดเครื่องมือทดสอบ HIL)'}
+              ? pick(
+                  'กำลังเปิดโหมดจำลอง (คลิกเพื่อปิดเข้าโหมดขายจริง)',
+                  'ກຳລັງເປີດໂໝດຈຳລອງ (ຄລິກເພື່ອປິດເຂົ້າໂໝດຂາຍຈິງ)',
+                  'Simulation Active (Click for Live Store Mode)'
+                )
+              : pick(
+                  'ปิดโหมดจำลองอยู่ (คลิกเพื่อเปิดเครื่องมือทดสอบ HIL)',
+                  'ປິດໂໝດຈຳລອງຢູ່ (ຄລິກເພື່ອເປີດເຄື່ອງມືທົດສອບ HIL)',
+                  'Simulation Off (Click to Enable HIL Tools)'
+                )}
           </button>
         </section>
       )}

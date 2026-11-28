@@ -40,7 +40,7 @@ import {
   SCALE_MILLI,
 } from '../../../../shared-contracts/src/fixed-point.ts';
 import { posTransport } from '../api/pos-transport.ts';
-import { useI18n } from '../i18n/index.tsx';
+import { pickLocaleText, useI18n } from '../i18n/index.tsx';
 import type {
   BootstrapPayload,
   CatalogVariantDetailDto,
@@ -93,7 +93,8 @@ function resolveEffectiveScaleConfig(
   parseMoney: (raw: string) => number,
   money: (satang: number) => string,
   scalePriceEmbeddedMultiplier: number,
-  currencyCode: CurrencyCode
+  currencyCode: CurrencyCode,
+  locale: 'th' | 'lo' | 'en' = 'th'
 ): {
   barcodeValue: string;
   subLabel?: string | undefined;
@@ -116,7 +117,12 @@ function resolveEffectiveScaleConfig(
       return {
         barcodeValue: baseCode,
         priceFormatted: basePrice,
-        scaleError: 'กรุณากรอกน้ำหนักเป็นตัวเลขที่ถูกต้อง (เช่น 0.500)',
+        scaleError: pickLocaleText(
+          locale,
+          'กรุณากรอกน้ำหนักเป็นตัวเลขที่ถูกต้อง (เช่น 0.500)',
+          'ກະລຸນາປ້ອນນ້ຳໜັກເປັນຕົວເລກທີ່ຖືກຕ້ອງ (ເຊັ່ນ 0.500)',
+          'Please enter a valid weight (e.g. 0.500)'
+        ),
       };
     }
     const rawSatang = Number(
@@ -132,7 +138,12 @@ function resolveEffectiveScaleConfig(
           skuOrPlu: variant.sku,
           weightMilliKg: weightMilli,
         }),
-        subLabel: `น้ำหนัก ${(weightMilli / 1000).toFixed(3)} ${variant.unitName}`,
+        subLabel: pickLocaleText(
+          locale,
+          `น้ำหนัก ${(weightMilli / 1000).toFixed(3)} ${variant.unitName}`,
+          `ນ້ຳໜັກ ${(weightMilli / 1000).toFixed(3)} ${variant.unitName}`,
+          `Weight ${(weightMilli / 1000).toFixed(3)} ${variant.unitName}`
+        ),
         priceFormatted: formattedWeightPrice,
       };
     } catch (err) {
@@ -150,7 +161,12 @@ function resolveEffectiveScaleConfig(
     return {
       barcodeValue: baseCode,
       priceFormatted: basePrice,
-      scaleError: 'กรุณากรอกราคารวมเป็นตัวเลขที่ถูกต้อง',
+      scaleError: pickLocaleText(
+        locale,
+        'กรุณากรอกราคารวมเป็นตัวเลขที่ถูกต้อง',
+        'ກະລຸນາປ້ອນລາຄາລວມເປັນຕົວເລກທີ່ຖືກຕ້ອງ',
+        'Please enter a valid total price'
+      ),
     };
   }
   const formattedPrice = priceSatang > 0 ? money(priceSatang) : basePrice;
@@ -162,7 +178,12 @@ function resolveEffectiveScaleConfig(
         totalPriceSatang: priceSatang,
         priceEmbeddedMultiplier: scalePriceEmbeddedMultiplier,
       }),
-      subLabel: `ป้ายฝังราคา (${variant.sku})`,
+      subLabel: pickLocaleText(
+        locale,
+        `ป้ายฝังราคา (${variant.sku})`,
+        `ປ້າຍຝັງລາຄາ (${variant.sku})`,
+        `Price-Embedded (${variant.sku})`
+      ),
       priceFormatted: formattedPrice,
     };
   } catch (err) {
@@ -215,7 +236,14 @@ async function executeBarcodePrintJob(params: {
   const { config, presetId, storeName, locale, items, startSlotOffset, showCutBorders } = params;
   const totalCopies = items.reduce((sum, it) => sum + Math.max(0, it.copies), 0);
   if (totalCopies <= 0) {
-    throw new Error('กรุณากำหนดจำนวนดวงที่ต้องการพิมพ์อย่างน้อย 1 ดวง');
+    throw new Error(
+      pickLocaleText(
+        locale,
+        'กรุณากำหนดจำนวนดวงที่ต้องการพิมพ์อย่างน้อย 1 ดวง',
+        'ກະລຸນາກຳນົດຈຳນວນດວງທີ່ຕ້ອງການພິມຢ່າງໜ້ອຍ 1 ດວງ',
+        'Specify at least 1 label copy to print'
+      )
+    );
   }
 
   if (config.mode === 'A4_SHEET' || config.mode === 'THERMAL_LABEL_DIALOG') {
@@ -229,11 +257,23 @@ async function executeBarcodePrintJob(params: {
       showCutBorders,
     });
     if (!opened) {
-      throw new Error('เบราว์เซอร์บล็อกหน้าต่างป๊อปอัป กรุณาอนุญาตป๊อปอัปเพื่อพิมพ์สติกเกอร์บาร์โค้ด');
+      throw new Error(
+        pickLocaleText(
+          locale,
+          'เบราว์เซอร์บล็อกหน้าต่างป๊อปอัป กรุณาอนุญาตป๊อปอัปเพื่อพิมพ์สติกเกอร์บาร์โค้ด',
+          'ບຣາວເຊີບລັອກໜ້າຕ່າງປັອບອັບ ກະລຸນາອະນຸຍາດປັອບອັບເພື່ອພິມສະຕິກເກີບາໂຄດ',
+          'Browser blocked the print popup window — please allow popups to print barcode labels'
+        )
+      );
     }
     return {
       kind: 'BROWSER_WINDOW',
-      message: `เปิดหน้าต่างพิมพ์สติกเกอร์บาร์โค้ด ${totalCopies} ดวง (${items.length} รายการ) เรียบร้อยแล้ว`,
+      message: pickLocaleText(
+        locale,
+        `เปิดหน้าต่างพิมพ์สติกเกอร์บาร์โค้ด ${totalCopies} ดวง (${items.length} รายการ) เรียบร้อยแล้ว`,
+        `ເປີດໜ້າຕ່າງພິມສະຕິກເກີບາໂຄດ ${totalCopies} ດວງ (${items.length} ລາຍການ) ສຳເລັດແລ້ວ`,
+        `Opened print preview window for ${totalCopies} label(s) (${items.length} item(s))`
+      ),
     };
   }
 
@@ -271,8 +311,18 @@ async function executeBarcodePrintJob(params: {
   return {
     kind: 'HARDWARE',
     message: res.dispatchedToHardware
-      ? `ส่งคำสั่งพิมพ์บาร์โค้ด ${res.protocol} จำนวน ${res.totalLabelsCount} ดวง (${res.bytesWritten.toLocaleString()} bytes) ออกเครื่องพิมพ์สำเร็จ`
-      : `สร้างชุดคำสั่งพิมพ์ ${res.protocol} จำนวน ${res.totalLabelsCount} ดวง (${res.wireByteLength.toLocaleString()} bytes · โหมด ${res.transportMode}) สำเร็จ`,
+      ? pickLocaleText(
+          locale,
+          `ส่งคำสั่งพิมพ์บาร์โค้ด ${res.protocol} จำนวน ${res.totalLabelsCount} ดวง (${res.bytesWritten.toLocaleString()} bytes) ออกเครื่องพิมพ์สำเร็จ`,
+          `ສົ່ງຄຳສັ່ງພິມບາໂຄດ ${res.protocol} ຈຳນວນ ${res.totalLabelsCount} ດວງ (${res.bytesWritten.toLocaleString()} bytes) ອອກເຄື່ອງພິມສຳເລັດ`,
+          `Dispatched ${res.protocol} job for ${res.totalLabelsCount} label(s) (${res.bytesWritten.toLocaleString()} bytes) to printer`
+        )
+      : pickLocaleText(
+          locale,
+          `สร้างชุดคำสั่งพิมพ์ ${res.protocol} จำนวน ${res.totalLabelsCount} ดวง (${res.wireByteLength.toLocaleString()} bytes · โหมด ${res.transportMode}) สำเร็จ`,
+          `ສ້າງຊຸດຄຳສັ່ງພິມ ${res.protocol} ຈຳນວນ ${res.totalLabelsCount} ດວງ (${res.wireByteLength.toLocaleString()} bytes · ໂໝດ ${res.transportMode}) ສຳເລັດ`,
+          `Built ${res.protocol} print payload for ${res.totalLabelsCount} label(s) (${res.wireByteLength.toLocaleString()} bytes · ${res.transportMode})`
+        ),
   };
 }
 
@@ -698,7 +748,14 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
       });
       setConfig(saved.barcodeLabelConfig);
       await onRefreshState();
-      onToast('บันทึกการตั้งค่าเครื่องพิมพ์บาร์โค้ดและแม่แบบสติกเกอร์เรียบร้อยแล้ว', 'success');
+      onToast(
+        pick(
+          'บันทึกการตั้งค่าเครื่องพิมพ์บาร์โค้ดและแม่แบบสติกเกอร์เรียบร้อยแล้ว',
+          'ບັນທຶກການຕັ້ງຄ່າເຄື່ອງພິມບາໂຄດ ແລະ ແມ່ແບບສະຕິກເກີສຳເລັດແລ້ວ',
+          'Saved barcode label printer & template defaults'
+        ),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -708,7 +765,14 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
 
   const handlePrintBatch = async () => {
     if (resolvedPrintItems.length === 0) {
-      onToast('กรุณาเลือกสินค้าเข้าคิวพิมพ์อย่างน้อย 1 รายการ', 'warn');
+      onToast(
+        pick(
+          'กรุณาเลือกสินค้าเข้าคิวพิมพ์อย่างน้อย 1 รายการ',
+          'ກະລຸນາເລືອກສິນຄ້າເຂົ້າຄິວພິມຢ່າງໜ້ອຍ 1 ລາຍການ',
+          'Add at least 1 product to the label print queue'
+        ),
+        'warn'
+      );
       return;
     }
     setBusy(true);
@@ -782,10 +846,18 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
               <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-muted" />
               <input
                 type="text"
-                aria-label="ค้นหาสินค้าเพื่อพิมพ์บาร์โค้ด"
+                aria-label={pick(
+                  'ค้นหาสินค้าเพื่อพิมพ์บาร์โค้ด',
+                  'ຄົ້ນຫາສິນຄ້າເພື່ອພິມບາໂຄດ',
+                  'Search products for barcode labels'
+                )}
                 value={catalogFilter}
                 onChange={(e) => setCatalogFilter(e.target.value)}
-                placeholder="ค้นหาชื่อสินค้า, SKU หรือบาร์โค้ด..."
+                placeholder={pick(
+                  'ค้นหาชื่อสินค้า, SKU หรือบาร์โค้ด...',
+                  'ຄົ້ນຫາຊື່ສິນຄ້າ, SKU ຫຼື ບາໂຄດ...',
+                  'Search product name, SKU, or barcode...'
+                )}
                 className={`h-10 w-full rounded-[48px] border border-hairline bg-canvas pl-10 pr-4 text-xs text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
               />
             </div>
@@ -801,11 +873,18 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                 if (nextEntries[0]) {
                   setSelectedPreviewVariantId(nextEntries[0].variantId);
                 }
-                onToast(`เพิ่มสินค้า ${nextEntries.length} รายการลงคิวพิมพ์แล้ว`, 'success');
+                onToast(
+                  pick(
+                    `เพิ่มสินค้า ${nextEntries.length} รายการลงคิวพิมพ์แล้ว`,
+                    `ເພີ່ມສິນຄ້າ ${nextEntries.length} ລາຍການລົງຄິວພິມແລ້ວ`,
+                    `Added ${nextEntries.length} items to label queue`
+                  ),
+                  'success'
+                );
               }}
               className={`h-10 rounded-[48px] border border-hairline bg-canvas px-3.5 text-xs font-medium text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
             >
-              เลือกทั้งหมด (×1)
+              {pick('เลือกทั้งหมด (×1)', 'ເລືອກທັງໝົດ (×1)', 'Select All (×1)')}
             </button>
 
             <button
@@ -818,19 +897,30 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                     copies: Math.min(200, Math.max(1, Math.floor(v.inStockMilli / 1_000))),
                   }));
                 if (withStock.length === 0) {
-                  onToast('ไม่พบสินค้าที่มีสต็อกคงเหลือตั้งแต่ 1 ชิ้นขึ้นไป', 'warn');
+                  onToast(
+                    pick(
+                      'ไม่พบสินค้าที่มีสต็อกคงเหลือตั้งแต่ 1 ชิ้นขึ้นไป',
+                      'ບໍ່ພົບສິນຄ້າທີ່ມີສະຕັອກຄົງເຫຼືອຕັ້ງແຕ່ 1 ຊິ້ນຂຶ້ນໄປ',
+                      'No products with on-hand stock >= 1 found'
+                    ),
+                    'warn'
+                  );
                   return;
                 }
                 setQueueEntries(withStock);
                 setSelectedPreviewVariantId(withStock[0]!.variantId);
                 onToast(
-                  `เพิ่มสินค้า ${withStock.length} รายการตามจำนวนสต็อกคงเหลือลงคิวพิมพ์แล้ว`,
+                  pick(
+                    `เพิ่มสินค้า ${withStock.length} รายการตามจำนวนสต็อกคงเหลือลงคิวพิมพ์แล้ว`,
+                    `ເພີ່ມສິນຄ້າ ${withStock.length} ລາຍການຕາມຈຳນວນສະຕັອກຄົງເຫຼືອລົງຄິວແລ້ວ`,
+                    `Queued ${withStock.length} items matching stock on hand`
+                  ),
                   'success'
                 );
               }}
               className={`h-10 rounded-[48px] border border-hairline bg-canvas px-3.5 text-xs font-medium text-ink-soft hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
             >
-              ใส่ตามจำนวนสต็อก
+              {pick('ใส่ตามจำนวนสต็อก', 'ໃສ່ຕາມຈຳນວນສະຕັອກ', 'Queue by Stock')}
             </button>
 
             <button
@@ -842,7 +932,9 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                   : 'border-hairline bg-canvas text-ink-muted hover:border-primary'
               }`}
             >
-              {showAllProfiles ? 'ซ่อนต่างโหมด' : 'รวมทุกโหมด'}
+              {showAllProfiles
+                ? pick('ซ่อนต่างโหมด', 'ຊ່ອນຕ່າງໂໝດ', 'Hide Other Modes')
+                : pick('รวมทุกโหมด', 'ລວມທຸກໂໝດ', 'Show All Modes')}
             </button>
           </div>
         </div>
@@ -850,7 +942,11 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
         <div className="divide-y divide-hairline max-h-[540px] overflow-y-auto">
           {scopedCatalog.length === 0 ? (
             <div className="py-12 text-center text-xs text-ink-muted">
-              ไม่พบรายการสินค้าที่ตรงกับคำค้นหา
+              {pick(
+                'ไม่พบรายการสินค้าที่ตรงกับคำค้นหา',
+                'ບໍ່ພົບລາຍການສິນຄ້າທີ່ກົງກັບຄຳຄົ້ນຫາ',
+                'No matching catalog products found'
+              )}
             </div>
           ) : (
             scopedCatalog.map((v) => {
@@ -869,12 +965,12 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                       <span className="truncate">{v.itemName}</span>
                       {v.isWeightedScale && (
                         <span className="inline-flex items-center gap-0.5 rounded-[4px] bg-primary-soft px-1.5 py-0.5 text-[10px] font-medium text-primary-dark shrink-0">
-                          <Scale className="h-3 w-3" /> ตราชั่ง
+                          <Scale className="h-3 w-3" /> {pick('ตราชั่ง', 'ຊິງຊັ່ງ', 'Scale')}
                         </span>
                       )}
                       {queued && (
                         <span className="rounded-[48px] bg-primary px-2 py-0.5 text-[10px] font-medium text-white tabular-nums-google shrink-0">
-                          ในคิว ×{queued.copies}
+                          {pick('ในคิว', 'ໃນຄິວ', 'Queued')} ×{queued.copies}
                         </span>
                       )}
                     </div>
@@ -882,7 +978,9 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                       <span>SKU: {v.sku}</span>
                       <span>·</span>
                       <span className={v.barcode ? 'text-primary-dark font-medium' : ''}>
-                        {v.barcode ? `EAN: ${v.barcode}` : `ใช้ SKU แทน (${effectiveCode})`}
+                        {v.barcode
+                          ? `EAN: ${v.barcode}`
+                          : pick(`ใช้ SKU แทน (${effectiveCode})`, `ໃຊ້ SKU ແທນ (${effectiveCode})`, `Uses SKU (${effectiveCode})`)}
                       </span>
                       {v.priceSatang > 0 && (
                         <>
@@ -898,7 +996,11 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                       <button
                         type="button"
                         disabled={busy}
-                        title="สร้างรหัส EAN-13 ที่ถูกต้องให้อัตโนมัติ"
+                        title={pick(
+                          'สร้างรหัส EAN-13 ที่ถูกต้องให้อัตโนมัติ',
+                          'ສ້າງລະຫັດ EAN-13 ທີ່ຖືກຕ້ອງໃຫ້ອັດຕະໂນມັດ',
+                          'Auto-generate valid EAN-13 barcode'
+                        )}
                         onClick={() => void handleAssignValidEan13(v)}
                         className={`h-8 rounded-[48px] border border-hairline bg-canvas px-2.5 text-[11px] font-medium text-primary hover:border-primary ${UI_INTERACTION.focusButton}`}
                       >
@@ -908,8 +1010,8 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                     <button
                       type="button"
                       onClick={() => setSelectedPreviewVariantId(v.id)}
-                      title="ดูตัวอย่างป้ายสติกเกอร์"
-                      aria-label={`ดูตัวอย่างป้าย ${v.itemName}`}
+                      title={pick('ดูตัวอย่างป้ายสติกเกอร์', 'ເບິ່ງຕົວຢ່າງປ້າຍສະຕິກເກີ', 'Preview label')}
+                      aria-label={pick(`ดูตัวอย่างป้าย ${v.itemName}`, `ເບິ່ງຕົວຢ່າງປ້າຍ ${v.itemName}`, `Preview label for ${v.itemName}`)}
                       className={`flex h-8 w-8 items-center justify-center rounded-full border border-hairline bg-canvas text-ink-muted hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
                     >
                       <Eye className="h-3.5 w-3.5" />
@@ -920,7 +1022,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                       className={`inline-flex h-8 items-center gap-1 rounded-[48px] bg-primary px-3 text-[11px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                     >
                       <Plus className="h-3.5 w-3.5" />
-                      <span>เพิ่ม</span>
+                      <span>{pick('เพิ่ม', 'ເພີ່ມ', 'Add')}</span>
                     </button>
                   </div>
                 </div>
@@ -946,7 +1048,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
               <p className="text-[11px] text-ink-muted">
                 {previewItem
                   ? `${previewItem.itemName} (${previewItem.barcodeValue})`
-                  : 'เลือกสินค้าทางด้านซ้ายเพื่อดูตัวอย่าง'}
+                  : pick('เลือกสินค้าทางด้านซ้ายเพื่อดูตัวอย่าง', 'ເລືອກສິນຄ້າດ້ານຊ້າຍເພື່ອເບິ່ງຕົວຢ່າງ', 'Select a product on the left to preview')}
               </p>
             </div>
             <div className="inline-flex rounded-[48px] border border-hairline p-0.5 text-xs">
@@ -959,7 +1061,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                     : 'text-ink-muted hover:text-ink'
                 }`}
               >
-                เวกเตอร์ (A4/PDF)
+                {pick('เวกเตอร์ (A4/PDF)', 'ເວກເຕີ (A4/PDF)', 'Vector (A4/PDF)')}
               </button>
               <button
                 type="button"
@@ -986,7 +1088,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
               />
             ) : (
               <div className="py-8 text-center text-xs text-ink-muted">
-                ยังไม่มีสินค้าในระบบ
+                {pick('ยังไม่มีสินค้าในระบบ', 'ຍັງບໍ່ມີສິນຄ້າໃນລະບົບ', 'No products in catalog yet')}
               </div>
             )}
           </div>
@@ -1009,7 +1111,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                 onClick={() => setQueueEntries([])}
                 className={`rounded-[48px] border border-hairline bg-canvas px-3 py-1 text-[11px] font-medium text-ink-muted hover:border-ink hover:text-ink ${UI_INTERACTION.focusButton}`}
               >
-                ล้างคิวทั้งหมด
+                {pick('ล้างคิวทั้งหมด', 'ລ້າງຄິວທັງໝົດ', 'Clear Queue')}
               </button>
             )}
           </div>
@@ -1017,7 +1119,11 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
           <div className="divide-y divide-hairline max-h-56 overflow-y-auto">
             {resolvedPrintItems.length === 0 ? (
               <div className="py-8 text-center text-xs text-ink-muted">
-                ยังไม่มีสินค้าในคิวพิมพ์ — กดปุ่ม &ldquo;+ เพิ่ม&rdquo; จากตารางสินค้าทางซ้าย
+                {pick(
+                  'ยังไม่มีสินค้าในคิวพิมพ์ — กดปุ่ม "+ เพิ่ม" จากตารางสินค้าทางซ้าย',
+                  'ຍັງບໍ່ມີສິນຄ້າໃນຄິວພິມ — ກົດປຸ່ມ "+ ເພີ່ມ" ຈາກຕາຕະລາງສິນຄ້າທາງຊ້າຍ',
+                  'Queue is empty — click "+ Add" from the catalog table on the left'
+                )}
               </div>
             ) : (
               resolvedPrintItems.map((it) => (
@@ -1037,12 +1143,14 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="text-[11px] text-ink-muted">จำนวนดวง:</span>
+                    <span className="text-[11px] text-ink-muted">
+                      {pick('จำนวนดวง:', 'ຈຳນວນດວງ:', 'Qty:')}
+                    </span>
                     <input
                       type="number"
                       min={1}
                       max={500}
-                      aria-label={`จำนวนดวงบาร์โค้ดของ ${it.itemName}`}
+                      aria-label={pick(`จำนวนดวงบาร์โค้ดของ ${it.itemName}`, `ຈຳນວນດວງບາໂຄດຂອງ ${it.itemName}`, `Label copies for ${it.itemName}`)}
                       value={it.copies}
                       onChange={(e) => {
                         const val = Math.max(1, Math.min(500, Math.trunc(Number(e.target.value) || 1)));
@@ -1056,7 +1164,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                     />
                     <button
                       type="button"
-                      aria-label={`นำ ${it.itemName} ออกจากคิวพิมพ์`}
+                      aria-label={pick(`นำ ${it.itemName} ออกจากคิวพิมพ์`, `ນຳ ${it.itemName} ອອກຈາກຄິວພິມ`, `Remove ${it.itemName} from queue`)}
                       onClick={() =>
                         setQueueEntries((prev) => prev.filter((q) => q.variantId !== it.variantId))
                       }
@@ -1075,7 +1183,11 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
         <div className="rounded-[4px] border border-hairline bg-canvas p-5 space-y-4 text-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h4 className="font-google-display text-sm font-medium text-ink">
-              3. ตั้งค่าเครื่องพิมพ์ ขนาดสติกเกอร์ &amp; ข้อมูลบนป้าย
+              {pick(
+                '3. ตั้งค่าเครื่องพิมพ์ ขนาดสติกเกอร์ & ข้อมูลบนป้าย',
+                '3. ຕັ້ງຄ່າເຄື່ອງພິມ, ຂະໜາດສະຕິກເກີ & ຂໍ້ມູນເທິງປ້າຍ',
+                '3. Printer Target, Label Size & Content'
+              )}
             </h4>
             <button
               type="button"
@@ -1084,14 +1196,14 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
               className={`inline-flex h-8 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 text-[11px] font-medium text-primary hover:border-primary ${UI_INTERACTION.focusButton}`}
             >
               <Save className="h-3.5 w-3.5" />
-              <span>บันทึกเป็นค่าเริ่มต้น</span>
+              <span>{pick('บันทึกเป็นค่าเริ่มต้น', 'ບັນທຶກເປັນຄ່າເລີ່ມຕົ້ນ', 'Save as Default')}</span>
             </button>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label htmlFor={`${uid}-lbl-mode`} className="block text-ink-muted mb-1">
-                รูปแบบเครื่องพิมพ์ปลายทาง
+                {pick('รูปแบบเครื่องพิมพ์ปลายทาง', 'ຮູບແບບເຄື່ອງພິມປາຍທາງ', 'Target Printer Mode')}
               </label>
               <select
                 id={`${uid}-lbl-mode`}
@@ -1099,19 +1211,33 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                 onChange={(e) => handleTargetModeChange(e.target.value as BarcodeLabelTargetMode)}
                 className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-2.5 text-ink ${UI_INTERACTION.focusSelect}`}
               >
-                <option value="A4_SHEET">กระดาษสติกเกอร์ A4 (Print Dialog / Laser / Inkjet)</option>
-                <option value="THERMAL_LABEL_DIALOG">สติกเกอร์ม้วนความร้อน (Windows Print Dialog)</option>
-                <option value="TSPL_RAW_USB">เครื่องพิมพ์บาร์โค้ด TSPL USB (Xprinter / TSC / Gprinter)</option>
-                <option value="TSPL_LAN_9100">เครื่องพิมพ์บาร์โค้ด TSPL LAN (TCP Port 9100)</option>
-                <option value="ZPL_RAW_USB">เครื่องพิมพ์บาร์โค้ด ZPL USB (Zebra)</option>
-                <option value="ZPL_LAN_9100">เครื่องพิมพ์บาร์โค้ด ZPL LAN (TCP Port 9100)</option>
-                <option value="ESCPOS_RECEIPT_PRINTER">พิมพ์ผ่านเครื่องพิมพ์ใบเสร็จ 80mm / 58mm</option>
+                <option value="A4_SHEET">
+                  {pick('กระดาษสติกเกอร์ A4 (Print Dialog / Laser / Inkjet)', 'ກະດາດສະຕິກເກີ A4 (Print Dialog / Laser / Inkjet)', 'A4 Sticker Sheet (Print Dialog / Laser / Inkjet)')}
+                </option>
+                <option value="THERMAL_LABEL_DIALOG">
+                  {pick('สติกเกอร์ม้วนความร้อน (Windows Print Dialog)', 'ສະຕິກເກີມ້ວນຄວາມຮ້ອນ (Windows Print Dialog)', 'Thermal Roll Label (Windows Print Dialog)')}
+                </option>
+                <option value="TSPL_RAW_USB">
+                  {pick('เครื่องพิมพ์บาร์โค้ด TSPL USB (Xprinter / TSC / Gprinter)', 'ເຄື່ອງພິມບາໂຄດ TSPL USB (Xprinter / TSC / Gprinter)', 'TSPL USB Label Printer (Xprinter / TSC / Gprinter)')}
+                </option>
+                <option value="TSPL_LAN_9100">
+                  {pick('เครื่องพิมพ์บาร์โค้ด TSPL LAN (TCP Port 9100)', 'ເຄື່ອງພິມບາໂຄດ TSPL LAN (TCP Port 9100)', 'TSPL LAN Label Printer (TCP Port 9100)')}
+                </option>
+                <option value="ZPL_RAW_USB">
+                  {pick('เครื่องพิมพ์บาร์โค้ด ZPL USB (Zebra)', 'ເຄື່ອງພິມບາໂຄດ ZPL USB (Zebra)', 'ZPL USB Label Printer (Zebra)')}
+                </option>
+                <option value="ZPL_LAN_9100">
+                  {pick('เครื่องพิมพ์บาร์โค้ด ZPL LAN (TCP Port 9100)', 'ເຄື່ອງພິມບາໂຄດ ZPL LAN (TCP Port 9100)', 'ZPL LAN Label Printer (TCP Port 9100)')}
+                </option>
+                <option value="ESCPOS_RECEIPT_PRINTER">
+                  {pick('พิมพ์ผ่านเครื่องพิมพ์ใบเสร็จ 80mm / 58mm', 'ພິມຜ່ານເຄື່ອງພິມໃບບິນ 80mm / 58mm', 'Thermal Receipt Printer (80mm / 58mm)')}
+                </option>
               </select>
             </div>
 
             <div>
               <label htmlFor={`${uid}-lbl-preset`} className="block text-ink-muted mb-1">
-                ขนาดดวงสติกเกอร์ / แผ่น
+                {pick('ขนาดดวงสติกเกอร์ / แผ่น', 'ຂະໜາດດວງສະຕິກເກີ / ແຜ່ນ', 'Sticker / Sheet Preset')}
               </label>
               <select
                 id={`${uid}-lbl-preset`}
@@ -1136,7 +1262,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
 
             <div>
               <label htmlFor={`${uid}-lbl-sym`} className="block text-ink-muted mb-1">
-                มาตรฐานรหัสบาร์โค้ด
+                {pick('มาตรฐานรหัสบาร์โค้ด', 'ມາດຕະຖານລະຫັດບາໂຄດ', 'Barcode Symbology')}
               </label>
               <select
                 id={`${uid}-lbl-sym`}
@@ -1152,18 +1278,18 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                 }
                 className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-2.5 text-ink ${UI_INTERACTION.focusSelect}`}
               >
-                <option value="AUTO">อัตโนมัติ (EAN-13 / EAN-8 / Code 128)</option>
-                <option value="CODE_128">Code 128 (รองรับตัวอักษร SKU + ตัวเลข)</option>
-                <option value="EAN_13">EAN-13 (ตัวเลข 13 หลักมาตรฐานสากล)</option>
-                <option value="EAN_8">EAN-8 (ตัวเลข 8 หลักขนาดเล็ก)</option>
-                <option value="QR_CODE">QR Code สินค้า (สแกนเร็วแม้ป้ายเล็ก)</option>
+                <option value="AUTO">{pick('อัตโนมัติ (EAN-13 / EAN-8 / Code 128)', 'ອັດຕະໂນມັດ (EAN-13 / EAN-8 / Code 128)', 'Auto (EAN-13 / EAN-8 / Code 128)')}</option>
+                <option value="CODE_128">{pick('Code 128 (รองรับตัวอักษร SKU + ตัวเลข)', 'Code 128 (ຮອງຮັບຕົວອັກສອນ SKU + ຕົວເລກ)', 'Code 128 (Alphanumeric SKU & digits)')}</option>
+                <option value="EAN_13">{pick('EAN-13 (ตัวเลข 13 หลักมาตรฐานสากล)', 'EAN-13 (ຕົວເລກ 13 ຫຼັກມາດຕະຖານສາກົນ)', 'EAN-13 (13-digit retail standard)')}</option>
+                <option value="EAN_8">{pick('EAN-8 (ตัวเลข 8 หลักขนาดเล็ก)', 'EAN-8 (ຕົວເລກ 8 ຫຼັກຂະໜາດນ້ອຍ)', 'EAN-8 (Compact 8-digit)')}</option>
+                <option value="QR_CODE">{pick('QR Code สินค้า (สแกนเร็วแม้ป้ายเล็ก)', 'QR Code ສິນຄ້າ (ສະແກນໄວແມ້ປ້າຍນ້ອຍ)', 'Product QR Code (fast tiny-label scan)')}</option>
               </select>
             </div>
 
             {(config.mode === 'TSPL_RAW_USB' || config.mode === 'ZPL_RAW_USB') && (
               <div>
                 <label htmlFor={`${uid}-lbl-winprn`} className="block text-ink-muted mb-1">
-                  เลือกเครื่องพิมพ์บาร์โค้ด USB ใน Windows
+                  {pick('เลือกเครื่องพิมพ์บาร์โค้ด USB ใน Windows', 'ເລືອກເຄື່ອງພິມບາໂຄດ USB ໃນ Windows', 'Select Windows USB Label Printer')}
                 </label>
                 {winPrinters.length > 0 ? (
                   <select
@@ -1174,7 +1300,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                     }
                     className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-2.5 text-ink ${UI_INTERACTION.focusSelect}`}
                   >
-                    <option value="">-- เลือกเครื่องพิมพ์ USB --</option>
+                    <option value="">{pick('-- เลือกเครื่องพิมพ์ USB --', '-- ເລືອກເຄື່ອງພິມ USB --', '-- Select USB Printer --')}</option>
                     {winPrinters.map((p) => (
                       <option key={p.name} value={p.name}>
                         {p.name} ({p.portName})
@@ -1185,7 +1311,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                   <input
                     id={`${uid}-lbl-winprn`}
                     type="text"
-                    placeholder="เช่น Xprinter XP-365B"
+                    placeholder={pick('เช่น Xprinter XP-365B', 'ເຊັ່ນ Xprinter XP-365B', 'e.g. Xprinter XP-365B')}
                     value={config.windowsPrinterName}
                     onChange={(e) =>
                       setConfig((prev) => ({ ...prev, windowsPrinterName: e.target.value }))
@@ -1200,7 +1326,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
               <>
                 <div>
                   <label htmlFor={`${uid}-lbl-host`} className="block text-ink-muted mb-1">
-                    IP เครื่องพิมพ์บาร์โค้ด LAN
+                    {pick('IP เครื่องพิมพ์บาร์โค้ด LAN', 'IP ເຄື່ອງພິມບາໂຄດ LAN', 'LAN Label Printer IP')}
                   </label>
                   <input
                     id={`${uid}-lbl-host`}
@@ -1214,7 +1340,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                 </div>
                 <div>
                   <label htmlFor={`${uid}-lbl-port`} className="block text-ink-muted mb-1">
-                    พอร์ต TCP
+                    {pick('พอร์ต TCP', 'ພອດ TCP', 'TCP Port')}
                   </label>
                   <input
                     id={`${uid}-lbl-port`}
@@ -1235,7 +1361,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
             {(config.mode === 'TSPL_RAW_USB' || config.mode === 'TSPL_LAN_9100') && (
               <div>
                 <label htmlFor={`${uid}-lbl-gap`} className="block text-ink-muted mb-1">
-                  ระยะช่องว่างระหว่างสติกเกอร์ (Gap มม.)
+                  {pick('ระยะช่องว่างระหว่างสติกเกอร์ (Gap มม.)', 'ໄລຍະຊ່ອງວ່າງລະຫວ່າງສະຕິກເກີ (Gap ມມ.)', 'Label Gap Spacing (mm)')}
                 </label>
                 <input
                   id={`${uid}-lbl-gap`}
@@ -1257,7 +1383,11 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
             {activePreset.kind === 'A4_SHEET' && (
               <div>
                 <label htmlFor={`${uid}-lbl-skip`} className="block text-ink-muted mb-1">
-                  เว้นช่องที่ใช้แล้วบนแผ่นแรก (0–{maxSlotsPerPage - 1} ช่อง)
+                  {pick(
+                    `เว้นช่องที่ใช้แล้วบนแผ่นแรก (0–${maxSlotsPerPage - 1} ช่อง)`,
+                    `ເວັ້ນຊ່ອງທີ່ໃຊ້ແລ້ວເທິງແຜ່ນທຳອິດ (0–${maxSlotsPerPage - 1} ຊ່ອງ)`,
+                    `Skip Used Slots on First Sheet (0–${maxSlotsPerPage - 1})`
+                  )}
                 </label>
                 <input
                   id={`${uid}-lbl-skip`}
@@ -1280,13 +1410,13 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-hairline">
             {(
               [
-                ['showStoreName', 'ชื่อร้าน'],
-                ['showItemName', 'ชื่อสินค้า'],
-                ['showVariantName', 'ชื่อตัวเลือก'],
-                ['showPrice', 'ราคาขาย'],
-                ['showUnit', 'หน่วยนับ'],
-                ['showSku', 'รหัส SKU'],
-                ['showBarcodeText', 'ตัวเลขบาร์โค้ด'],
+                ['showStoreName', pick('ชื่อร้าน', 'ຊື່ຮ້ານ', 'Store Name')],
+                ['showItemName', pick('ชื่อสินค้า', 'ຊື່ສິນຄ້າ', 'Item Name')],
+                ['showVariantName', pick('ชื่อตัวเลือก', 'ຊື່ຕົວເລືອກ', 'Variant')],
+                ['showPrice', pick('ราคาขาย', 'ລາຄາຂາຍ', 'Price')],
+                ['showUnit', pick('หน่วยนับ', 'ໜ່ວຍນັບ', 'Unit')],
+                ['showSku', pick('รหัส SKU', 'ລະຫັດ SKU', 'SKU')],
+                ['showBarcodeText', pick('ตัวเลขบาร์โค้ด', 'ຕົວເລກບາໂຄດ', 'Barcode Digits')],
               ] as const
             ).map(([field, label]) => (
               <label
@@ -1316,7 +1446,7 @@ export const BarcodeLabelPrintWorkspace: React.FC<BarcodeLabelPrintWorkspaceProp
                   onChange={(e) => setShowCutBorders(e.target.checked)}
                   className="accent-primary"
                 />
-                <span className="text-[11px] text-ink">เส้นประตัดขอบ</span>
+                <span className="text-[11px] text-ink">{pick('เส้นประตัดขอบ', 'ເສັ້ນປັບຕັດຂອບ', 'Cut Guides')}</span>
               </label>
             )}
           </div>
@@ -1436,11 +1566,13 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
       parseMoney,
       money,
       fiscal.scalePriceEmbeddedMultiplier,
-      currencyCode
+      currencyCode,
+      locale
     );
   }, [
     currencyCode,
     fiscal.scalePriceEmbeddedMultiplier,
+    locale,
     money,
     parseMoney,
     scaleMode,
@@ -1530,16 +1662,19 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
           </div>
           <div className="min-w-0">
             <h3 id={`${uid}-qbp-title`} className="font-google-display text-[18px] font-normal text-ink truncate">
-              พิมพ์สติกเกอร์บาร์โค้ด: {variant.itemName}
+              {pick('พิมพ์สติกเกอร์บาร์โค้ด:', 'ພິມສະຕິກເກີບາໂຄດ:', 'Print Barcode Labels:')} {variant.itemName}
             </h3>
             <p className="text-[11px] text-ink-muted tabular-nums-google">
-              SKU: {variant.sku} · {variant.barcode ? `Barcode: ${variant.barcode}` : 'ยังไม่มีบาร์โค้ด (ใช้ SKU แทนได้)'}
+              SKU: {variant.sku} ·{' '}
+              {variant.barcode
+                ? `Barcode: ${variant.barcode}`
+                : pick('ยังไม่มีบาร์โค้ด (ใช้ SKU แทนได้)', 'ຍັງບໍ່ມີບາໂຄດ (ໃຊ້ SKU ແທນໄດ້)', 'No barcode yet (using SKU)')}
             </p>
           </div>
         </div>
         <button
           type="button"
-          aria-label="ปิดหน้าต่างพิมพ์บาร์โค้ด"
+          aria-label={pick('ปิดหน้าต่างพิมพ์บาร์โค้ด', 'ປິດໜ້າຕ່າງພິມບາໂຄດ', 'Close barcode print modal')}
           onClick={onClose}
           className={`flex h-9 w-9 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink shrink-0 ${UI_INTERACTION.focusButton}`}
         >
@@ -1551,7 +1686,9 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
         {/* Live Preview */}
         <div className="rounded-[4px] border border-hairline bg-surface-1 p-4 space-y-3">
           <div className="flex items-center justify-between">
-            <span className="font-medium text-ink">ตัวอย่างป้ายสติกเกอร์</span>
+            <span className="font-medium text-ink">
+              {pick('ตัวอย่างป้ายสติกเกอร์', 'ຕົວຢ່າງປ້າຍສະຕິກເກີ', 'Label Preview')}
+            </span>
             <div className="inline-flex rounded-[48px] border border-hairline bg-canvas p-0.5 text-[11px]">
               <button
                 type="button"
@@ -1586,7 +1723,11 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
         {!variant.barcode && !variant.isWeightedScale && (
           <div className="rounded-[4px] border border-primary/30 bg-primary-soft/60 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
             <span className="text-ink-soft">
-              สินค้านี้ยังไม่มีเลขบาร์โค้ด EAN-13 (สามารถพิมพ์ Code 128 จาก SKU หรือสร้าง EAN-13 ถาวรได้)
+              {pick(
+                'สินค้านี้ยังไม่มีเลขบาร์โค้ด EAN-13 (สามารถพิมพ์ Code 128 จาก SKU หรือสร้าง EAN-13 ถาวรได้)',
+                'ສິນຄ້ານີ້ຍັງບໍ່ມີເລກບາໂຄດ EAN-13 (ສາມາດພິມ Code 128 ຈາກ SKU ຫຼື ສ້າງ EAN-13 ຖາວອນໄດ້)',
+                'No EAN-13 barcode assigned yet (print Code 128 from SKU or generate permanent EAN-13)'
+              )}
             </span>
             <button
               type="button"
@@ -1595,7 +1736,7 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
               className={`inline-flex h-8 items-center gap-1 rounded-[48px] bg-primary px-3 text-[11px] font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
               <RefreshCw className="h-3 w-3" />
-              <span>สร้าง &amp; บันทึก EAN-13</span>
+              <span>{pick('สร้าง & บันทึก EAN-13', 'ສ້າງ & ບັນທຶກ EAN-13', 'Generate & Save EAN-13')}</span>
             </button>
           </div>
         )}
@@ -1604,45 +1745,53 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
           <div className="rounded-[4px] border border-hairline bg-surface-1 p-3.5 space-y-2.5">
             <div className="font-medium text-ink flex items-center gap-1.5">
               <Scale className="h-4 w-4 text-primary" />
-              <span>ป้ายบาร์โค้ดสินค้าชั่งน้ำหนัก (Scale EAN-13)</span>
+              <span>
+                {pick(
+                  'ป้ายบาร์โค้ดสินค้าชั่งน้ำหนัก (Scale EAN-13)',
+                  'ປ້າຍບາໂຄດສິນຄ້າຊັ່ງນ້ຳໜັກ (Scale EAN-13)',
+                  'Weighted Scale Label (Scale EAN-13)'
+                )}
+              </span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <select
-                aria-label="รูปแบบบาร์โค้ดสินค้าชั่งน้ำหนัก"
+                aria-label={pick('รูปแบบบาร์โค้ดสินค้าชั่งน้ำหนัก', 'ຮູບແບບບາໂຄດສິນຄ້າຊັ່ງນ້ຳໜັກ', 'Weighted scale barcode mode')}
                 value={scaleMode}
                 onChange={(e) =>
                   setScaleMode(e.target.value as 'STANDARD' | 'SCALE_WEIGHT' | 'SCALE_PRICE')
                 }
                 className={`h-10 rounded-[4px] border border-hairline bg-canvas px-2.5 text-ink ${UI_INTERACTION.focusSelect}`}
               >
-                <option value="SCALE_WEIGHT">ฝังน้ำหนัก (Prefix 20)</option>
-                <option value="SCALE_PRICE">ฝังราคารวม (Prefix 25)</option>
-                <option value="STANDARD">บาร์โค้ด/SKU ปกติ</option>
+                <option value="SCALE_WEIGHT">{pick('ฝังน้ำหนัก (Prefix 20)', 'ຝັງນ້ຳໜັກ (Prefix 20)', 'Embedded Weight (Prefix 20)')}</option>
+                <option value="SCALE_PRICE">{pick('ฝังราคารวม (Prefix 25)', 'ຝັງລາຄາລວມ (Prefix 25)', 'Embedded Price (Prefix 25)')}</option>
+                <option value="STANDARD">{pick('บาร์โค้ด/SKU ปกติ', 'ບາໂຄດ/SKU ປົກກະຕິ', 'Standard Barcode / SKU')}</option>
               </select>
               {scaleMode === 'SCALE_WEIGHT' && (
                 <input
                   type="text"
-                  aria-label="น้ำหนัก (กิโลกรัม)"
+                  aria-label={pick('น้ำหนัก (กิโลกรัม)', 'ນ້ຳໜັກ (ກິໂລກຣາມ)', 'Weight (kg)')}
                   value={scaleWeightInput}
                   onChange={(e) => setScaleWeightInput(e.target.value)}
-                  placeholder="น้ำหนัก เช่น 0.500"
+                  placeholder={pick('น้ำหนัก เช่น 0.500', 'ນ້ຳໜັກ ເຊັ່ນ 0.500', 'Weight e.g. 0.500')}
                   className={`sm:col-span-2 h-10 rounded-[4px] border border-hairline bg-canvas px-3 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               )}
               {scaleMode === 'SCALE_PRICE' && (
                 <input
                   type="text"
-                  aria-label="ราคารวมบนป้าย"
+                  aria-label={pick('ราคารวมบนป้าย', 'ລາຄາລວມເທິງປ້າຍ', 'Total embedded price')}
                   value={scalePriceInput}
                   onChange={(e) => setScalePriceInput(e.target.value)}
-                  placeholder="ราคารวม เช่น 90.00"
+                  placeholder={pick('ราคารวม เช่น 90.00', 'ລາຄາລວມ ເຊັ່ນ 90.00', 'Total price e.g. 90.00')}
                   className={`sm:col-span-2 h-10 rounded-[4px] border border-hairline bg-canvas px-3 text-ink tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               )}
             </div>
             {scaleResolved?.scaleError && (
               <div className="rounded-[4px] border border-ink bg-surface-1 px-3 py-2 text-[11px] text-ink">
-                <strong className="font-medium">คำเตือนรหัสตราชั่ง EAN-13 (จำกัด 5 หลัก):</strong>{' '}
+                <strong className="font-medium">
+                  {pick('คำเตือนรหัสตราชั่ง EAN-13 (จำกัด 5 หลัก):', 'ຄຳເຕືອນລະຫັດຊິງຊັ່ງ EAN-13 (ຈຳກັດ 5 ຫຼັກ):', 'Scale EAN-13 Limit (5-digit):')}
+                </strong>{' '}
                 {scaleResolved.scaleError}
               </div>
             )}
@@ -1652,7 +1801,7 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
             <label htmlFor={`${uid}-qbp-copies`} className="block text-ink-muted mb-1">
-              จำนวนสติกเกอร์ (ดวง)
+              {pick('จำนวนสติกเกอร์ (ดวง)', 'ຈຳນວນສະຕິກເກີ (ດວງ)', 'Label Copies')}
             </label>
             <input
               id={`${uid}-qbp-copies`}
@@ -1667,7 +1816,7 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
 
           <div>
             <label htmlFor={`${uid}-qbp-mode`} className="block text-ink-muted mb-1">
-              เครื่องพิมพ์
+              {pick('เครื่องพิมพ์', 'ເຄື່ອງພິມ', 'Printer')}
             </label>
             <select
               id={`${uid}-qbp-mode`}
@@ -1681,19 +1830,21 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
               }}
               className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-2.5 text-ink ${UI_INTERACTION.focusSelect}`}
             >
-              <option value="A4_SHEET">กระดาษ A4 สติกเกอร์</option>
+              <option value="A4_SHEET">{pick('กระดาษ A4 สติกเกอร์', 'ກະດາດ A4 ສະຕິກເກີ', 'A4 Sticker Sheet')}</option>
               <option value="THERMAL_LABEL_DIALOG">Thermal Dialog</option>
               <option value="TSPL_RAW_USB">TSPL USB (Xprinter/TSC)</option>
               <option value="TSPL_LAN_9100">TSPL LAN :9100</option>
               <option value="ZPL_RAW_USB">ZPL USB (Zebra)</option>
               <option value="ZPL_LAN_9100">ZPL LAN :9100</option>
-              <option value="ESCPOS_RECEIPT_PRINTER">เครื่องพิมพ์ใบเสร็จ 80/58mm</option>
+              <option value="ESCPOS_RECEIPT_PRINTER">
+                {pick('เครื่องพิมพ์ใบเสร็จ 80/58mm', 'ເຄື່ອງພິມໃບບິນ 80/58mm', 'Receipt Printer 80/58mm')}
+              </option>
             </select>
           </div>
 
           <div>
             <label htmlFor={`${uid}-qbp-preset`} className="block text-ink-muted mb-1">
-              ขนาดป้าย
+              {pick('ขนาดป้าย', 'ຂະໜາດປ້າຍ', 'Label Size')}
             </label>
             <select
               id={`${uid}-qbp-preset`}
@@ -1726,7 +1877,7 @@ export const QuickBarcodePrintModal: React.FC<QuickBarcodePrintModalProps> = ({
                   : 'border-hairline bg-surface-1 text-ink-soft hover:border-primary'
               }`}
             >
-              ×{n} ดวง
+              ×{n} {pick('ดวง', 'ດວງ', 'labels')}
             </button>
           ))}
         </div>

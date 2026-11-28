@@ -167,7 +167,11 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
               playKitchenServiceBellChime();
             }
             onToast(
-              `มีออเดอร์ใหม่เข้าสถานี: ${relevantToStation.map((t) => t.queueNumber).join(', ')}`,
+              pick(
+                `มีออเดอร์ใหม่เข้าสถานี: ${relevantToStation.map((t) => t.queueNumber).join(', ')}`,
+                `ມີອໍເດີ້ໃໝ່ເຂົ້າສະຖານີ: ${relevantToStation.map((t) => t.queueNumber).join(', ')}`,
+                `New order(s) arrived: ${relevantToStation.map((t) => t.queueNumber).join(', ')}`
+              ),
               'success'
             );
           }
@@ -181,7 +185,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
         if (!silent && reqSeq === pollSeqRef.current) setLoading(false);
       }
     },
-    [includeServed, onToast, outletId, soundEnabled, stationFilter]
+    [includeServed, onToast, outletId, pick, soundEnabled, stationFilter]
   );
 
   const reloadTicketsRef = useRef(reloadTickets);
@@ -235,7 +239,11 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
       await reloadTickets(includeServed, true);
       await onRefreshBootstrap();
       onToast(
-        `อัปเดตออเดอร์ ${ticket.queueNumber} (#SEQ ${ticket.sequenceId}) → ${newStatus}`,
+        pick(
+          `อัปเดตออเดอร์ ${ticket.queueNumber} (#SEQ ${ticket.sequenceId}) → ${newStatus}`,
+          `ອັບເດດອໍເດີ້ ${ticket.queueNumber} (#SEQ ${ticket.sequenceId}) → ${newStatus}`,
+          `Updated order ${ticket.queueNumber} (#SEQ ${ticket.sequenceId}) -> ${newStatus}`
+        ),
         'success'
       );
     } catch (err) {
@@ -282,30 +290,44 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
               )}
             </div>
             <h1 className="font-google-display text-[28px] sm:text-[36px] font-normal leading-[36px] sm:leading-[44px] tracking-[-0.25px] text-white">
-              หน้าจอรับออเดอร์ครัวและบาร์น้ำ
+              {pick(
+                'หน้าจอรับออเดอร์ครัวและบาร์น้ำ',
+                'ໜ້າຈໍຮັບອໍເດີ້ຄົວ ແລະ ບານ້ຳ',
+                'Kitchen & Bar Display System (KDS)'
+              )}
             </h1>
             <p className="text-sm text-white/75">
-              ดึงคิวออเดอร์ใหม่อัตโนมัติทุก 2.5 วินาที พร้อมเสียงกระดิ่งเตือนทันทีเมื่อแคชเชียร์ปิดบิล
+              {pick(
+                'ดึงคิวออเดอร์ใหม่อัตโนมัติทุก 2.5 วินาที พร้อมเสียงกระดิ่งเตือนทันทีเมื่อแคชเชียร์ปิดบิล',
+                'ດຶງຄິວອໍເດີ້ໃໝ່ອັດຕະໂນມັດທຸກ 2.5 ວິນາທີ ພ້ອມສຽງກະດິ່ງເຕືອນທັນທີເມື່ອແຄັດເຊຍປິດບິນ',
+                'Auto-polls new queue tickets every 2.5s with instant service bell chime on checkout'
+              )}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-6">
             <div>
-              <div className="text-xs text-white/70">รอเข้าคิว (Queued)</div>
+              <div className="text-xs text-white/70">
+                {pick('รอเข้าคิว (Queued)', 'ລໍຖ້າຄິວ (Queued)', 'Queued')}
+              </div>
               <div className="font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-white tabular-nums-google">
                 {queuedCount}
               </div>
             </div>
             <div className="h-10 w-[1px] bg-white/20" />
             <div>
-              <div className="text-xs text-white/70">กำลังทำ (Preparing)</div>
+              <div className="text-xs text-white/70">
+                {pick('กำลังทำ (Preparing)', 'ກຳລັງເຮັດ (Preparing)', 'Preparing')}
+              </div>
               <div className="font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-primary tabular-nums-google">
                 {preparingCount}
               </div>
             </div>
             <div className="h-10 w-[1px] bg-white/20" />
             <div>
-              <div className="text-xs text-white/70">พร้อมเสิร์ฟ (Ready)</div>
+              <div className="text-xs text-white/70">
+                {pick('พร้อมเสิร์ฟ (Ready)', 'ພ້ອມເສີບ (Ready)', 'Ready')}
+              </div>
               <div className="font-google-display text-[36px] font-normal leading-[44px] tracking-[-0.25px] text-white tabular-nums-google">
                 {readyCount}
               </div>
@@ -318,7 +340,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
           <div
             className="flex items-center gap-1 overflow-x-auto"
             role="tablist"
-            aria-label="สถานีครัว"
+            aria-label={pick('สถานีครัว', 'ສະຖານີຄົວ', 'Kitchen Stations')}
           >
             {['ALL', 'BAR', 'MAIN', 'PREP'].map((st) => {
               const active = stationFilter === st;
@@ -333,7 +355,11 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                     active ? 'text-ink' : 'text-ink-muted hover:text-ink'
                   }`}
                 >
-                  <span>{st === 'ALL' ? 'ทุกสถานี (All)' : `สถานี ${st}`}</span>
+                  <span>
+                    {st === 'ALL'
+                      ? pick('ทุกสถานี (All)', 'ທຸກສະຖານີ (All)', 'All Stations')
+                      : pick(`สถานี ${st}`, `ສະຖານີ ${st}`, `Station ${st}`)}
+                  </span>
                   {active && (
                     <span className="absolute bottom-0 left-0 right-0 h-[4px] bg-primary" />
                   )}
@@ -359,7 +385,11 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
               ) : (
                 <BellOff className="h-3.5 w-3.5 shrink-0" />
               )}
-              <span>{soundEnabled ? 'เสียงกระดิ่ง: เปิด' : 'เสียงกระดิ่ง: ปิด'}</span>
+              <span>
+                {soundEnabled
+                  ? pick('เสียงกระดิ่ง: เปิด', 'ສຽງກະດິ່ງ: ເປີດ', 'Bell Sound: On')
+                  : pick('เสียงกระดิ่ง: ปิด', 'ສຽງກະດິ່ງ: ປິດ', 'Bell Sound: Muted')}
+              </span>
             </button>
 
             <button
@@ -374,7 +404,11 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
               }`}
             >
               <Radio className={`h-3.5 w-3.5 ${autoSyncEnabled ? 'text-primary' : ''}`} />
-              <span>{autoSyncEnabled ? 'ซิงค์อัตโนมัติ 2.5 วิ' : 'พักซิงค์อัตโนมัติ'}</span>
+              <span>
+                {autoSyncEnabled
+                  ? pick('ซิงค์อัตโนมัติ 2.5 วิ', 'ຊິງຄ໌ອັດຕະໂນມັດ 2.5 ວິ', 'Auto-Sync 2.5s')
+                  : pick('พักซิงค์อัตโนมัติ', 'ພັກຊິງຄ໌ອັດຕະໂນມັດ', 'Auto-Sync Paused')}
+              </span>
             </button>
 
             <label className="flex h-10 items-center gap-2 rounded-[48px] border border-hairline bg-canvas px-4 text-xs font-medium text-ink-soft hover:border-primary transition-colors duration-200 cursor-pointer focus-within:ring-2 focus-within:ring-primary/25">
@@ -387,7 +421,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                 }}
                 className="accent-primary focus-visible:ring-2 focus-visible:ring-primary"
               />
-              แสดงที่เสิร์ฟแล้ว
+              {pick('แสดงที่เสิร์ฟแล้ว', 'ສະແດງທີ່ເສີບແລ້ວ', 'Show Served')}
             </label>
 
             <button
@@ -396,7 +430,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
               className={`flex h-10 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium tracking-[0.25px] text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
             >
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-              <span>รีเฟรช</span>
+              <span>{pick('รีเฟรช', 'ໂຫຼດຄືນໃໝ່', 'Refresh')}</span>
             </button>
           </div>
         </div>
@@ -409,10 +443,14 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
             <Sparkles className="h-6 w-6" />
           </div>
           <p className="font-google-display text-[20px] font-normal text-ink">
-            ไม่มีออเดอร์ค้างในครัวขณะนี้
+            {pick('ไม่มีออเดอร์ค้างในครัวขณะนี้', 'ບໍ່ມີອໍເດີ້ຄ້າງໃນຄົວຂະນະນີ້', 'No active kitchen orders')}
           </p>
           <p className="text-sm text-ink-muted mt-1">
-            หน้าจอกำลังรอรับออเดอร์ใหม่อัตโนมัติ — เมื่อแคชเชียร์ปิดบิลจะมีเสียงกระดิ่งแจ้งเตือนทันที
+            {pick(
+              'หน้าจอกำลังรอรับออเดอร์ใหม่อัตโนมัติ — เมื่อแคชเชียร์ปิดบิลจะมีเสียงกระดิ่งแจ้งเตือนทันที',
+              'ໜ້າຈໍກຳລັງລໍຮັບອໍເດີ້ໃໝ່ອັດຕະໂນມັດ — ເມື່ອແຄັດເຊຍປິດບິນຈະມີສຽງກະດິ່ງແຈ້ງເຕືອນທັນທີ',
+              'Listening for new tickets automatically — service bell will chime when orders arrive'
+            )}
           </p>
         </div>
       ) : (
@@ -463,7 +501,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                         </span>
                         {isBrandNew && (
                           <span className="rounded-[48px] bg-primary px-2 py-0.5 text-[10px] font-medium text-white">
-                            เข้าใหม่
+                            {pick('เข้าใหม่', 'ເຂົ້າໃໝ່', 'New')}
                           </span>
                         )}
                       </div>
@@ -472,7 +510,8 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                           isActivePreparing ? 'text-white/75' : 'text-ink-muted'
                         }`}
                       >
-                        สถานี: <span className="font-medium">{ticket.station}</span>
+                        {pick('สถานี:', 'ສະຖານີ:', 'Station:')}{' '}
+                        <span className="font-medium">{ticket.station}</span>
                       </div>
                     </div>
 
@@ -535,7 +574,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                       className={`flex h-[48px] w-full items-center justify-center gap-2 rounded-[48px] border border-primary bg-canvas px-5 font-google-display text-sm font-medium tracking-[0.5px] text-primary hover:bg-primary-soft hover:text-primary-dark ${UI_INTERACTION.focusButtonPrimary}`}
                     >
                       <Flame className="h-4 w-4" />
-                      <span>เริ่มทำออเดอร์ (Prepare)</span>
+                      <span>{pick('เริ่มทำออเดอร์ (Prepare)', 'ເລີ່ມເຮັດອໍເດີ້ (Prepare)', 'Start Preparing')}</span>
                     </button>
                   )}
                   {ticket.status === 'PREPARING' && (
@@ -546,7 +585,7 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                       className={`flex h-[48px] w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-5 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                     >
                       <CheckCircle2 className="h-4 w-4" />
-                      <span>ทำเสร็จพร้อมเสิร์ฟ (Ready)</span>
+                      <span>{pick('ทำเสร็จพร้อมเสิร์ฟ (Ready)', 'ເຮັດສຳເລັດພ້ອມເສີບ (Ready)', 'Mark Ready')}</span>
                     </button>
                   )}
                   {ticket.status === 'READY' && (
@@ -557,12 +596,12 @@ export const KdsWorkspace: React.FC<KdsWorkspaceProps> = ({
                       className={`flex h-[48px] w-full items-center justify-center gap-2 rounded-[48px] bg-ink px-5 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-hero ${UI_INTERACTION.focusButtonPrimary}`}
                     >
                       <CheckCircle2 className="h-4 w-4" />
-                      <span>ส่งมอบลูกค้าแล้ว (Served)</span>
+                      <span>{pick('ส่งมอบลูกค้าแล้ว (Served)', 'ສົ່ງມອບລູກຄ້າແລ້ວ (Served)', 'Mark Served')}</span>
                     </button>
                   )}
                   {ticket.status === 'SERVED' && (
                     <div className="text-center py-2 text-xs font-medium text-ink-muted">
-                      ส่งมอบลูกค้าเรียบร้อยแล้ว
+                      {pick('ส่งมอบลูกค้าเรียบร้อยแล้ว', 'ສົ່ງມອບລູກຄ້າຮຽບຮ້ອຍແລ້ວ', 'Served to customer')}
                     </div>
                   )}
                 </div>

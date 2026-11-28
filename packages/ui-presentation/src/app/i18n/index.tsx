@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useMemo } from 'react';
 import {
   DEFAULT_TH_FISCAL_CONFIG,
   type CountryCode,
@@ -23,7 +23,7 @@ export interface I18nContextValue {
   receiptLocale: LocaleCode;
   vatRatePercentLabel: string;
   t: (key: UiStringKey) => string;
-  pick: (thText: string, loText: string, enText?: string) => string;
+  pick: (thText: string, loText: string, enText: string) => string;
   money: (minorSatang: number) => string;
   moneyPlain: (minorSatang: number) => string;
   moneyInput: (minorSatang: number) => string;
@@ -41,7 +41,7 @@ const defaultValue: I18nContextValue = {
   receiptLocale: 'th',
   vatRatePercentLabel: '7',
   t: (key) => translateKey(key, 'th'),
-  pick: (thText) => thText,
+  pick: (thText, _loText, _enText) => thText,
   money: (s) => formatMoney(s, 'THB'),
   moneyPlain: (s) => formatMinorAmountPlain(s, 'THB'),
   moneyInput: (s) => formatMinorAmountForInput(s, 'THB'),
@@ -58,6 +58,15 @@ export const I18nProvider: React.FC<{
   onChangeLocale?: ((locale: LocaleCode) => Promise<void> | void) | undefined;
   children: React.ReactNode;
 }> = ({ fiscalConfig, overrideLocale, onChangeLocale, children }) => {
+  const effectiveLocale = overrideLocale ?? (fiscalConfig ?? DEFAULT_TH_FISCAL_CONFIG).uiLocale;
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.lang = effectiveLocale;
+      document.title = translateKey('app.windowTitle', effectiveLocale);
+    }
+  }, [effectiveLocale]);
+
   const value = useMemo<I18nContextValue>(() => {
     const fiscal = fiscalConfig ?? DEFAULT_TH_FISCAL_CONFIG;
     const locale = overrideLocale ?? fiscal.uiLocale;

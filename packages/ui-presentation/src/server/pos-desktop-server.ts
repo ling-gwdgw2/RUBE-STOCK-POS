@@ -15,6 +15,7 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { localizeServerMessage, resolveRequestLocale } from './server-error-i18n.ts';
 import { KeystoreEnvelopeManager } from '../../../core-engine/src/runtime/keystore-envelope.ts';
 import {
   DEV_SQLCIPHER_RAW_HEX_KEY_64,
@@ -720,89 +721,61 @@ export class RubePosInteractiveAppServer {
     }
   }
 
-  private getHeldBillsForOutlet(outletId = 'OUTLET-HQ'): Array<Record<string, unknown>> {
-    try {
-      const cfgKey = `held_bills_${outletId}`;
-      const row = this.engine.executeRead((db) => {
-        return db
-          .prepare(`SELECT value FROM store_config WHERE key = ?`)
-          .get(cfgKey) as { value?: string } | undefined;
-      });
-      if (row?.value) {
-        const parsed = JSON.parse(row.value) as unknown;
-        if (Array.isArray(parsed)) {
-          return parsed as Array<Record<string, unknown>>;
-        }
+  private getHeldBillsForOutlet(outletId = 'OUTLET-HQ') {
+    return this.ipc.listHeldBills(outletId);
+  }
+
+  private resolveManagerOverrideApprover(
+    req: http.IncomingMessage,
+    sessionUser: StaffUserDto | null,
+    deniedMessage: string
+  ): { enforced: boolean; approver: StaffUserDto | null } {
+    const overrideHeader = req.headers['x-rube-override-token'];
+    const overrideToken = Array.isArray(overrideHeader)
+      ? overrideHeader[0]
+      : overrideHeader;
+    if (overrideToken && overrideToken.trim()) {
+      const approver = this.verifyAuthToken(overrideToken.trim(), 'OVERRIDE');
+      if (approver.role !== 'OWNER' && approver.role !== 'MANAGER') {
+        throw new Error(
+          'HTTP 403 Forbidden: ต้องใช้รหัสอนุมัติของ MANAGER หรือ OWNER เท่านั้น'
+        );
       }
-    } catch {
-      // ignore fallback
+      return { enforced: true, approver };
     }
-    return [];
-  }
-
-  private parseHeldBillsJson(raw: string | undefined): Array<Record<string, unknown>> {
-    if (!raw) return [];
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      return Array.isArray(parsed) ? (parsed as Array<Record<string, unknown>>) : [];
-    } catch {
-      return [];
+    if (sessionUser?.role === 'OWNER' || sessionUser?.role === 'MANAGER') {
+      return { enforced: true, approver: sessionUser };
     }
+    if (!this.enforceApiSessionAuth && sessionUser === null) {
+      return { enforced: false, approver: null };
+    }
+    throw new Error(deniedMessage);
   }
 
-  private async upsertHeldBillForOutlet(
-    outletId: string,
-    bill: Record<string, unknown>,
-    actorUserId = 'USR-CASHIER-01'
-  ): Promise<Array<Record<string, unknown>>> {
-    const cfgKey = `held_bills_${outletId}`;
-    return this.engine.executeWriteImmediate((db) => {
-      const existingRow = db
-        .prepare(`SELECT value FROM store_config WHERE key = ?`)
-        .get(cfgKey) as { value?: string } | undefined;
-      const list = this.parseHeldBillsJson(existingRow?.value);
-      const rawId =
-        typeof bill.id === 'string'
-          ? bill.id.trim()
-          : bill.id !== undefined && bill.id !== null
-            ? String(bill.id).trim()
-            : '';
-      const billId = rawId || `HOLD-${Date.now()}-${randomBytes(3).toString('hex')}`;
-      const cleanBill = { ...bill, id: billId, outletId };
-      const filtered = list.filter((item) => String(item.id) !== billId);
-      const next = [cleanBill, ...filtered].slice(0, 100);
-      db.prepare(
-        `INSERT INTO store_config (key, value, is_protected, updated_by)
-         VALUES (?, ?, 0, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
-      ).run(cfgKey, JSON.stringify(next), actorUserId);
-      return next;
-    });
-  }
-
-  private async deleteHeldBillForOutlet(
-    outletId: string,
-    billId: string,
-    actorUserId = 'USR-CASHIER-01',
-    requireExisted = false
-  ): Promise<Array<Record<string, unknown>>> {
-    const cfgKey = `held_bills_${outletId}`;
-    return this.engine.executeWriteImmediate((db) => {
-      const existingRow = db
-        .prepare(`SELECT value FROM store_config WHERE key = ?`)
-        .get(cfgKey) as { value?: string } | undefined;
-      const list = this.parseHeldBillsJson(existingRow?.value);
-      const next = list.filter((item) => String(item.id) !== billId);
-      if (requireExisted && next.length === list.length) {
-        throw new Error('HTTP 409 บิลพักนี้ถูกเรียกใช้งานจากเครื่องอื่นไปแล้ว');
+  private resolveOptionalOverrideApprover(
+    req: http.IncomingMessage,
+    sessionUser: StaffUserDto | null
+  ): { managerUserId?: string | undefined } {
+    const overrideHeader = req.headers['x-rube-override-token'];
+    const overrideToken = Array.isArray(overrideHeader)
+      ? overrideHeader[0]
+      : overrideHeader;
+    if (overrideToken && overrideToken.trim()) {
+      const approver = this.verifyAuthToken(overrideToken.trim(), 'OVERRIDE');
+      if (approver.role !== 'OWNER' && approver.role !== 'MANAGER') {
+        throw new Error(
+          'HTTP 403 Forbidden: ต้องใช้รหัสอนุมัติของ MANAGER หรือ OWNER เท่านั้น'
+        );
       }
-      db.prepare(
-        `INSERT INTO store_config (key, value, is_protected, updated_by)
-         VALUES (?, ?, 0, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
-      ).run(cfgKey, JSON.stringify(next), actorUserId);
-      return next;
-    });
+      return { managerUserId: approver.id };
+    }
+    if (sessionUser?.role === 'OWNER' || sessionUser?.role === 'MANAGER') {
+      return { managerUserId: sessionUser.id };
+    }
+    if (!this.enforceApiSessionAuth && sessionUser === null) {
+      return {};
+    }
+    return {};
   }
 
   private getProductImagesMap(): Record<string, string> {
@@ -1328,7 +1301,8 @@ export class RubePosInteractiveAppServer {
         : Math.max(0, baseLinePriceSatang + modifiersTotalSatang);
       subtotalSatang += lineTotalSatang;
       const modsJoined = mods.map((m) => m.name).join(', ');
-      const defaultUnit = fiscal.countryCode === 'LA' ? 'ອັນ' : 'ชิ้น';
+      const defaultUnit =
+        fiscal.receiptLocale === 'en' ? 'pcs' : fiscal.countryCode === 'LA' ? 'ອັນ' : 'ชิ้น';
       return {
         itemName: line.itemName ?? line.variantId,
         quantityFormatted: formatMilliUnitsToQtyString(
@@ -1503,9 +1477,19 @@ export class RubePosInteractiveAppServer {
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       res.setHeader(
         'Access-Control-Allow-Headers',
-        'Content-Type, Authorization, X-Rube-Override-Token'
+        'Content-Type, Authorization, X-Rube-Override-Token, X-Rube-Locale'
       );
     }
+  }
+
+  private getSafeRequestLocale(req?: http.IncomingMessage): 'th' | 'lo' | 'en' {
+    let fallback: 'th' | 'lo' | 'en' = 'th';
+    try {
+      fallback = this.ipc.getFiscalConfig().uiLocale;
+    } catch {
+      fallback = 'th';
+    }
+    return resolveRequestLocale(req, fallback);
   }
 
   private sendJson(res: http.ServerResponse, statusCode: number, payload: unknown): void {
@@ -2392,6 +2376,7 @@ export class RubePosInteractiveAppServer {
             ? Number(body.overrideAmountSatang)
             : totals.totalSatang;
 
+        const reqLocale = this.getSafeRequestLocale(req);
         const modal =
           fiscal.countryCode === 'LA'
             ? buildTwoPhaseLaoSlipConfirmationModal(
@@ -2399,7 +2384,7 @@ export class RubePosInteractiveAppServer {
                 String(body.senderBankCode ?? 'BCEL'),
                 expectedSatang,
                 this.usedSlipHashes,
-                fiscal.uiLocale
+                reqLocale
               )
             : buildTwoPhaseSlipConfirmationModal(
                 String(body.miniQrRaw ?? ''),
@@ -2424,12 +2409,10 @@ export class RubePosInteractiveAppServer {
 
         const isDuplicate = modal.verification.isDuplicate || isDuplicateInDb;
         const valid = modal.canProceedToStep2Confirm && !isDuplicateInDb;
-        const dupMsg =
-          fiscal.uiLocale === 'lo'
-            ? 'ກວດພົບການໃຊ້ສະລິບໂອນເງິນຊ້ຳ! (Duplicate Slip Fraud Alert)'
-            : fiscal.uiLocale === 'en'
-              ? 'Duplicate transfer slip detected! (Duplicate Slip Fraud Alert)'
-              : 'ตรวจพบการใช้สลิปโอนเงินซ้ำ! (Duplicate Slip Fraud Alert)';
+        const dupMsg = localizeServerMessage(
+          'ตรวจพบการใช้สลิปโอนเงินซ้ำ! (Duplicate Slip Fraud Alert)',
+          reqLocale
+        );
         const errorMessageThai = isDuplicateInDb ? dupMsg : modal.verification.errorReason;
 
         this.sendJson(res, 200, {
@@ -2441,7 +2424,10 @@ export class RubePosInteractiveAppServer {
                   : fiscal.countryCode === 'LA'
                     ? 'INVALID_LAO_SLIP'
                     : 'INVALID_BOT_QR',
-                errorMessageThai: errorMessageThai ?? 'ข้อมูลสลิปไม่ถูกต้อง',
+                errorMessageThai: localizeServerMessage(
+                  errorMessageThai ?? 'ข้อมูลสลิปไม่ถูกต้อง',
+                  reqLocale
+                ),
               }
             : {}),
           bankCode: modal.senderBankCode,
@@ -2473,6 +2459,8 @@ export class RubePosInteractiveAppServer {
           discountSatang?: number;
           paperWidthPx?: 384 | 576;
           skipKdsEnqueue?: boolean;
+          heldBillId?: string;
+          expectedHeldBillVersion?: number;
           lines: Array<{
             variantId: string;
             itemName?: string;
@@ -2547,6 +2535,10 @@ export class RubePosInteractiveAppServer {
             : {}),
           ...(hasSplit ? { splitPayments: body.splitPayments } : {}),
           ...(body.skipKdsEnqueue ? { skipKdsEnqueue: true } : {}),
+          ...(body.heldBillId?.trim() ? { heldBillId: body.heldBillId.trim() } : {}),
+          ...(body.expectedHeldBillVersion !== undefined
+            ? { expectedHeldBillVersion: Number(body.expectedHeldBillVersion) }
+            : {}),
           lines: checkoutLines,
         });
 
@@ -2555,11 +2547,13 @@ export class RubePosInteractiveAppServer {
         }
 
         // Automatically settle table QR orders/service calls and revoke active Table QR session when that table settles its bill
-        if (body.tableOrQueueNo && body.tableOrQueueNo.trim()) {
+        const settledTableLabel =
+          body.tableOrQueueNo?.trim() || order.settledHeldBillTableLabel?.trim() || '';
+        if (settledTableLabel) {
           await this.ipc
             .settleTableQrOrdersAndSessions({
               outletId,
-              tableLabel: body.tableOrQueueNo.trim(),
+              tableLabel: settledTableLabel,
               actorUserId: sessionUser?.id ?? body.cashierId ?? 'USR-CASHIER-01',
             })
             .catch(() => {});
@@ -2679,35 +2673,149 @@ export class RubePosInteractiveAppServer {
         const body = await this.readJsonBody<{
           outletId?: string;
           actorUserId?: string;
+          claimToken?: string;
+          keepClaim?: boolean;
+          voidReason?: string;
           bill: Record<string, unknown>;
         }>(req);
         const outletId = body.outletId ?? 'OUTLET-HQ';
-        const heldBills = await this.upsertHeldBillForOutlet(
+        const { managerUserId } = this.resolveOptionalOverrideApprover(req, sessionUser);
+        const heldBills = await this.ipc.upsertHeldBill({
           outletId,
-          body.bill ?? {},
-          sessionUser?.id ?? body.actorUserId ?? 'USR-CASHIER-01'
-        );
+          actorUserId: sessionUser?.id ?? body.actorUserId ?? 'USR-CASHIER-01',
+          bill: body.bill ?? {},
+          ...(body.claimToken ? { claimToken: body.claimToken } : {}),
+          ...(body.keepClaim ? { keepClaim: true } : {}),
+          ...(managerUserId ? { authorizedByManagerId: managerUserId } : {}),
+          ...(body.voidReason ? { voidReason: body.voidReason } : {}),
+        });
         this.sendJson(res, 200, { ok: true, heldBills });
         return;
       }
 
-      if (method === 'DELETE' && url.pathname === '/api/pos/held-bills') {
+      if (method === 'POST' && url.pathname === '/api/pos/held-bills/claim') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+        const body = await this.readJsonBody<{
+          outletId?: string;
+          id: string;
+          claimToken?: string;
+          claimedByUserId?: string;
+          claimedByName?: string;
+          forceTakeover?: boolean;
+        }>(req);
+        const outletId = body.outletId ?? 'OUTLET-HQ';
+        const claimed = await this.ipc.claimHeldBill({
+          outletId,
+          id: String(body.id ?? ''),
+          ...(body.claimToken ? { claimToken: body.claimToken } : {}),
+          claimedByUserId: sessionUser?.id ?? body.claimedByUserId ?? 'USR-CASHIER-01',
+          claimedByName: sessionUser?.displayName ?? body.claimedByName ?? 'Cashier',
+          forceTakeover: body.forceTakeover === true,
+        });
+        this.sendJson(res, 200, {
+          ok: true,
+          heldBill: claimed.heldBill,
+          heldBills: claimed.heldBills,
+        });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/pos/held-bills/release') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+        const body = await this.readJsonBody<{
+          outletId?: string;
+          id: string;
+          claimToken?: string;
+          force?: boolean;
+        }>(req);
+        const outletId = body.outletId ?? 'OUTLET-HQ';
+        const heldBills = await this.ipc.releaseHeldBillClaim({
+          outletId,
+          id: String(body.id ?? ''),
+          ...(body.claimToken ? { claimToken: body.claimToken } : {}),
+          ...(sessionUser?.id ? { actorUserId: sessionUser.id } : {}),
+          force: body.force === true,
+        });
+        this.sendJson(res, 200, { ok: true, heldBills });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/pos/held-bills/void-item') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+        const body = await this.readJsonBody<{
+          outletId?: string;
+          id: string;
+          expectedVersion?: number;
+          targetCartKey: string;
+          nextQuantityMilli: number;
+          voidReason?: string;
+          voidedByUserId?: string;
+        }>(req);
+        const outletId = body.outletId ?? 'OUTLET-HQ';
+        const { approver } = this.resolveManagerOverrideApprover(
+          req,
+          sessionUser,
+          'HTTP 403 Forbidden: สิทธิ์ CASHIER ต้องให้ MANAGER หรือ OWNER กดรหัส PIN อนุมัติลบ/ลดรายการในบิลพัก'
+        );
+        const reasonText = String(body.voidReason ?? '').trim();
+        if (reasonText.length < 2) {
+          throw new Error('HTTP 400 กรุณาระบุเหตุผลการลดหรือยกเลิกรายการในบิลพัก');
+        }
+        const effectiveActorId = approver?.id ?? sessionUser?.id ?? body.voidedByUserId ?? 'USR-OWNER-01';
+        const resVoid = await this.ipc.voidHeldBillItem({
+          outletId,
+          id: String(body.id ?? ''),
+          ...(body.expectedVersion !== undefined
+            ? { expectedVersion: Number(body.expectedVersion) }
+            : {}),
+          targetCartKey: String(body.targetCartKey ?? ''),
+          nextQuantityMilli: Number(body.nextQuantityMilli ?? 0),
+          voidedByUserId: effectiveActorId,
+          voidReason: reasonText,
+        });
+        this.sendJson(res, 200, { ok: true, ...resVoid });
+        return;
+      }
+
+      if (
+        (method === 'DELETE' && url.pathname === '/api/pos/held-bills') ||
+        (method === 'POST' && url.pathname === '/api/pos/held-bills/void')
+      ) {
         await this.ensureSeededIfAppropriate();
         this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
         const body = await this.readJsonBody<{
           outletId?: string;
           actorUserId?: string;
           id: string;
-          recall?: boolean;
+          voidReason?: string;
         }>(req);
         const outletId = body.outletId ?? 'OUTLET-HQ';
-        const heldBills = await this.deleteHeldBillForOutlet(
-          outletId,
-          String(body.id ?? ''),
-          sessionUser?.id ?? body.actorUserId ?? 'USR-CASHIER-01',
-          body.recall === true
+        const { enforced, approver } = this.resolveManagerOverrideApprover(
+          req,
+          sessionUser,
+          'HTTP 403 Forbidden: สิทธิ์ CASHIER ต้องให้ MANAGER หรือ OWNER กดรหัส PIN อนุมัติยกเลิกบิลพัก'
         );
-        this.sendJson(res, 200, { ok: true, heldBills });
+        const rawReason = String(body.voidReason ?? '').trim();
+        if (enforced && rawReason.length < 2) {
+          throw new Error('HTTP 400 กรุณาระบุเหตุผลการยกเลิกบิลพัก');
+        }
+        const effectiveVoidedById =
+          approver?.id ?? sessionUser?.id ?? body.actorUserId ?? 'USR-OWNER-01';
+        const voidRes = await this.ipc.voidHeldBill({
+          outletId,
+          id: String(body.id ?? ''),
+          voidedByUserId: effectiveVoidedById,
+          voidReason: rawReason || 'Voided via POS API',
+        });
+        this.sendJson(res, 200, {
+          ok: true,
+          heldBills: voidRes.heldBills,
+          voidedBillId: voidRes.voidedBillId,
+          cancelledKdsOrderIds: voidRes.cancelledKdsOrderIds,
+        });
         return;
       }
 
@@ -2817,30 +2925,13 @@ export class RubePosInteractiveAppServer {
           voidReason?: string;
         }>(req);
 
-        let effectiveVoidedByUserId =
-          sessionUser?.id ?? body.voidedByUserId ?? 'USR-OWNER-01';
-        const overrideHeader = req.headers['x-rube-override-token'];
-        const overrideToken = Array.isArray(overrideHeader)
-          ? overrideHeader[0]
-          : overrideHeader;
-
-        if (overrideToken && overrideToken.trim()) {
-          const approver = this.verifyAuthToken(overrideToken.trim(), 'OVERRIDE');
-          if (approver.role !== 'OWNER' && approver.role !== 'MANAGER') {
-            throw new Error(
-              'HTTP 403 Forbidden: ต้องใช้รหัสอนุมัติของ MANAGER หรือ OWNER สำหรับยกเลิกบิล'
-            );
-          }
-          effectiveVoidedByUserId = approver.id;
-        } else if (
-          (this.enforceApiSessionAuth || sessionUser !== null) &&
-          sessionUser?.role !== 'OWNER' &&
-          sessionUser?.role !== 'MANAGER'
-        ) {
-          throw new Error(
-            'HTTP 403 Forbidden: สิทธิ์ CASHIER ต้องให้ MANAGER หรือ OWNER กดรหัส PIN อนุมัติยกเลิกบิล'
-          );
-        }
+        const { approver } = this.resolveManagerOverrideApprover(
+          req,
+          sessionUser,
+          'HTTP 403 Forbidden: สิทธิ์ CASHIER ต้องให้ MANAGER หรือ OWNER กดรหัส PIN อนุมัติยกเลิกบิล'
+        );
+        const effectiveVoidedByUserId =
+          approver?.id ?? sessionUser?.id ?? body.voidedByUserId ?? 'USR-OWNER-01';
 
         const voidRes = await this.ipc.voidSalesOrder({
           salesOrderId: String(body.salesOrderId),
@@ -3586,10 +3677,13 @@ export class RubePosInteractiveAppServer {
         this.requireRole(sessionUser, ['OWNER', 'MANAGER']);
         const label = `MANUAL-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(Date.now()).slice(-4)}`;
         const backupRes = await this.executeResilientBackupForLabel(label);
+        const reqLocale = this.getSafeRequestLocale(req);
         this.sendJson(res, 200, {
           ok: true,
           usbBackup: backupRes.usbBackup,
-          ...(backupRes.backupWarningThai ? { backupWarningThai: backupRes.backupWarningThai } : {}),
+          ...(backupRes.backupWarningThai
+            ? { backupWarningThai: localizeServerMessage(backupRes.backupWarningThai, reqLocale) }
+            : {}),
           usbBackupConfig: this.getUsbBackupConfigStatus(),
           usbBackups: this.listUsbBackupFiles(),
         });
@@ -3678,12 +3772,15 @@ export class RubePosInteractiveAppServer {
           `rube_backup_SHF-LIVE-YANKED-${Date.now()}.db.enc.part`
         );
         fs.writeFileSync(corruptPartPath, 'CORRUPT_BYTES_FROM_YANKED_USB_FLASH_DRIVE_SIMULATION');
+        const reqLocale = this.getSafeRequestLocale(req);
         this.sendJson(res, 200, {
           ok: true,
           corruptFilename: path.basename(corruptPartPath),
           usbBackups: this.listUsbBackupFiles(),
-          message:
+          message: localizeServerMessage(
             'จำลองการดึงแฟลชไดรฟ์ USB ออกกลางคันสำเร็จ (ทิ้งไฟล์ .part ชำรุดไว้ในไดเรกทอรีสำรองข้อมูล)',
+            reqLocale
+          ),
         });
         return;
       }
@@ -3722,6 +3819,7 @@ export class RubePosInteractiveAppServer {
         });
         const zReport = this.reportsController.getShiftZReportView(activeShift.id);
         const backupRes = await this.executeResilientBackupForLabel(closedShift.shiftNumber);
+        const reqLocale = this.getSafeRequestLocale(req);
         if (body.reopenNextShift !== false) {
           await this.ensureActiveShiftOpen(outletId);
         }
@@ -3729,7 +3827,9 @@ export class RubePosInteractiveAppServer {
           closedShift,
           zReport: this.formatZReportForUi(zReport),
           usbBackup: backupRes.usbBackup,
-          ...(backupRes.backupWarningThai ? { backupWarningThai: backupRes.backupWarningThai } : {}),
+          ...(backupRes.backupWarningThai
+            ? { backupWarningThai: localizeServerMessage(backupRes.backupWarningThai, reqLocale) }
+            : {}),
           usbBackupConfig: this.getUsbBackupConfigStatus(),
           usbBackups: this.listUsbBackupFiles(),
         });
@@ -4152,7 +4252,8 @@ export class RubePosInteractiveAppServer {
                     : message.includes('429')
                       ? 429
                       : 400;
-      this.sendJson(res, statusCode, { error: message });
+      const reqLocale = this.getSafeRequestLocale(req);
+      this.sendJson(res, statusCode, { error: localizeServerMessage(message, reqLocale) });
     }
   }
 

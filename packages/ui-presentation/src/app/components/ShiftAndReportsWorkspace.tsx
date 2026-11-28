@@ -242,7 +242,10 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
       });
       await onRefreshState();
       await loadReports();
-      onToast('เปิดกะแคชเชียร์ใหม่เรียบร้อยแล้ว', 'success');
+      onToast(
+        pick('เปิดกะแคชเชียร์ใหม่เรียบร้อยแล้ว', 'ເປີດກະແຄັດເຊຍໃໝ່ຮຽບຮ້ອຍແລ້ວ', 'New cashier shift opened'),
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -344,7 +347,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
   const requestBlindDropClose = () => {
     if (parsedCountedSatang === null) {
       onToast(
-        'กรุณาระบุยอดเงินสดในลิ้นชักที่นับได้จริง หรือกรอกจำนวนธนบัตร/เหรียญก่อนปิดกะ',
+        pick(
+          'กรุณาระบุยอดเงินสดในลิ้นชักที่นับได้จริง หรือกรอกจำนวนธนบัตร/เหรียญก่อนปิดกะ',
+          'ກະລຸນາລະບຸຍອດເງິນສົດໃນລິ້ນຊັກທີ່ນັບໄດ້ຈິງ ຫຼື ປ້ອນຈຳນວນທະນະບັດກ່ອນປິດກະ',
+          'Please enter the physical cash drawer count before closing shift'
+        ),
         'warn'
       );
       return;
@@ -357,7 +364,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
     setBusy(true);
     try {
       const composedNotes = denomBreakdownSummary.hasAnyEntry
-        ? `${closeNotes.trim()} [นับจริง: ${denomBreakdownSummary.summaryText}]`
+        ? `${closeNotes.trim()} [${pick('นับจริง:', 'ນັບຈິງ:', 'Counted:')} ${denomBreakdownSummary.summaryText}]`
         : closeNotes.trim();
       const res = await posTransport.closeShiftAndBackup({
         outletId,
@@ -373,7 +380,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
       await loadReports(res.closedShift.id);
       setReportTab('Z_REPORT');
       onToast(
-        `ปิดกะ ${res.closedShift.shiftNumber} & สำรองข้อมูลเข้ารหัสลง USB (${res.usbBackup.retainedBackupsCount}/14 กะ) สำเร็จ`,
+        pick(
+          `ปิดกะ ${res.closedShift.shiftNumber} & สำรองข้อมูลเข้ารหัสลง USB (${res.usbBackup.retainedBackupsCount}/14 กะ) สำเร็จ`,
+          `ປິດກະ ${res.closedShift.shiftNumber} & ສຳຮອງຂໍ້ມູນເຂົ້າລະຫັດລົງ USB (${res.usbBackup.retainedBackupsCount}/14 ກະ) ສຳເລັດ`,
+          `Closed shift ${res.closedShift.shiftNumber} & backed up to USB (${res.usbBackup.retainedBackupsCount}/14 shifts)`
+        ),
         'success'
       );
       if (res.backupWarningThai) {
@@ -510,16 +521,31 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
       await onRefreshState();
       if (hwRes.hardwareOutcome.errorMessage) {
         onToast(
-          `ส่งพิมพ์ใบ Z-Report (${z.shiftNumber}) ไปยังเครื่องพิมพ์ไม่สำเร็จ: ${hwRes.hardwareOutcome.errorMessage}`,
+          pick(
+            `ส่งพิมพ์ใบ Z-Report (${z.shiftNumber}) ไปยังเครื่องพิมพ์ไม่สำเร็จ: ${hwRes.hardwareOutcome.errorMessage}`,
+            `ສົ່ງພິມໃບ Z-Report (${z.shiftNumber}) ໄປຍັງເຄື່ອງພິມບໍ່ສຳເລັດ: ${hwRes.hardwareOutcome.errorMessage}`,
+            `Failed to print Z-Report (${z.shiftNumber}): ${hwRes.hardwareOutcome.errorMessage}`
+          ),
           'error'
         );
       } else if (hwRes.spoolResult.status !== 'PRINTED_IMMEDIATELY') {
         onToast(
-          `เครื่องพิมพ์ยังไม่พร้อม — เก็บใบ Z-Report (${z.shiftNumber}) เข้าคิว Spooler (${hwRes.spoolResult.pendingQueueLength} ใบ) แล้ว`,
+          pick(
+            `เครื่องพิมพ์ยังไม่พร้อม — เก็บใบ Z-Report (${z.shiftNumber}) เข้าคิว Spooler (${hwRes.spoolResult.pendingQueueLength} ใบ) แล้ว`,
+            `ເຄື່ອງພິມຍັງບໍ່ພ້ອມ — ເກັບໃບ Z-Report (${z.shiftNumber}) ເຂົ້າຄິວ Spooler (${hwRes.spoolResult.pendingQueueLength} ໃບ) ແລ້ວ`,
+            `Printer not ready — queued Z-Report (${z.shiftNumber}) in spooler (${hwRes.spoolResult.pendingQueueLength} pending)`
+          ),
           'warn'
         );
       } else {
-        onToast(`สร้างและส่งพิมพ์ใบสรุปปิดกะ Z-Report (${z.shiftNumber}) สำเร็จ`, 'success');
+        onToast(
+          pick(
+            `สร้างและส่งพิมพ์ใบสรุปปิดกะ Z-Report (${z.shiftNumber}) สำเร็จ`,
+            `ສ້າງ ແລະ ສົ່ງພິມໃບສະຫຼຸບປິດກະ Z-Report (${z.shiftNumber}) ສຳເລັດ`,
+            `Generated & printed thermal Z-Report (${z.shiftNumber})`
+          ),
+          'success'
+        );
       }
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
@@ -572,7 +598,9 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
     downloadUtf8BomCsv(
       `${isLaos ? 'LAO_TaxRIS_VAT' : 'ABB_SalesTax_VAT'}${vatRatePercentLabel}_${outletId}_${rangeTag}.csv`,
       [
-        isLaos ? 'Invoice No (INV-LA)' : 'เลขที่ใบกำกับภาษีอย่างย่อ (ABB)',
+        isLaos
+          ? 'Invoice No (INV-LA)'
+          : pick('เลขที่ใบกำกับภาษีอย่างย่อ (ABB)', 'ເລກທີໃບກຳກັບພາສີ (ABB)', 'ABB Tax Invoice No'),
         'Receipt No',
         'Timestamp',
         'Order Type',
@@ -640,7 +668,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         <div
           className="flex items-center gap-1 overflow-x-auto"
           role="tablist"
-          aria-label="หมวดหมู่รายงานและปิดกะ"
+          aria-label={pick('หมวดหมู่รายงานและปิดกะ', 'ໝວດໝູ່ລາຍງານ ແລະ ປິດກະ', 'Shift & Report Sections')}
         >
           {visibleSubTabs.map((t) => {
             const Icon = t.icon;
@@ -670,13 +698,15 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
       {(reportTab === 'ABB_TAX' || (reportTab === 'MARGIN' && showCostReports)) && (
         <div className="rounded-[4px] border border-hairline bg-surface-1 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-ink mr-1">กรองช่วงวันที่ (ภ.พ.30 / สรุปยอด):</span>
+            <span className="font-medium text-ink mr-1">
+              {pick('กรองช่วงวันที่ (ภ.พ.30 / สรุปยอด):', 'ກັ່ນຕອງຊ່ວງວັນທີ (ພາສີ / ສະຫຼຸບຍອດ):', 'Date Filter (VAT / Summary):')}
+            </span>
             {(
               [
-                { id: 'ALL', label: 'ทั้งหมด' },
-                { id: 'TODAY', label: 'วันนี้' },
-                { id: 'THIS_MONTH', label: 'เดือนนี้ (ภ.พ.30)' },
-                { id: 'LAST_MONTH', label: 'เดือนที่แล้ว' },
+                { id: 'ALL', label: pick('ทั้งหมด', 'ທັງໝົດ', 'All') },
+                { id: 'TODAY', label: pick('วันนี้', 'ມື້ນີ້', 'Today') },
+                { id: 'THIS_MONTH', label: pick('เดือนนี้ (ภ.พ.30)', 'ເດືອນນີ້ (ພາສີເດືອນ)', 'This Month') },
+                { id: 'LAST_MONTH', label: pick('เดือนที่แล้ว', 'ເດືອນແລ້ວ', 'Last Month') },
               ] as const
             ).map((preset) => (
               <button
@@ -692,7 +722,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
 
           <div className="flex flex-wrap items-center gap-2.5 tabular-nums-google">
             <label htmlFor={`${uid}-rep-start`} className="text-ink-muted">
-              ตั้งแต่:
+              {pick('ตั้งแต่:', 'ຕັ້ງແຕ່:', 'From:')}
             </label>
             <input
               id={`${uid}-rep-start`}
@@ -702,7 +732,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               className={`h-9 rounded-[4px] border border-hairline bg-canvas px-2.5 text-xs text-ink ${UI_INTERACTION.focusControl}`}
             />
             <label htmlFor={`${uid}-rep-end`} className="text-ink-muted">
-              ถึง:
+              {pick('ถึง:', 'ເຖິງ:', 'To:')}
             </label>
             <input
               id={`${uid}-rep-end`}
@@ -721,10 +751,14 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
           <div className="bg-hero p-6 text-white">
             <div className="text-xs uppercase tracking-[0.5px] text-white/75">POS Shift</div>
             <h3 className="mt-1 font-google-display text-[26px] font-normal leading-[34px] tracking-[-0.25px]">
-              ยังไม่มีกะแคชเชียร์ที่เปิดใช้งาน
+              {pick('ยังไม่มีกะแคชเชียร์ที่เปิดใช้งาน', 'ຍັງບໍ່ມີກະແຄັດເຊຍທີ່ເປີດໃຊ້ງານ', 'No Active Cashier Shift')}
             </h3>
             <p className="mt-1 text-xs text-white/75">
-              กรุณาระบุเงินทอนตั้งต้นเพื่อเปิดกะใหม่ก่อนเริ่มบันทึกการขายหน้าร้าน
+              {pick(
+                'กรุณาระบุเงินทอนตั้งต้นเพื่อเปิดกะใหม่ก่อนเริ่มบันทึกการขายหน้าร้าน',
+                'ກະລຸນາລະບຸເງິນທອນຕັ້ງຕົ້ນເພື່ອເປີດກະໃໝ່ກ່ອນເລີ່ມຂາຍໜ້າຮ້ານ',
+                'Enter opening cash float to start a shift before recording POS sales'
+              )}
             </p>
           </div>
           <div className="p-6 space-y-4">
@@ -749,7 +783,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               onClick={() => void handleOpenNewShift()}
               className={`h-[50px] w-full rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
-              เปิดกะแคชเชียร์ใหม่
+              {pick('เปิดกะแคชเชียร์ใหม่', 'ເປີດກະແຄັດເຊຍໃໝ່', 'Open New Cashier Shift')}
             </button>
           </div>
         </div>
@@ -764,7 +798,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               <div>
                 <div className="inline-flex items-center gap-2 rounded-[48px] border border-white/25 px-3 py-1 text-xs font-medium text-white">
                   <span className="h-2 w-2 rounded-full bg-primary" />
-                  <span>กะกำลังเปิดใช้งาน (OPEN SHIFT)</span>
+                  <span>{pick('กะกำลังเปิดใช้งาน (OPEN SHIFT)', 'ກະກຳລັງເປີດໃຊ້ງານ (OPEN SHIFT)', 'Active Shift (OPEN)')}</span>
                 </div>
                 <h2 className="mt-2 font-google-display text-[28px] font-normal leading-[36px] tracking-[-0.25px] text-white tabular-nums-google">
                   {bootstrap.activeShift.shiftNumber}
@@ -775,7 +809,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 {showExpectedCash ? (
                   <>
                     <div className="text-xs text-white/75">
-                      เงินสดคาดหวังในลิ้นชัก (Expected Cash · สิทธิ์ผู้จัดการ)
+                      {pick(
+                        'เงินสดคาดหวังในลิ้นชัก (Expected Cash · สิทธิ์ผู้จัดการ)',
+                        'ເງິນສົດຄາດຫວັງໃນລິ້ນຊັກ (Expected Cash · ສິດຜູ້ຈັດການ)',
+                        'Expected Drawer Cash (Manager View)'
+                      )}
                     </div>
                     <div className="mt-1 font-google-display text-[32px] sm:text-[38px] font-normal leading-[40px] sm:leading-[46px] tracking-[-0.5px] text-white tabular-nums-google">
                       {money(bootstrap.activeShift.expectedCashSatang)}
@@ -785,10 +823,14 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   <div className="rounded-[8px] border border-white/20 bg-white/10 px-4 py-2.5">
                     <div className="inline-flex items-center gap-1.5 text-xs font-medium text-white">
                       <EyeOff className="h-3.5 w-3.5 text-primary" />
-                      <span>ซ่อนยอดเงินสดตามกฎ Blind Drop</span>
+                      <span>{pick('ซ่อนยอดเงินสดตามกฎ Blind Drop', 'ຊ່ອນຍອດເງິນສົດຕາມກົດ Blind Drop', 'Hidden by Blind Drop Rule')}</span>
                     </div>
                     <p className="text-[11px] text-white/75 mt-0.5">
-                      นับเงินจริงจากลิ้นชักเพื่อดูผลกระทบยอดในใบ Z-Report หลังปิดกะ
+                      {pick(
+                        'นับเงินจริงจากลิ้นชักเพื่อดูผลกระทบยอดในใบ Z-Report หลังปิดกะ',
+                        'ນັບເງິນຈິງຈາກລິ້ນຊັກເພື່ອເບິ່ງຜົນກະທົບຍອດໃນໃບ Z-Report ຫຼັງປິດກະ',
+                        'Count actual drawer cash to reveal variance on Z-Report after shift close'
+                      )}
                     </p>
                   </div>
                 )}
@@ -798,7 +840,9 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
             <div className="p-6 space-y-5 bg-canvas">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                 <div className="rounded-[4px] border border-hairline bg-surface-1 p-4">
-                  <div className="text-ink-muted">เงินทอนตั้งต้นเปิดกะ (Opening Float)</div>
+                  <div className="text-ink-muted">
+                    {pick('เงินทอนตั้งต้นเปิดกะ (Opening Float)', 'ເງິນທອນຕັ້ງຕົ້ນເປີດກະ (Opening Float)', 'Opening Cash Float')}
+                  </div>
                   <div className="mt-1 font-google-display text-[22px] font-normal text-ink tabular-nums-google">
                     {money(bootstrap.activeShift.openingCashSatang)}
                   </div>
@@ -814,20 +858,24 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               {/* Record Paid-In / Paid-Out / Safe Drop */}
               <div className="rounded-[4px] border border-hairline bg-surface-1 p-4 space-y-3">
                 <div className="font-google-display text-sm font-medium text-ink">
-                  บันทึกนำเงินเข้า / จ่ายเงินสดย่อย / ดึงเงินเก็บเซฟ (Cash Drawer Movements)
+                  {pick(
+                    'บันทึกนำเงินเข้า / จ่ายเงินสดย่อย / ดึงเงินเก็บเซฟ (Cash Drawer Movements)',
+                    'ບັນທຶກນຳເງິນເຂົ້າ / ຈ່າຍເງິນສົດຍ່ອຍ / ດຶງເງິນເກັບເຊຟ (Cash Drawer Movements)',
+                    'Cash Drawer Movements (Paid-In / Paid-Out / Safe Drop)'
+                  )}
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
                   <select
-                    aria-label="ประเภทรายการเคลื่อนไหวเงินสด"
+                    aria-label={pick('ประเภทรายการเคลื่อนไหวเงินสด', 'ປະເພດລາຍການເຄື່ອນໄຫວເງິນສົດ', 'Cash drawer movement type')}
                     value={mvType}
                     onChange={(e) =>
                       setMvType(e.target.value as 'PAID_IN' | 'PAID_OUT' | 'CASH_DROP')
                     }
                     className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-ink ${UI_INTERACTION.focusSelect}`}
                   >
-                    <option value="PAID_IN">PAID_IN (+ นำเงินทอนเข้า)</option>
-                    <option value="PAID_OUT">PAID_OUT (- จ่ายค่าใช้จ่ายย่อย)</option>
-                    <option value="CASH_DROP">CASH_DROP (- นำฝากตู้เซฟ)</option>
+                    <option value="PAID_IN">{pick('PAID_IN (+ นำเงินทอนเข้า)', 'PAID_IN (+ ນຳເງິນທອນເຂົ້າ)', 'PAID_IN (+ Cash Float In)')}</option>
+                    <option value="PAID_OUT">{pick('PAID_OUT (- จ่ายค่าใช้จ่ายย่อย)', 'PAID_OUT (- ຈ່າຍຄ່າໃຊ້ຈ່າຍຍ່ອຍ)', 'PAID_OUT (- Petty Expense)')}</option>
+                    <option value="CASH_DROP">{pick('CASH_DROP (- นำฝากตู้เซฟ)', 'CASH_DROP (- ນຳຝາກຕູ້ເຊຟ)', 'CASH_DROP (- Safe Drop)')}</option>
                   </select>
                   <input
                     type="text"
@@ -839,10 +887,10 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   />
                   <input
                     type="text"
-                    aria-label="หมายเหตุรายการเคลื่อนไหวเงินสด"
+                    aria-label={pick('หมายเหตุรายการเคลื่อนไหวเงินสด', 'ໝາຍເຫດລາຍການເຄື່ອນໄຫວເງິນສົດ', 'Movement reason or note')}
                     value={mvReason}
                     onChange={(e) => setMvReason(e.target.value)}
-                    placeholder="หมายเหตุ..."
+                    placeholder={pick('หมายเหตุ...', 'ໝາຍເຫດ...', 'Note...')}
                     className={`h-11 rounded-[4px] border border-hairline bg-canvas px-3 text-ink placeholder:text-ink-muted ${UI_INTERACTION.focusControl}`}
                   />
                 </div>
@@ -852,7 +900,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   onClick={() => void handleRecordMovement()}
                   className={`h-[46px] w-full rounded-[48px] border border-hairline bg-canvas px-5 font-google-display text-xs font-medium tracking-[0.5px] text-primary hover:border-primary hover:bg-primary-soft/40 hover:text-primary-dark ${UI_INTERACTION.focusButton}`}
                 >
-                  บันทึกรายการเคลื่อนไหวเงินสดในลิ้นชัก
+                  {pick('บันทึกรายการเคลื่อนไหวเงินสดในลิ้นชัก', 'ບັນທຶກລາຍການເຄື່ອນໄຫວເງິນສົດໃນລິ້ນຊັກ', 'Record Drawer Movement')}
                 </button>
               </div>
 
@@ -860,7 +908,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               <div className="divide-y divide-hairline rounded-[4px] border border-hairline max-h-60 overflow-y-auto">
                 {bootstrap.drawerMovements.length === 0 ? (
                   <div className="py-6 text-center text-xs text-ink-muted">
-                    ยังไม่มีรายการเคลื่อนไหวเงินสดในลิ้นชักของกะนี้
+                    {pick('ยังไม่มีรายการเคลื่อนไหวเงินสดในลิ้นชักของกะนี้', 'ຍັງບໍ່ມີລາຍການເຄື່ອນໄຫວເງິນສົດໃນກະນີ້', 'No drawer movements recorded in this shift')}
                   </div>
                 ) : (
                   bootstrap.drawerMovements.map((m) => (
@@ -913,10 +961,18 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 </div>
                 <div>
                   <h3 className="font-google-display text-[20px] font-normal leading-[28px] text-ink">
-                    ปิดกะนับเงินสดจริง (True Blind Drop) &amp; สำรอง USB
+                    {pick(
+                      'ปิดกะนับเงินสดจริง (True Blind Drop) & สำรอง USB',
+                      'ປິດກະນັບເງິນສົດຈິງ (True Blind Drop) & ສຳຮອງ USB',
+                      'Blind Drop Shift Close & USB Backup'
+                    )}
                   </h3>
                   <p className="text-xs text-ink-muted mt-1">
-                    ไม่ดึงยอดอัตโนมัติ — นับจำนวนธนบัตรและเหรียญจริงเพื่อป้องกันการตกแต่งตัวเลข
+                    {pick(
+                      'ไม่ดึงยอดอัตโนมัติ — นับจำนวนธนบัตรและเหรียญจริงเพื่อป้องกันการตกแต่งตัวเลข',
+                      'ບໍ່ດຶງຍອດອັດຕະໂນມັດ — ນັບຈຳນວນທະນະບັດ ແລະ ຫຼຽນຈິງເພື່ອຄວາມໂປ່ງໃສ',
+                      'No pre-filled expected amount — count actual notes & coins independently'
+                    )}
                   </p>
                 </div>
               </div>
@@ -927,7 +983,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-4 font-google-display text-xs font-medium text-primary hover:border-primary hover:bg-surface-1 ${UI_INTERACTION.focusButton}`}
               >
                 <Calculator className="h-3.5 w-3.5" />
-                <span>{showDenomHelper ? 'ซ่อนตารางนับแบงก์/เหรียญ' : 'เปิดตารางนับแบงก์/เหรียญ'}</span>
+                <span>
+                  {showDenomHelper
+                    ? pick('ซ่อนตารางนับแบงก์/เหรียญ', 'ຊ່ອນຕາຕະລາງນັບເງິນ', 'Hide Denomination Counter')
+                    : pick('เปิดตารางนับแบงก์/เหรียญ', 'ເປີດຕາຕະລາງນັບເງິນ', 'Show Denomination Counter')}
+                </span>
               </button>
             </div>
 
@@ -942,7 +1002,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                           'ເຄື່ອງຊ່ວຍນັບທະນະບັດເງິນກີບລາວ (500–100,000 ₭)',
                           'Lao Kip Banknote Counter (500–100,000 ₭)'
                         )
-                      : 'เครื่องช่วยนับธนบัตรและเหรียญไทย (คำนวณยอดรวมอัตโนมัติ)'}
+                      : pick(
+                          'เครื่องช่วยนับธนบัตรและเหรียญไทย (คำนวณยอดรวมอัตโนมัติ)',
+                          'ເຄື່ອງຊ່ວຍນັບທະນະບັດ ແລະ ຫຼຽນໄທ (ຄຳນວນຍອດລວມອັດຕະໂນມັດ)',
+                          'THB Note & Coin Denominations Counter (Auto-Sum)'
+                        )}
                   </span>
                   {denomBreakdownSummary.hasAnyEntry && (
                     <button
@@ -981,7 +1045,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                           inputMode="numeric"
                           value={countVal}
                           onChange={(e) => handleDenomChange(d.id, e.target.value)}
-                          placeholder={isLaos ? '0 ໃບ' : '0 ใบ/เหรียญ'}
+                          placeholder={
+                            isLaos
+                              ? pick('0 ใบ', '0 ໃບ', '0 notes')
+                              : pick('0 ใบ/เหรียญ', '0 ໃບ/ຫຼຽນ', '0 notes/coins')
+                          }
                           className={`h-9 w-full rounded-[4px] border border-hairline bg-surface-1 px-2.5 text-right text-xs text-ink placeholder:text-ink-muted tabular-nums-google ${UI_INTERACTION.focusControl}`}
                         />
                       </div>
@@ -1066,7 +1134,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   inputMode="decimal"
                   value={countedCashBaht}
                   onChange={(e) => setCountedCashBaht(e.target.value)}
-                  placeholder={isLaos ? 'ເຊັ່ນ 1250000' : 'ระบุยอดที่นับได้จริง เช่น 1850.00'}
+                  placeholder={
+                    isLaos
+                      ? pick('เช่น 1250000', 'ເຊັ່ນ 1250000', 'e.g. 1250000')
+                      : pick('ระบุยอดที่นับได้จริง เช่น 1850.00', 'ລະບຸຍອດທີ່ນັບໄດ້ຈິງ ເຊັ່ນ 1850.00', 'Actual cash counted e.g. 1850.00')
+                  }
                   className={`h-14 w-full rounded-[4px] border border-hairline bg-canvas px-4 font-google-display text-[28px] font-normal text-ink placeholder:text-ink-muted placeholder:text-base tabular-nums-google ${UI_INTERACTION.focusControl}`}
                 />
               </div>
@@ -1075,7 +1147,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   htmlFor={`${uid}-close-notes`}
                   className="block text-xs font-medium text-ink-muted mb-1"
                 >
-                  บันทึกเพิ่มเติมท้ายกะ
+                  {pick('บันทึกเพิ่มเติมท้ายกะ', 'ບັນທຶກເພີ່ມເຕີມທ້າຍກະ', 'Shift Close Notes')}
                 </label>
                 <input
                   id={`${uid}-close-notes`}
@@ -1094,26 +1166,42 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               className={`flex h-[50px] w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
             >
               <HardDriveDownload className="h-4 w-4 shrink-0" />
-              <span>ยืนยันปิดกะ · ออกใบ Z-Report &amp; สำรองข้อมูล USB</span>
+              <span>
+                {pick(
+                  'ยืนยันปิดกะ · ออกใบ Z-Report & สำรองข้อมูล USB',
+                  'ຢືນຢັນປິດກະ · ອອກໃບ Z-Report & ສຳຮອງຂໍ້ມູນ USB',
+                  'Close Shift · Generate Z-Report & USB Backup'
+                )}
+              </span>
             </button>
 
             <div className="border-t border-hairline pt-4">
               <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
                 <div className="font-google-display text-xs font-medium text-ink">
-                  ไฟล์สำรองข้อมูลเข้ารหัส 14 กะล่าสุด (USB Ring Buffer)
+                  {pick(
+                    'ไฟล์สำรองข้อมูลเข้ารหัส 14 กะล่าสุด (USB Ring Buffer)',
+                    'ໄຟລ໌ສຳຮອງຂໍ້ມູນເຂົ້າລະຫັດ 14 ກະລ່າສຸດ (USB Ring Buffer)',
+                    'Encrypted Backup Ring (Latest 14 Shifts)'
+                  )}
                 </div>
                 {bootstrap.usbBackupConfig && (
                   <span className="text-[11px] text-ink-muted truncate max-w-xs">
-                    ปลายทาง:{' '}
+                    {pick('ปลายทาง:', 'ປາຍທາງ:', 'Target:')}{' '}
                     {bootstrap.usbBackupConfig.isExternalCustomDir
                       ? bootstrap.usbBackupConfig.activeEffectiveDir
-                      : 'โฟลเดอร์สำรองในเครื่อง (ตั้งค่า USB ได้ในตั้งค่าระบบ)'}
+                      : pick(
+                          'โฟลเดอร์สำรองในเครื่อง (ตั้งค่า USB ได้ในตั้งค่าระบบ)',
+                          'ໂຟນເດີສຳຮອງໃນເຄື່ອງ (ຕັ້ງຄ່າ USB ໄດ້ໃນຕັ້ງຄ່າລະບົບ)',
+                          'Local backup folder (configure USB drive in System Settings)'
+                        )}
                   </span>
                 )}
               </div>
               <div className="divide-y divide-hairline rounded-[4px] border border-hairline max-h-44 overflow-y-auto">
                 {bootstrap.usbBackups.length === 0 ? (
-                  <p className="text-xs text-ink-muted py-4 text-center">ยังไม่มีไฟล์สำรองข้อมูล</p>
+                  <p className="text-xs text-ink-muted py-4 text-center">
+                    {pick('ยังไม่มีไฟล์สำรองข้อมูล', 'ຍັງບໍ່ມີໄຟລ໌ສຳຮອງຂໍ້ມູນ', 'No backup files yet')}
+                  </p>
                 ) : (
                   bootstrap.usbBackups.map((b) => (
                     <div
@@ -1138,7 +1226,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         reports &&
         (reports.zReport === null ? (
           <div className="rounded-[4px] border border-hairline bg-canvas p-10 text-center text-sm text-ink-muted max-w-4xl">
-            ยังไม่มีข้อมูลกะแคชเชียร์สำหรับออกรายงาน Z-Report
+            {pick(
+              'ยังไม่มีข้อมูลกะแคชเชียร์สำหรับออกรายงาน Z-Report',
+              'ຍັງບໍ່ມີຂໍ້ມູນກະແຄັດເຊຍສຳລັບອອກລາຍງານ Z-Report',
+              'No cashier shift records available for Z-Report'
+            )}
           </div>
         ) : (
           <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden max-w-4xl">
@@ -1149,7 +1241,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   {reports.zReport.status})
                 </div>
                 <h3 className="mt-1 font-google-display text-[24px] sm:text-[28px] font-normal leading-[32px] sm:leading-[36px] tracking-[-0.25px] text-white">
-                  รายงานสรุปยอดขายและกระทบยอดเงินสดประจำกะ
+                  {pick(
+                    'รายงานสรุปยอดขายและกระทบยอดเงินสดประจำกะ',
+                    'ລາຍງານສະຫຼຸບຍອດຂາຍ ແລະ ກະທົບຍອດເງິນສົດປະຈຳກະ',
+                    'Shift Sales & Cash Reconciliation Z-Report'
+                  )}
                 </h3>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -1162,7 +1258,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                       className={`inline-flex h-11 items-center gap-1.5 rounded-[48px] bg-primary px-4 font-google-display text-xs font-medium text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
                     >
                       <Printer className="h-3.5 w-3.5" />
-                      <span>{printingZ ? 'กำลังพิมพ์...' : 'พิมพ์ใบ Z-Report ความร้อน'}</span>
+                      <span>
+                        {printingZ
+                          ? pick('กำลังพิมพ์...', 'ກຳລັງພິມ...', 'Printing...')
+                          : pick('พิมพ์ใบ Z-Report ความร้อน', 'ພິມໃບ Z-Report ຄວາມຮ້ອນ', 'Print Thermal Z-Report')}
+                      </span>
                     </button>
                     <button
                       type="button"
@@ -1175,7 +1275,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   </>
                 )}
                 <select
-                  aria-label="เลือกกะสำหรับดูรายงาน Z-Report"
+                  aria-label={pick('เลือกกะสำหรับดูรายงาน Z-Report', 'ເລືອກກະສຳລັບເບິ່ງລາຍງານ Z-Report', 'Select shift for Z-Report')}
                   value={selectedShiftIdForZ || reports.zReport.shiftId}
                   onChange={(e) => setSelectedShiftIdForZ(e.target.value)}
                   className="h-11 rounded-[4px] border border-white/25 bg-white/10 px-3.5 text-xs text-white tabular-nums-google transition-colors duration-200 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary cursor-pointer"
@@ -1196,17 +1296,27 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               <div className="p-8 text-center space-y-3">
                 <EyeOff className="h-9 w-9 text-primary mx-auto" />
                 <h4 className="font-google-display text-[20px] font-normal text-ink">
-                  ซ่อนตัวเลขกระทบยอดเงินสดชั่วคราวตามกฎ Blind Drop
+                  {pick(
+                    'ซ่อนตัวเลขกระทบยอดเงินสดชั่วคราวตามกฎ Blind Drop',
+                    'ຊ່ອນຕົວເລກກະທົບຍອດເງິນສົດຊົ່ວຄາວຕາມກົດ Blind Drop',
+                    'Drawer Variance Masked by Blind Drop Policy'
+                  )}
                 </h4>
                 <p className="text-sm text-ink-muted max-w-lg mx-auto">
-                  กะ {reports.zReport.shiftNumber} ยังเปิดใช้งานอยู่ — แคชเชียร์สามารถดูใบ Z-Report ฉบับสมบูรณ์พร้อมผลต่างเงินสด (Variance) ได้ทันทีหลังกดยืนยันปิดกะ หรือสลับเลือกดูประวัติกะที่ปิดไปแล้วด้านบน
+                  {pick(
+                    `กะ ${reports.zReport.shiftNumber} ยังเปิดใช้งานอยู่ — แคชเชียร์สามารถดูใบ Z-Report ฉบับสมบูรณ์พร้อมผลต่างเงินสด (Variance) ได้ทันทีหลังกดยืนยันปิดกะ หรือสลับเลือกดูประวัติกะที่ปิดไปแล้วด้านบน`,
+                    `ກະ ${reports.zReport.shiftNumber} ຍັງເປີດໃຊ້ງານຢູ່ — ແຄັດເຊຍສາມາດເບິ່ງໃບ Z-Report ສະບັບສົມບູນພ້ອມຜົນຕ່າງເງິນສົດໄດ້ທັນທີຫຼັງຢືນຢັນປິດກະ ຫຼື ເລືອກເບິ່ງປະຫວັດກະທີ່ປິດແລ້ວດ້ານເທິງ`,
+                    `Shift ${reports.zReport.shiftNumber} is still open — full Z-Report with cash variance unlocks immediately upon closing the shift or selecting a closed shift above`
+                  )}
                 </p>
               </div>
             ) : (
               <div className="p-6 space-y-5">
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className="rounded-[4px] border border-hairline bg-canvas p-4">
-                    <div className="text-xs text-ink-muted">ยอดขายสุทธิรวม VAT</div>
+                    <div className="text-xs text-ink-muted">
+                      {pick('ยอดขายสุทธิรวม VAT', 'ຍອດຂາຍສຸດທິລວມອາກອນ', 'Net Sales (incl. VAT)')}
+                    </div>
                     <div className="mt-1 font-google-display text-[24px] font-normal text-ink tabular-nums-google">
                       {reports.zReport.netSalesTotalFormatted}
                     </div>
@@ -1220,22 +1330,24 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                     </div>
                   </div>
                   <div className="rounded-[4px] border border-hairline bg-canvas p-4">
-                    <div className="text-xs text-ink-muted">บิลสำเร็จ / ยกเลิก</div>
+                    <div className="text-xs text-ink-muted">
+                      {pick('บิลสำเร็จ / ยกเลิก', 'ບິນສຳເລັດ / ຍົກເລີກ', 'Paid / Voided Bills')}
+                    </div>
                     <div className="mt-1 font-google-display text-[24px] font-normal text-ink tabular-nums-google">
                       {reports.zReport.completedOrdersCount} / {reports.zReport.voidedOrdersCount}
                     </div>
                     {reports.zReport.voidedOrdersCount > 0 && (
                       <div className="text-[11px] text-ink-muted tabular-nums-google mt-0.5">
-                        ยอดยกเลิก {reports.zReport.voidedTotalFormatted}
+                        {pick('ยอดยกเลิก', 'ຍອດຍົກເລີກ', 'Voided')} {reports.zReport.voidedTotalFormatted}
                       </div>
                     )}
                   </div>
                   <div className="rounded-[4px] border border-primary bg-primary-soft/50 p-4">
                     <div className="text-xs font-medium text-primary-dark">
-                      ส่วนต่างเงินสด (Variance)
+                      {pick('ส่วนต่างเงินสด (Variance)', 'ສ່ວນຕ່າງເງິນສົດ (Variance)', 'Cash Variance')}
                     </div>
                     <div className="mt-1 font-google-display text-[24px] font-normal text-ink tabular-nums-google">
-                      {reports.zReport.cashVarianceFormatted ?? 'ยังไม่ปิดกะ'}
+                      {reports.zReport.cashVarianceFormatted ?? pick('ยังไม่ปิดกะ', 'ຍັງບໍ່ປິດກະ', 'Open')}
                     </div>
                   </div>
                 </div>
@@ -1243,28 +1355,36 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                   <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 space-y-2.5">
                     <div className="font-google-display text-sm font-medium text-ink">
-                      แยกตามช่องทางรับชำระเงิน &amp; ฐานภาษี
+                      {pick(
+                        'แยกตามช่องทางรับชำระเงิน & ฐานภาษี',
+                        'ແຍກຕາມຊ່ອງທາງຮັບຊຳລະເງິນ & ຖານອາກອນ',
+                        'Payment Tender & Tax Breakdown'
+                      )}
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">ยอดขายก่อนส่วนลด (Gross Sales)</span>
+                      <span className="text-ink-muted">
+                        {pick('ยอดขายก่อนส่วนลด (Gross Sales)', 'ຍອດຂາຍກ່ອນສ່ວນຫຼຸດ (Gross Sales)', 'Gross Sales')}
+                      </span>
                       <span className="font-medium text-ink tabular-nums-google">
                         {reports.zReport.grossSalesFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">ส่วนลดรวม</span>
+                      <span className="text-ink-muted">{pick('ส่วนลดรวม', 'ສ່ວນຫຼຸດລວມ', 'Total Discounts')}</span>
                       <span className="font-medium text-primary-hover tabular-nums-google">
                         -{reports.zReport.discountsFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between border-b border-hairline pb-2">
-                      <span className="text-ink-muted">มูลค่าขายก่อนภาษี (Net Before Tax)</span>
+                      <span className="text-ink-muted">
+                        {pick('มูลค่าขายก่อนภาษี (Net Before Tax)', 'ມູນຄ່າຂາຍກ່ອນອາກອນ (Net Before Tax)', 'Net Sales Before Tax')}
+                      </span>
                       <span className="font-medium text-ink tabular-nums-google">
                         {reports.zReport.netBeforeTaxFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">รับชำระด้วยเงินสด (Cash)</span>
+                      <span className="text-ink-muted">{pick('รับชำระด้วยเงินสด (Cash)', 'ຮັບຊຳລະດ້ວຍເງິນສົດ (Cash)', 'Cash Tender')}</span>
                       <span className="font-medium text-ink tabular-nums-google">
                         {reports.zReport.cashSalesFormatted}
                       </span>
@@ -1273,20 +1393,20 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                       <span className="text-ink-muted">
                         {isLaos
                           ? pick('รับชำระด้วย LAOQR / OnePay', 'ຮັບຊຳລະດ້ວຍ LAOQR / OnePay', 'LAOQR / OnePay')
-                          : 'รับชำระด้วย PromptPay QR'}
+                          : pick('รับชำระด้วย PromptPay QR', 'ຮັບຊຳລະດ້ວຍ PromptPay QR', 'PromptPay QR')}
                       </span>
                       <span className="font-medium text-ink tabular-nums-google">
                         {reports.zReport.promptPaySalesFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">รับชำระด้วยบัตรเครดิต / EDC</span>
+                      <span className="text-ink-muted">{pick('รับชำระด้วยบัตรเครดิต / EDC', 'ຮັບຊຳລະດ້ວຍບັດ / EDC', 'Credit / EDC Card')}</span>
                       <span className="font-medium text-ink tabular-nums-google">
                         {reports.zReport.cardSalesFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">คูปองเงินสด (Voucher)</span>
+                      <span className="text-ink-muted">{pick('คูปองเงินสด (Voucher)', 'ຄູປອງເງິນສົດ (Voucher)', 'Voucher')}</span>
                       <span className="font-medium text-ink tabular-nums-google">
                         {reports.zReport.voucherSalesFormatted}
                       </span>
@@ -1295,46 +1415,50 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
 
                   <div className="rounded-[4px] border border-hairline bg-surface-1 p-5 space-y-2.5">
                     <div className="font-google-display text-sm font-medium text-ink">
-                      สมการกระทบยอดเงินสดในลิ้นชัก (Cash Conservation)
+                      {pick(
+                        'สมการกระทบยอดเงินสดในลิ้นชัก (Cash Conservation)',
+                        'ສົມຜົນກະທົບຍອດເງິນສົດໃນລິ້ນຊັກ (Cash Conservation)',
+                        'Cash Drawer Conservation Equation'
+                      )}
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">เงินทอนตั้งต้นเปิดกะ (Opening Float)</span>
+                      <span className="text-ink-muted">{pick('เงินทอนตั้งต้นเปิดกะ (Opening Float)', 'ເງິນທອນຕັ້ງຕົ້ນເປີດກະ (Opening Float)', 'Opening Float')}</span>
                       <span className="font-medium text-ink tabular-nums-google">
                         {reports.zReport.openingCashFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">+ ยอดรับเงินสดจากการขาย (Cash Sales)</span>
+                      <span className="text-ink-muted">{pick('+ ยอดรับเงินสดจากการขาย (Cash Sales)', '+ ຍອດຮັບເງິນສົດຈາກການຂາຍ (Cash Sales)', '+ Cash Sales')}</span>
                       <span className="font-medium text-ink tabular-nums-google">
                         +{reports.zReport.cashSalesFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">+ นำเงินสดเข้าลิ้นชัก (Paid-In)</span>
+                      <span className="text-ink-muted">{pick('+ นำเงินสดเข้าลิ้นชัก (Paid-In)', '+ ນຳເງິນສົດເຂົ້າລິ້ນຊັກ (Paid-In)', '+ Paid-In')}</span>
                       <span className="font-medium text-ink tabular-nums-google">
                         +{reports.zReport.paidInFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">- จ่ายเงินสดย่อย (Paid-Out)</span>
+                      <span className="text-ink-muted">{pick('- จ่ายเงินสดย่อย (Paid-Out)', '- ຈ່າຍເງິນສົດຍ່ອຍ (Paid-Out)', '- Paid-Out')}</span>
                       <span className="font-medium text-ink tabular-nums-google">
                         -{reports.zReport.paidOutFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between border-b border-hairline pb-2">
-                      <span className="text-ink-muted">- เก็บเงินเข้าเซฟ (Cash Drop)</span>
+                      <span className="text-ink-muted">{pick('- เก็บเงินเข้าเซฟ (Cash Drop)', '- ເກັບເງິນເຂົ້າເຊຟ (Cash Drop)', '- Cash Drop')}</span>
                       <span className="font-medium text-ink tabular-nums-google">
                         -{reports.zReport.cashDropFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">เงินสดตามสมการบัญชี (Expected)</span>
+                      <span className="text-ink-muted">{pick('เงินสดตามสมการบัญชี (Expected)', 'ເງິນສົດຕາມສົມຜົນບັນຊີ (Expected)', 'Expected Drawer Cash')}</span>
                       <span className="font-medium text-primary-hover tabular-nums-google">
                         {reports.zReport.expectedDrawerCashFormatted}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-ink-muted">เงินสดที่นับได้จริง (Counted)</span>
+                      <span className="text-ink-muted">{pick('เงินสดที่นับได้จริง (Counted)', 'ເງິນສົດທີ່ນັບໄດ້ຈິງ (Counted)', 'Counted Drawer Cash')}</span>
                       <span className="font-medium text-ink tabular-nums-google">
                         {reports.zReport.countedDrawerCashFormatted ?? '—'}
                       </span>
@@ -1404,7 +1528,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                     `ລາຍງານອາກອນມູນຄ່າເພີ່ມ ສປປ.ລາວ (TaxRIS / ອມພ ${vatRatePercentLabel}%)`,
                     `Lao PDR Sales Tax Register (TaxRIS / VAT ${vatRatePercentLabel}%)`
                   )
-                : `รายงานภาษีขายใบกำกับภาษีอย่างย่อ (Thai RD ABB VAT ${vatRatePercentLabel}% Register)`}
+                : pick(
+                    `รายงานภาษีขายใบกำกับภาษีอย่างย่อ (Thai RD ABB VAT ${vatRatePercentLabel}% Register)`,
+                    `ລາຍງານພາສີຂາຍໃບກຳກັບພາສີ (Thai RD ABB VAT ${vatRatePercentLabel}%)`,
+                    `Abbreviated Tax Invoice Register (Thai RD ABB VAT ${vatRatePercentLabel}%)`
+                  )}
             </h3>
             <div className="flex flex-wrap items-center gap-4 text-xs tabular-nums-google">
               <span className="text-ink-muted">
@@ -1446,7 +1574,9 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               <thead className="bg-surface-1 text-ink-muted font-medium border-b border-hairline">
                 <tr>
                   <th scope="col" className="py-3 px-4">
-                    {isLaos ? 'Invoice No (INV-LA)' : 'เลขที่ใบกำกับภาษี ABB'}
+                    {isLaos
+                      ? 'Invoice No (INV-LA)'
+                      : pick('เลขที่ใบกำกับภาษี ABB', 'ເລກທີໃບກຳກັບພາສີ ABB', 'ABB Tax Invoice No')}
                   </th>
                   <th scope="col" className="py-3 px-4">
                     {pick('เลขที่ใบเสร็จ / เวลา', 'ເລກທີບິນ / ເວລາ', 'Receipt / Time')}
@@ -1469,7 +1599,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 {reports.abbReport.invoices.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="py-12 text-center text-ink-muted">
-                      ยังไม่มีรายการใบกำกับภาษีอย่างย่อ (ABB) ในระบบ
+                      {pick(
+                        'ยังไม่มีรายการใบกำกับภาษีอย่างย่อ (ABB) ในระบบ',
+                        'ຍັງບໍ່ມີລາຍການໃບກຳກັບພາສີ (ABB) ໃນລະບົບ',
+                        'No ABB / Sales Tax invoices recorded'
+                      )}
                     </td>
                   </tr>
                 ) : (
@@ -1522,11 +1656,16 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
           <div className="p-5 border-b border-hairline bg-surface-1 flex flex-wrap items-center justify-between gap-3">
             <h3 className="font-google-display text-[20px] font-normal text-ink">
-              รายงานมูลค่าสินค้าและวัตถุดิบคงคลัง (Warehouse Stock Valuation)
+              {pick(
+                'รายงานมูลค่าสินค้าและวัตถุดิบคงคลัง (Warehouse Stock Valuation)',
+                'ລາຍງານມູນຄ່າສິນຄ້າ ແລະ ວັດຖຸດິບຄົງຄັງ (Warehouse Stock Valuation)',
+                'Warehouse Stock Valuation Report'
+              )}
             </h3>
             <div className="flex flex-wrap items-center gap-3">
               <div className="font-google-display text-lg font-normal text-primary-hover tabular-nums-google">
-                มูลค่ารวมทั้งคลัง: {reports.valuationReport.totalWarehouseValuationFormatted}
+                {pick('มูลค่ารวมทั้งคลัง:', 'ມູນຄ່າລວມທັງສາງ:', 'Total Stock Value:')}{' '}
+                {reports.valuationReport.totalWarehouseValuationFormatted}
               </div>
               <button
                 type="button"
@@ -1546,16 +1685,16 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                     SKU
                   </th>
                   <th scope="col" className="py-3 px-4">
-                    ชื่อรายการ
+                    {pick('ชื่อรายการ', 'ຊື່ລາຍການ', 'Item Name')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    สต็อกคงเหลือ
+                    {pick('สต็อกคงเหลือ', 'ສະຕັອກຄົງເຫຼືອ', 'Stock on Hand')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    ต้นทุนเฉลี่ย MAC
+                    {pick('ต้นทุนเฉลี่ย MAC', 'ຕົ້ນທຶນສະເລ່ຍ MAC', 'Moving Avg Cost (MAC)')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    มูลค่าคงคลังสุทธิ
+                    {pick('มูลค่าคงคลังสุทธิ', 'ມູນຄ່າຄົງຄັງສຸດທິ', 'Total Valuation')}
                   </th>
                 </tr>
               </thead>
@@ -1563,7 +1702,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 {reports.valuationReport.lines.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="py-12 text-center text-ink-muted">
-                      ยังไม่มีสินค้าหรือวัตถุดิบคงคลังในระบบ
+                      {pick(
+                        'ยังไม่มีสินค้าหรือวัตถุดิบคงคลังในระบบ',
+                        'ຍັງບໍ່ມີສິນຄ້າ ຫຼື ວັດຖຸດິບຄົງຄັງ',
+                        'No inventory items in warehouse'
+                      )}
                     </td>
                   </tr>
                 ) : (
@@ -1597,23 +1740,27 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
         <div className="rounded-[4px] border border-hairline bg-canvas overflow-hidden">
           <div className="p-5 border-b border-hairline bg-surface-1 flex flex-wrap items-center justify-between gap-4">
             <h3 className="font-google-display text-[20px] font-normal text-ink">
-              รายงานต้นทุนขายจริง (COGS) และกำไรขั้นต้นรายเมนู (Gross Margin Analysis)
+              {pick(
+                'รายงานต้นทุนขายจริง (COGS) และกำไรขั้นต้นรายเมนู (Gross Margin Analysis)',
+                'ລາຍງານຕົ້ນທຶນຂາຍຈິງ (COGS) ແລະ ກຳໄລຂັ້ນຕົ້ນລາຍເມນູ (Gross Margin Analysis)',
+                'Cost of Goods Sold (COGS) & Gross Margin Analysis'
+              )}
             </h3>
             <div className="flex flex-wrap items-center gap-4 text-xs tabular-nums-google">
               <span className="text-ink-muted">
-                รายได้รวม:{' '}
+                {pick('รายได้รวม:', 'ລາຍຮັບລວມ:', 'Revenue:')}{' '}
                 <strong className="font-medium text-ink">
                   {reports.marginReport.totalRevenueFormatted}
                 </strong>
               </span>
               <span className="text-ink-muted">
-                ต้นทุนขาย COGS:{' '}
+                {pick('ต้นทุนขาย COGS:', 'ຕົ້ນທຶນຂາຍ COGS:', 'Total COGS:')}{' '}
                 <strong className="font-medium text-ink">
                   {reports.marginReport.totalCogsFormatted}
                 </strong>
               </span>
               <span className="text-ink-muted">
-                กำไรขั้นต้น:{' '}
+                {pick('กำไรขั้นต้น:', 'ກຳໄລຂັ້ນຕົ້ນ:', 'Gross Profit:')}{' '}
                 <strong className="font-medium text-primary-hover">
                   {reports.marginReport.totalGrossProfitFormatted} (
                   {reports.marginReport.totalGrossMarginPercentFormatted})
@@ -1634,19 +1781,19 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               <thead className="bg-surface-1 text-ink-muted font-medium border-b border-hairline">
                 <tr>
                   <th scope="col" className="py-3 px-4">
-                    รายการที่ขาย
+                    {pick('รายการที่ขาย', 'ລາຍການທີ່ຂາຍ', 'Sold Item')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    จำนวนขาย
+                    {pick('จำนวนขาย', 'ຈຳນວນຂາຍ', 'Qty Sold')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    ยอดขายรวม
+                    {pick('ยอดขายรวม', 'ຍອດຂາຍລວມ', 'Gross Revenue')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    ต้นทุนวัตถุดิบจริง (COGS)
+                    {pick('ต้นทุนวัตถุดิบจริง (COGS)', 'ຕົ້ນທຶນວັດຖຸດິບຈິງ (COGS)', 'Actual COGS')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
-                    กำไรขั้นต้น
+                    {pick('กำไรขั้นต้น', 'ກຳໄລຂັ້ນຕົ້ນ', 'Gross Profit')}
                   </th>
                   <th scope="col" className="py-3 px-4 text-right">
                     % GP Margin
@@ -1657,7 +1804,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 {reports.marginReport.lines.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="py-12 text-center text-ink-muted">
-                      ยังไม่มีรายการขายสำเร็จเพื่อคำนวณกำไรขั้นต้น
+                      {pick('ยังไม่มีรายการขายสำเร็จเพื่อคำนวณกำไรขั้นต้น', 'ຍັງບໍ່ມີລາຍການຂາຍສຳເລັດເພື່ອຄຳນວນກຳໄລ', 'No completed sales yet to compute margin')}
                     </td>
                   </tr>
                 ) : (
@@ -1706,20 +1853,34 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                   id={`${uid}-z-print-title`}
                   className="font-google-display text-[18px] font-normal text-ink"
                 >
-                  ใบสรุปปิดกะความร้อน Z-Report · {zRasterPreview.shiftNumber} ({zPrintPaperMm}mm)
+                  {pick('ใบสรุปปิดกะความร้อน Z-Report', 'ໃບສະຫຼຸບປິດກະຄວາມຮ້ອນ Z-Report', 'Thermal Z-Report')} · {zRasterPreview.shiftNumber} ({zPrintPaperMm}mm)
                 </h3>
                 <p className="text-xs text-ink-muted">
                   {zRasterPreview.hardwareError
-                    ? `ส่งพิมพ์เครื่องพิมพ์ล้มเหลว (${zRasterPreview.hardwareError}) · เก็บเข้าคิว Spooler แล้ว`
+                    ? pick(
+                        `ส่งพิมพ์เครื่องพิมพ์ล้มเหลว (${zRasterPreview.hardwareError}) · เก็บเข้าคิว Spooler แล้ว`,
+                        `ສົ່ງພິມເຄື່ອງພິມລົ້ມເຫຼວ (${zRasterPreview.hardwareError}) · ເກັບເຂົ້າຄິວ Spooler ແລ້ວ`,
+                        `Printer dispatch failed (${zRasterPreview.hardwareError}) · Saved in spooler queue`
+                      )
                     : zRasterPreview.spoolStatus && zRasterPreview.spoolStatus !== 'PRINTED_IMMEDIATELY'
-                      ? `เก็บใบ Z-Report เข้าคิว Spooler แล้ว (${zRasterPreview.spoolStatus})`
-                      : 'ส่งออกคำสั่งพิมพ์ 203-DPI 1-Bit Raster สำเร็จ'}
-                  {zRasterPreview.transportMode ? ` · พอร์ต ${zRasterPreview.transportMode}` : ''}
+                      ? pick(
+                          `เก็บใบ Z-Report เข้าคิว Spooler แล้ว (${zRasterPreview.spoolStatus})`,
+                          `ເກັບໃບ Z-Report ເຂົ້າຄິວ Spooler ແລ້ວ (${zRasterPreview.spoolStatus})`,
+                          `Queued Z-Report in spooler (${zRasterPreview.spoolStatus})`
+                        )
+                      : pick(
+                          'ส่งออกคำสั่งพิมพ์ 203-DPI 1-Bit Raster สำเร็จ',
+                          'ສົ່ງອອກຄຳສັ່ງພິມ 203-DPI 1-Bit Raster ສຳເລັດ',
+                          'Dispatched 203-DPI 1-Bit Raster print job'
+                        )}
+                  {zRasterPreview.transportMode
+                    ? ` · ${pick('พอร์ต', 'ພອດ', 'Port')} ${zRasterPreview.transportMode}`
+                    : ''}
                 </p>
               </div>
               <button
                 type="button"
-                aria-label="ปิดตัวอย่างใบ Z-Report"
+                aria-label={pick('ปิดตัวอย่างใบ Z-Report', 'ປິດຕົວຢ່າງໃບ Z-Report', 'Close Z-Report preview')}
                 onClick={() => setZRasterPreview(null)}
                 className={`flex h-9 w-9 items-center justify-center rounded-full text-ink-muted hover:bg-surface-1 hover:text-ink ${UI_INTERACTION.focusButton}`}
               >
@@ -1728,7 +1889,9 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
             </div>
 
             <div className="border-b border-hairline bg-canvas px-5 py-2.5 flex items-center justify-between gap-2 text-xs shrink-0">
-              <span className="text-ink-muted">ขนาดกระดาษความร้อน</span>
+              <span className="text-ink-muted">
+                {pick('ขนาดกระดาษความร้อน', 'ຂະໜາດກະດາດຄວາມຮ້ອນ', 'Thermal Paper Width')}
+              </span>
               <div className="inline-flex rounded-[48px] border border-hairline p-0.5">
                 {([80, 58] as const).map((w) => (
                   <button
@@ -1779,7 +1942,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
                 onClick={() => setZRasterPreview(null)}
                 className={`h-[42px] rounded-[48px] bg-primary px-6 font-google-display text-sm font-medium tracking-[0.5px] text-white hover:bg-primary-hover ${UI_INTERACTION.focusButtonPrimary}`}
               >
-                เสร็จสิ้น
+                {pick('เสร็จสิ้น', 'ສຳເລັດ', 'Done')}
               </button>
             </div>
           </>
@@ -1788,7 +1951,11 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
 
       <ConfirmDialog
         open={confirmCloseOpen}
-        title={`ยืนยันปิดกะ ${bootstrap.activeShift?.shiftNumber ?? ''}?`}
+        title={pick(
+          `ยืนยันปิดกะ ${bootstrap.activeShift?.shiftNumber ?? ''}?`,
+          `ຢືນຢັນປິດກະ ${bootstrap.activeShift?.shiftNumber ?? ''}?`,
+          `Confirm close shift ${bootstrap.activeShift?.shiftNumber ?? ''}?`
+        )}
         description={
           parsedCountedSatang === 0
             ? pick(
@@ -1798,7 +1965,7 @@ export const ShiftAndReportsWorkspace: React.FC<ShiftAndReportsWorkspaceProps> =
               )
             : `${pick('ยอดเงินสดในลิ้นชักที่นับได้จริง', 'ຍອດເງິນສົດໃນລິ້ນຊັກທີ່ນັບໄດ້ຈິງ', 'Counted drawer cash')}: ${money(parsedCountedSatang ?? 0)}`
         }
-        confirmLabel="ยืนยันปิดกะ & ออกใบ Z-Report"
+        confirmLabel={pick('ยืนยันปิดกะ & ออกใบ Z-Report', 'ຢືນຢັນປິດກະ & ອອກໃບ Z-Report', 'Confirm Close & Print Z-Report')}
         tone={parsedCountedSatang === 0 ? 'danger' : 'primary'}
         busy={busy}
         onCancel={() => {

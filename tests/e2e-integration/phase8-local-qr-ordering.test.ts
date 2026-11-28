@@ -2642,3 +2642,1300 @@ test('Phase 8L: React SSR verification of QrOrderingSettingsCard & TableQrSlipMo
   assert.ok(modalSignedActiveHtml.includes('Signed Token'));
   assert.ok(!modalSignedActiveHtml.includes('Open table above first to generate a rotating HMAC token'));
 });
+
+test('Phase 8M: Held Bill Protection — Non-destructive claim, Cashier shrink/delete 403 block, Manager PIN override, Audit Logs, Version 409, Settlement & HMAC Tamper Guard', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rube-pos-phase8m-held-'));
+  const dbPath = path.join(tmpDir, 'rube_held_guard.db');
+  const guestPort = await getFreeTcpPort();
+  const server = new RubePosInteractiveAppServer({
+    dbPath,
+    requireFirstRunWizard: false,
+    enforceApiSessionAuth: true,
+  });
+
+  try {
+    const { url: posBase } = await server.start(0, '127.0.0.1');
+
+    const pinLogin = async (pin: string, userId?: string, statelessOverride = false) => {
+      const r = await fetch(`${posBase}/api/auth/pin-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pin,
+          ...(userId ? { userId } : {}),
+          ...(statelessOverride ? { statelessOverride: true } : {}),
+        }),
+      });
+      assert.equal(r.status, 200);
+      return (await r.json()) as {
+        sessionToken: string;
+        user: { id: string; role: string; displayName: string };
+      };
+    };
+
+    const ownerAuth = await pinLogin('999999', 'USR-OWNER-01');
+    const ownerHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${ownerAuth.sessionToken}`,
+    };
+
+    const createStaff = async (username: string, displayName: string, role: string, pin: string) => {
+      const r = await fetch(`${posBase}/api/auth/users`, {
+        method: 'POST',
+        headers: ownerHeaders,
+        body: JSON.stringify({ username, displayName, role, pin, active: true }),
+      });
+      assert.equal(r.status, 200);
+      const data = (await r.json()) as { user: { id: string } };
+      return data.user.id;
+    };
+
+    const mgrId = await createStaff('mgr8m', 'Manager 8M', 'MANAGER', '111111');
+    const cash1Id = await createStaff('cash8m1', 'Cashier One', 'CASHIER', '222222');
+    const cash2Id = await createStaff('cash8m2', 'Cashier Two', 'CASHIER', '333333');
+
+    const cash1Auth = await pinLogin('222222', cash1Id);
+    const cash1Headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${cash1Auth.sessionToken}`,
+    };
+
+    // Enable Guest QR ordering
+    const cfgRes = await fetch(`${posBase}/api/qr-ordering/config`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        enabled: true,
+        port: guestPort,
+        allowOpenTableSelection: true,
+        approvalMode: 'CASHIER_CONFIRM',
+        tableLabels: ['T01', 'T04'],
+      }),
+    });
+    assert.equal(cfgRes.status, 200);
+
+    // Seed two dine-in drinks in catalog
+    const addVariant = async (itemName: string, sku: string, priceSatang: number) => {
+      const res = await fetch(`${posBase}/api/catalog/variant`, {
+        method: 'POST',
+        headers: ownerHeaders,
+        body: JSON.stringify({
+          outletId: 'OUTLET-HQ',
+          itemName,
+          sku,
+          categoryId: 'CAT-CAFE',
+          unitName: 'แก้ว',
+          priceSatang,
+          defaultPurchaseCostMicroBaht: 15_000_000,
+          initialStockMilli: 50_000,
+        }),
+      });
+      assert.equal(res.status, 200);
+      return ((await res.json()) as { variant: { id: string; priceSatang: number } }).variant;
+    };
+    const vDrinkA = await addVariant('Lao Beer 640ml', 'SKU-8M-BEER', 25_00);
+    const vDrinkB = await addVariant('Brown Sugar Milk Tea', 'SKU-8M-BOBA', 40_00);
+
+    const guestBase = `http://127.0.0.1:${guestPort}`;
+
+    // 1. Guest submits QR order on T01 -> Cashier accepts into Held Bill + KDS
+    const qrSubmitRes = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        outletId: 'OUTLET-HQ',
+        tableLabel: 'T01',
+        entryChannel: 'QR',
+        lines: [
+          { variantId: vDrinkA.id, quantityCount: 2 },
+          { variantId: vDrinkB.id, quantityCount: 1 },
+        ],
+      }),
+    });
+    assert.equal(qrSubmitRes.status, 201);
+    const qrOrder1 = ((await qrSubmitRes.json()) as { order: { id: string } }).order;
+
+    const acceptRes = await fetch(`${posBase}/api/qr-ordering/orders/accept`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({ outletId: 'OUTLET-HQ', guestOrderId: qrOrder1.id }),
+    });
+    assert.equal(acceptRes.status, 200);
+    const acceptedPayload = (await acceptRes.json()) as {
+      heldBills: Array<{
+        id: string;
+        referenceLabel: string;
+        version?: number;
+        totalSatang: number;
+        cart: Array<{
+          cartKey: string;
+          variantId: string;
+          quantityMilli: number;
+          unitPriceSatang: number;
+          heldLineLocked?: boolean;
+          lockedMinQtyMilli?: number;
+          kdsDispatched?: boolean;
+        }>;
+      }>;
+      kdsTickets: Array<{ kitchenOrderId: string; status: string }>;
+    };
+    assert.ok(acceptedPayload.kdsTickets.length >= 1);
+    const t01Bill = acceptedPayload.heldBills.find((b) => b.referenceLabel === 'T01')!;
+    assert.ok(t01Bill);
+    assert.equal(t01Bill.version, 1);
+    assert.equal(t01Bill.cart.length, 2);
+    assert.equal(t01Bill.cart[0]?.heldLineLocked, true);
+    assert.equal(t01Bill.cart[0]?.kdsDispatched, true);
+    assert.equal(t01Bill.cart[0]?.lockedMinQtyMilli, 2_000);
+
+    // 2. Non-Destructive Claim + Conflict + Takeover + Release (Bill NEVER disappears on recall!)
+    const claimRes1 = await fetch(`${posBase}/api/pos/held-bills/claim`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({ outletId: 'OUTLET-HQ', id: t01Bill.id, claimToken: 'CLAIM-A' }),
+    });
+    assert.equal(claimRes1.status, 200);
+
+    const listAfterClaim = (await (
+      await fetch(`${posBase}/api/pos/held-bills?outletId=OUTLET-HQ`, { headers: cash1Headers })
+    ).json()) as { heldBills: typeof acceptedPayload.heldBills };
+    assert.equal(listAfterClaim.heldBills.length, 1, 'Claimed held bill MUST stay in DB until paid or voided');
+
+    const claimConflict = await fetch(`${posBase}/api/pos/held-bills/claim`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({ outletId: 'OUTLET-HQ', id: t01Bill.id, claimToken: 'CLAIM-B' }),
+    });
+    assert.equal(claimConflict.status, 409);
+
+    const takeoverRes = await fetch(`${posBase}/api/pos/held-bills/claim`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({
+        outletId: 'OUTLET-HQ',
+        id: t01Bill.id,
+        claimToken: 'CLAIM-C',
+        forceTakeover: true,
+      }),
+    });
+    assert.equal(takeoverRes.status, 200);
+
+    const relRes = await fetch(`${posBase}/api/pos/held-bills/release`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({ outletId: 'OUTLET-HQ', id: t01Bill.id, claimToken: 'CLAIM-C' }),
+    });
+    assert.equal(relRes.status, 200);
+
+    // 3. CASHIER MUST be blocked (HTTP 403) from voiding bill, shrinking/dropping lines via upsert, or short-checkout
+    const delCashierRes = await fetch(`${posBase}/api/pos/held-bills`, {
+      method: 'DELETE',
+      headers: cash1Headers,
+      body: JSON.stringify({ outletId: 'OUTLET-HQ', id: t01Bill.id, voidReason: 'Cashier delete try' }),
+    });
+    assert.equal(delCashierRes.status, 403);
+
+    const voidPostCashierRes = await fetch(`${posBase}/api/pos/held-bills/void`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({ outletId: 'OUTLET-HQ', id: t01Bill.id, voidReason: 'Cashier void try' }),
+    });
+    assert.equal(voidPostCashierRes.status, 403);
+
+    // Try shrinking cart via POST /api/pos/held-bills (dropping Drink B) without Manager PIN -> HTTP 403
+    const shrinkUpsertRes = await fetch(`${posBase}/api/pos/held-bills`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({
+        outletId: 'OUTLET-HQ',
+        bill: {
+          ...t01Bill,
+          cart: [t01Bill.cart[0]!],
+        },
+      }),
+    });
+    assert.equal(shrinkUpsertRes.status, 403);
+
+    // Try checking out heldBillId with omitted item or zeroed unitPrice -> HTTP 403
+    const shortCheckoutRes = await fetch(`${posBase}/api/pos/checkout`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({
+        idempotencyKey: 'IDEM-8M-SHORT-1',
+        outletId: 'OUTLET-HQ',
+        orderType: 'DINE_IN',
+        tableOrQueueNo: 'T01',
+        paymentMethod: 'CASH',
+        taxMode: 'INCLUSIVE',
+        discountSatang: 0,
+        heldBillId: t01Bill.id,
+        expectedHeldBillVersion: t01Bill.version,
+        lines: [
+          {
+            variantId: vDrinkA.id,
+            quantityMilli: 2_000,
+            unitPriceSatang: vDrinkA.priceSatang,
+            selectedModifierIds: [],
+          },
+        ],
+      }),
+    });
+    assert.equal(shortCheckoutRes.status, 403);
+
+    // Try void-item with another CASHIER's override PIN -> HTTP 403
+    const cash2Override = await pinLogin('333333', cash2Id, true);
+    const badOverrideRes = await fetch(`${posBase}/api/pos/held-bills/void-item`, {
+      method: 'POST',
+      headers: {
+        ...cash1Headers,
+        'X-Rube-Override-Token': cash2Override.sessionToken,
+      },
+      body: JSON.stringify({
+        outletId: 'OUTLET-HQ',
+        id: t01Bill.id,
+        targetCartKey: t01Bill.cart[0]!.cartKey,
+        nextQuantityMilli: 1_000,
+        voidReason: 'Wrong role pin',
+      }),
+    });
+    assert.equal(badOverrideRes.status, 403);
+
+    // 4. Valid MANAGER Override PIN reduces Drink A 2 -> 1, updates version 1 -> 2, and writes immutable Audit Log
+    const mgrOverride = await pinLogin('111111', mgrId, true);
+    const voidItemRes = await fetch(`${posBase}/api/pos/held-bills/void-item`, {
+      method: 'POST',
+      headers: {
+        ...cash1Headers,
+        'X-Rube-Override-Token': mgrOverride.sessionToken,
+      },
+      body: JSON.stringify({
+        outletId: 'OUTLET-HQ',
+        id: t01Bill.id,
+        expectedVersion: 1,
+        targetCartKey: t01Bill.cart[0]!.cartKey,
+        nextQuantityMilli: 1_000,
+        voidReason: 'ลูกค้าลดเบียร์เหลือ 1 แก้ว [อนุมัติโดย: Manager 8M]',
+      }),
+    });
+    assert.equal(voidItemRes.status, 200);
+    const voidItemJson = (await voidItemRes.json()) as {
+      heldBill: typeof t01Bill;
+      billVoidedCompletely: boolean;
+    };
+    assert.equal(voidItemJson.billVoidedCompletely, false);
+    assert.equal(voidItemJson.heldBill.version, 2);
+    assert.equal(voidItemJson.heldBill.totalSatang, 6_500); // 25_00 + 40_00
+
+    // 5. Claim at version 2 -> Late QR order accepted bumps server to version 3 -> Stale checkout hits HTTP 409!
+    const claimV2 = await fetch(`${posBase}/api/pos/held-bills/claim`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({ outletId: 'OUTLET-HQ', id: t01Bill.id, claimToken: 'CLAIM-PAY' }),
+    });
+    assert.equal(claimV2.status, 200);
+
+    const lateQrRes = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        outletId: 'OUTLET-HQ',
+        tableLabel: 'T01',
+        entryChannel: 'QR',
+        lines: [{ variantId: vDrinkA.id, quantityCount: 1 }],
+      }),
+    });
+    const lateOrder = ((await lateQrRes.json()) as { order: { id: string } }).order;
+    const lateAccept = await fetch(`${posBase}/api/qr-ordering/orders/accept`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({ outletId: 'OUTLET-HQ', guestOrderId: lateOrder.id }),
+    });
+    assert.equal(lateAccept.status, 200);
+    const afterLateAccept = (await lateAccept.json()) as { heldBills: typeof acceptedPayload.heldBills };
+    const latestT01 = afterLateAccept.heldBills.find((b) => b.id === t01Bill.id)!;
+    assert.equal(latestT01.version, 3);
+    assert.equal(latestT01.activeClaimToken, 'CLAIM-PAY');
+
+    const staleCheckoutRes = await fetch(`${posBase}/api/pos/checkout`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({
+        idempotencyKey: 'IDEM-8M-STALE-V2',
+        outletId: 'OUTLET-HQ',
+        orderType: 'DINE_IN',
+        tableOrQueueNo: 'T01',
+        paymentMethod: 'CASH',
+        taxMode: 'INCLUSIVE',
+        discountSatang: 0,
+        heldBillId: t01Bill.id,
+        expectedHeldBillVersion: 2,
+        lines: latestT01.cart.map((l) => ({
+          variantId: l.variantId,
+          quantityMilli: l.quantityMilli,
+          unitPriceSatang: l.unitPriceSatang,
+          selectedModifierIds: [],
+          skipKds: true,
+        })),
+      }),
+    });
+    assert.equal(staleCheckoutRes.status, 409);
+
+    // 6. Complete checkout at version 3 -> Held Bill settled atomically, idempotent replay works, double checkout blocked!
+    const validCheckoutBody = {
+      idempotencyKey: 'IDEM-8M-PAY-FINAL',
+      outletId: 'OUTLET-HQ',
+      orderType: 'DINE_IN',
+      tableOrQueueNo: 'T01',
+      paymentMethod: 'CASH',
+      taxMode: 'INCLUSIVE',
+      discountSatang: 0,
+      skipKdsEnqueue: true,
+      heldBillId: t01Bill.id,
+      expectedHeldBillVersion: 3,
+      lines: latestT01.cart.map((l) => ({
+        variantId: l.variantId,
+        quantityMilli: l.quantityMilli,
+        unitPriceSatang: l.unitPriceSatang,
+        selectedModifierIds: [],
+        skipKds: true,
+      })),
+    };
+    const finalPayRes = await fetch(`${posBase}/api/pos/checkout`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify(validCheckoutBody),
+    });
+    assert.equal(finalPayRes.status, 200);
+
+    const remainingAfterPay = (await (
+      await fetch(`${posBase}/api/pos/held-bills?outletId=OUTLET-HQ`, { headers: cash1Headers })
+    ).json()) as { heldBills: unknown[] };
+    assert.equal(remainingAfterPay.heldBills.length, 0);
+
+    // Idempotent replay with same key succeeds
+    const replayRes = await fetch(`${posBase}/api/pos/checkout`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify(validCheckoutBody),
+    });
+    assert.equal(replayRes.status, 200);
+
+    // New checkout key targeting already-settled heldBillId rejects with HTTP 409
+    const doubleCheckoutRes = await fetch(`${posBase}/api/pos/checkout`, {
+      method: 'POST',
+      headers: cash1Headers,
+      body: JSON.stringify({ ...validCheckoutBody, idempotencyKey: 'IDEM-8M-DOUBLE-TRY' }),
+    });
+    assert.equal(doubleCheckoutRes.status, 409);
+
+    // 7. Full Held Bill Void by Manager PIN cancels KDS ticket, marks Guest QR order REJECTED & logs HELD_BILL_VOIDED
+    const t04QrRes = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        outletId: 'OUTLET-HQ',
+        tableLabel: 'T04',
+        entryChannel: 'NFC',
+        lines: [{ variantId: vDrinkB.id, quantityCount: 1 }],
+      }),
+    });
+    const t04Order = ((await t04QrRes.json()) as { order: { id: string } }).order;
+    const acceptT04 = (await (
+      await fetch(`${posBase}/api/qr-ordering/orders/accept`, {
+        method: 'POST',
+        headers: cash1Headers,
+        body: JSON.stringify({ outletId: 'OUTLET-HQ', guestOrderId: t04Order.id }),
+      })
+    ).json()) as {
+      order: { kdsSalesOrderId: string };
+      heldBills: Array<{ id: string }>;
+    };
+    const t04HeldId = acceptT04.heldBills[0]!.id;
+
+    const voidWholeRes = await fetch(`${posBase}/api/pos/held-bills/void`, {
+      method: 'POST',
+      headers: {
+        ...cash1Headers,
+        'X-Rube-Override-Token': mgrOverride.sessionToken,
+      },
+      body: JSON.stringify({
+        outletId: 'OUTLET-HQ',
+        id: t04HeldId,
+        voidReason: 'ลูกค้าขอเปลี่ยนโต๊ะก่อนทำ',
+      }),
+    });
+    assert.equal(voidWholeRes.status, 200);
+    const voidWholeJson = (await voidWholeRes.json()) as {
+      heldBills: unknown[];
+      cancelledKdsOrderIds: string[];
+    };
+    assert.equal(voidWholeJson.heldBills.length, 0);
+    assert.ok(voidWholeJson.cancelledKdsOrderIds.includes(acceptT04.order.kdsSalesOrderId));
+
+    const kdsAfterVoid = (await (
+      await fetch(`${posBase}/api/kds/tickets?outletId=OUTLET-HQ`, { headers: ownerHeaders })
+    ).json()) as { tickets: Array<{ salesOrderId: string }> };
+    assert.equal(
+      kdsAfterVoid.tickets.some((t) => t.salesOrderId === acceptT04.order.kdsSalesOrderId),
+      false,
+      'Cancelled held bill KDS ticket MUST be cancelled immediately'
+    );
+
+    // Verify both HELD_BILL_ITEM_VOIDED and HELD_BILL_VOIDED in immutable security_audit_logs
+    const logsRes = (await (
+      await fetch(`${posBase}/api/security/audit-logs?limit=25`, { headers: ownerHeaders })
+    ).json()) as {
+      auditLogs: Array<{ eventType: string; actorUserId: string | null; newValueRedacted: string | null }>;
+    };
+    assert.ok(
+      logsRes.auditLogs.some(
+        (l) => l.eventType === 'HELD_BILL_ITEM_VOIDED' && l.actorUserId === mgrId
+      )
+    );
+    assert.ok(
+      logsRes.auditLogs.some(
+        (l) => l.eventType === 'HELD_BILL_VOIDED' && l.actorUserId === mgrId
+      )
+    );
+
+    // 8. SQLite Direct HMAC Tamper Check on held_bills_OUTLET-HQ MUST fail closed
+    await server.engine.executeWriteImmediate((db) => {
+      db.prepare(`UPDATE store_config SET value = '[{"id":"TAMPER"}]' WHERE key = 'held_bills_OUTLET-HQ'`).run();
+    });
+    assert.throws(
+      () => server.ipc.listHeldBills('OUTLET-HQ'),
+      /Security Tamper Alert/
+    );
+  } finally {
+    await server.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Phase 8N: React SSR verification of Held Bill protection badges, Cashier PIN Void button & VoidOrderAuthModal held modes', async () => {
+  const esbuild = await import('esbuild');
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { createRequire } = await import('node:module');
+
+  const appDir = path.resolve(import.meta.dirname, '../../packages/ui-presentation/src/app');
+  const toImport = (rel: string) => path.join(appDir, rel);
+
+  const entrySource = [
+    `export { I18nProvider } from ${JSON.stringify(toImport('i18n/index.tsx'))};`,
+    `export { VoidOrderAuthModal } from ${JSON.stringify(toImport('components/VoidOrderAuthModal.tsx'))};`,
+    `export { PosRegisterWorkspace } from ${JSON.stringify(toImport('components/PosRegisterWorkspace.tsx'))};`,
+  ].join('\n');
+
+  const built = await esbuild.build({
+    stdin: {
+      contents: entrySource,
+      resolveDir: appDir,
+      loader: 'tsx',
+    },
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'cjs',
+    jsx: 'automatic',
+    packages: 'external',
+    logLevel: 'silent',
+  });
+
+  const cjsCode = built.outputFiles[0]!.text;
+  const req = createRequire(import.meta.url);
+  const cjsModule: { exports: Record<string, unknown> } = { exports: {} };
+  const fn = new Function('exports', 'require', 'module', cjsCode);
+  fn(cjsModule.exports, req, cjsModule);
+  const mod = cjsModule.exports as {
+    I18nProvider: React.FC<{ fiscalConfig: unknown; children: React.ReactNode }>;
+    VoidOrderAuthModal: React.FC<Record<string, unknown>>;
+    PosRegisterWorkspace: React.FC<Record<string, unknown>>;
+  };
+
+  const baseFiscal = {
+    countryCode: 'TH',
+    currencyCode: 'THB',
+    currencySymbol: '฿',
+    currencyDecimals: 2,
+    uiLocale: 'th',
+    receiptLocale: 'th',
+    defaultTaxMode: 'INCLUSIVE',
+    vatRateBps: 700,
+    storeAddress: '',
+    laoQrStaticTemplate: '',
+  };
+
+  const renderWithI18n = (el: React.ReactElement) =>
+    renderToStaticMarkup(React.createElement(mod.I18nProvider, { fiscalConfig: baseFiscal }, el));
+
+  // 1. VoidOrderAuthModal renders HELD_BILL_ITEM_VOID mode with Manager PIN pad for CASHIER
+  const cashierUser = {
+    id: 'USR-C1',
+    username: 'cashier1',
+    displayName: 'Cashier A',
+    role: 'CASHIER',
+    active: true,
+    createdAt: '2026-11-28T00:00:00Z',
+  };
+  const itemVoidHtml = renderWithI18n(
+    React.createElement(mod.VoidOrderAuthModal, {
+      open: true,
+      order: {
+        mode: 'HELD_BILL_ITEM_VOID',
+        salesOrderId: 'HOLD-1',
+        receiptNumber: 'T01',
+        abbTaxInvoiceNo: null,
+        totalSatang: 7_300,
+        subtitle: 'ชานมไข่มุก: 1 แก้ว -> ลบออกจากบิล (ส่งเข้าครัว KDS แล้ว)',
+      },
+      currentUser: cashierUser,
+      onClose: () => {},
+      onVoidAuthorized: async () => {},
+    })
+  );
+  assert.ok(itemVoidHtml.includes('อนุมัติลด/ลบรายการบิลพัก'));
+  assert.ok(itemVoidHtml.includes('ลูกค้าขอยกเลิกรายการก่อนรับของ'));
+  assert.ok(itemVoidHtml.includes('อนุมัติด้วย PIN &amp; ลด/ลบรายการ'));
+
+  // 2. PosRegisterWorkspace renders locked cart badge + PIN cancel button on locked KDS line
+  const workspaceHtml = renderWithI18n(
+    React.createElement(mod.PosRegisterWorkspace, {
+      outletId: 'OUTLET-HQ',
+      currentUser: cashierUser,
+      cart: [
+        {
+          cartKey: 'V1::::kds',
+          variantId: 'V1',
+          itemName: 'ชานมไข่มุก',
+          variantName: 'ปกติ',
+          sku: 'SKU-1',
+          unitName: 'แก้ว',
+          quantityMilli: 1_000,
+          unitPriceSatang: 4_000,
+          selectedModifierIds: [],
+          isWeightedScale: false,
+          kdsDispatched: true,
+          heldLineLocked: true,
+          lockedMinQtyMilli: 1_000,
+          heldBillOriginId: 'HOLD-T01',
+        },
+      ],
+      setCart: () => {},
+      searchQuery: '',
+      setSearchQuery: () => {},
+      rollbackCount: 0,
+      onScanBarcodeString: () => {},
+      lastPrintedReceipt: null,
+      setLastPrintedReceipt: () => {},
+      bootstrap: {
+        onboarded: true,
+        profile: 'HOSPITALITY',
+        fiscalConfig: baseFiscal,
+        featureFlags: {
+          profile: 'HOSPITALITY',
+          defaultPosView: 'CAFE_TOUCH_TILES',
+          enableGlobalBarcodeScanner: true,
+          enableScaleBarcodeParser: false,
+          enableMultiLevelBom: true,
+          enableRoleBasedModifiers: true,
+          enableKitchenDisplaySystem: true,
+        },
+        activeShift: null,
+        catalog: [],
+        catalogDetailed: [],
+        categories: [],
+        suppliers: [],
+        outlets: [],
+        bomEdges: [],
+        modifiers: [],
+        modifierGroups: [],
+        kdsTickets: [],
+        recentOrders: [],
+        heldBills: [
+          {
+            id: 'HOLD-T01',
+            outletId: 'OUTLET-HQ',
+            referenceLabel: 'T01',
+            orderType: 'DINE_IN',
+            taxMode: 'INCLUSIVE',
+            cart: [],
+            totalSatang: 4_000,
+            heldByName: 'Cashier A',
+            heldAtIso: '2026-11-28T00:00:00Z',
+          },
+        ],
+        shiftsHistory: [],
+        drawerMovements: [],
+        staffUsers: [cashierUser],
+        storeSettings: {
+          outletId: 'OUTLET-HQ',
+          outletCode: 'HQ',
+          storeName: 'Rube Cafe',
+          taxId: '0105550000000',
+          branchCode: '00000',
+          rdPosRegNo: 'E01',
+          promptPayId: '0812345678',
+          businessProfile: 'HOSPITALITY',
+        },
+        printerConfig: {
+          mode: 'SIMULATED_MEMORY',
+          tcpHost: '',
+          tcpPort: 9100,
+          windowsPrinterName: '',
+          paperWidthMm: 80,
+          autoKickDrawerOnCash: true,
+        },
+        usbBackups: [],
+        ledgerInvariant: { valid: true, mismatches: [] },
+        upsBanner: {
+          visible: false,
+          severity: 'NONE',
+          headlineThai: '',
+          batteryChargePercent: 100,
+          estimatedRuntimeSeconds: 0,
+          walCheckpointFlushed: false,
+        },
+        printer: { ready: true, pendingQueueLength: 0 },
+        cluster: {
+          operatingMode: 'STANDALONE_IPC_ONLY',
+          roleState: 'ACTIVE_LEADER',
+          currentEpoch: 1,
+          terminalId: 'POS-TERM-01',
+          globalTxSeq: 1,
+          ipcStats: { readsRouted: 0, writesRouted: 0 },
+        },
+      },
+      onRefreshState: async () => {},
+      onToast: () => {},
+    })
+  );
+  assert.ok(workspaceHtml.includes('ส่งครัว KDS'));
+  assert.ok(workspaceHtml.includes('ขอยกเลิกรายการ ชานมไข่มุก (ต้องใช้ PIN ผู้จัดการ)'));
+  assert.ok(workspaceHtml.includes('ยกเลิก (PIN)'));
+});
+
+test('Phase 8O: Zero Thai leakage in lo/en UI locales (AST audit + 14-component React SSR + HTTP server error i18n)', async () => {
+  // 1. Static TypeScript AST invariant check across packages/ui-presentation/src/app
+  const ts = await import('typescript');
+  const appDir = path.resolve(import.meta.dirname, '../../packages/ui-presentation/src/app');
+  const walkTsFiles = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walkTsFiles(full));
+      else if (/\.(ts|tsx)$/.test(entry.name)) out.push(full);
+    }
+    return out;
+  };
+
+  // Thai Unicode block excluding universal Thai Baht symbol ฿ (U+0E3F)
+  const thaiScriptRe = /[\u0E01-\u0E3A\u0E40-\u0E7F]/;
+  const laoScriptRe = /[\u0E80-\u0EFF]/;
+  const astViolations: string[] = [];
+  const mixedScriptViolations: string[] = [];
+
+  for (const file of walkTsFiles(appDir)) {
+    const rel = path.relative(appDir, file).replace(/\\/g, '/');
+    if (rel === 'utils/keyboard-digits.ts' || rel === 'i18n/translations.ts') continue;
+    const code = fs.readFileSync(file, 'utf8');
+    const sf = ts.createSourceFile(
+      file,
+      code,
+      ts.ScriptTarget.Latest,
+      true,
+      file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+    );
+
+    const visit = (node: import('typescript').Node) => {
+      const isText =
+        ts.isStringLiteral(node) ||
+        ts.isNoSubstitutionTemplateLiteral(node) ||
+        ts.isTemplateHead(node) ||
+        ts.isTemplateMiddle(node) ||
+        ts.isTemplateTail(node) ||
+        ts.isJsxText(node);
+      if (isText) {
+        const txt = (node as { text?: string }).text ?? '';
+        if (txt.trim().length > 0 && (thaiScriptRe.test(txt) || /th-TH/.test(txt))) {
+          let allowed = false;
+          let isIntendedThaiOnly = false;
+          let cur: import('typescript').Node = node;
+          while (cur.parent) {
+            const p = cur.parent;
+            if (ts.isCallExpression(p)) {
+              const fn = p.expression.getText(sf);
+              const argIdx = p.arguments.indexOf(cur as import('typescript').Expression);
+              if (
+                (fn === 'pick' || fn === 'pickApp' || fn === 'pickFn' || fn.endsWith('.pick')) &&
+                argIdx === 0
+              ) {
+                allowed = true;
+                isIntendedThaiOnly = true;
+                break;
+              }
+              if (fn === 'pickLocaleText' && argIdx === 1) {
+                allowed = true;
+                isIntendedThaiOnly = true;
+                break;
+              }
+              if (fn === 'msg.includes' && txt.trim() === 'บิลพัก') {
+                allowed = true;
+                break;
+              }
+            }
+            if (
+              ts.isPropertyAssignment(p) &&
+              /^(th|labelTh|titleTh|descTh|thText)$/.test(p.name.getText(sf))
+            ) {
+              allowed = true;
+              isIntendedThaiOnly = true;
+              break;
+            }
+            if (
+              ts.isBinaryExpression(p) &&
+              p.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+              /^(storeName|ownerDisplayName|clean)$/.test(p.left.getText(sf))
+            ) {
+              allowed = true;
+              break;
+            }
+            if (rel === 'components/FirstRunWizardModal.tsx') {
+              let anc: import('typescript').Node | undefined = p;
+              while (anc) {
+                if (ts.isVariableDeclaration(anc) && /^DEFAULT_WIZARD_/.test(anc.name.getText(sf))) {
+                  allowed = true;
+                  break;
+                }
+                anc = anc.parent;
+              }
+              if (allowed) break;
+            }
+            if (ts.isConditionalExpression(p)) {
+              const cond = p.condition.getText(sf);
+              if (
+                /===\s*'th'|loc\s*===\s*'th'|locale\s*===\s*'th'|effectiveLocale\s*===\s*'th'/.test(
+                  cond
+                ) &&
+                cur === p.whenTrue &&
+                !/th-TH/.test(txt)
+              ) {
+                allowed = true;
+                isIntendedThaiOnly = true;
+                break;
+              }
+              if (
+                cur === p.whenFalse &&
+                (/===\s*'lo'/.test(cond) || /===\s*'en'/.test(cond)) &&
+                p.parent &&
+                ts.isConditionalExpression(p.parent) &&
+                (/===\s*'lo'/.test(p.parent.condition.getText(sf)) ||
+                  /===\s*'en'/.test(p.parent.condition.getText(sf)))
+              ) {
+                allowed = true;
+                isIntendedThaiOnly = true;
+                break;
+              }
+            }
+            cur = p;
+          }
+          if (/^(ไทย|ภาษาไทย \(Thai\))$/.test(txt.trim())) {
+            allowed = true;
+          }
+          if (!allowed) {
+            const pos = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+            astViolations.push(`${rel}:${pos.line + 1} => ${JSON.stringify(txt.trim())}`);
+          }
+          if (!isIntendedThaiOnly && laoScriptRe.test(txt) && thaiScriptRe.test(txt)) {
+            const pos = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+            mixedScriptViolations.push(`${rel}:${pos.line + 1} => ${JSON.stringify(txt.trim())}`);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  assert.deepEqual(
+    astViolations,
+    [],
+    `Found unlocalized Thai/th-TH strings in app/: ${astViolations.join('; ')}`
+  );
+  assert.deepEqual(
+    mixedScriptViolations,
+    [],
+    `Found accidental Thai characters inside Lao strings: ${mixedScriptViolations.join('; ')}`
+  );
+
+  // 2. React 19 SSR check across all 14 UI components in both `lo` and `en` locales
+  const esbuild = await import('esbuild');
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { createRequire } = await import('node:module');
+
+  const toImport = (rel: string) => path.join(appDir, rel);
+  const componentDefs = [
+    { name: 'PosRegisterWorkspace', file: 'components/PosRegisterWorkspace.tsx' },
+    { name: 'VoidOrderAuthModal', file: 'components/VoidOrderAuthModal.tsx' },
+    { name: 'QrOrderingInboxPanel', file: 'components/QrOrderingInboxPanel.tsx' },
+    { name: 'QrOrderingSettingsCard', file: 'components/QrOrderingSettingsCard.tsx' },
+    { name: 'PinLockModal', file: 'components/PinLockModal.tsx' },
+    { name: 'KdsWorkspace', file: 'components/KdsWorkspace.tsx' },
+    { name: 'BarcodeCameraScannerModal', file: 'components/BarcodeCameraScannerModal.tsx' },
+    { name: 'HilSimulatorDrawer', file: 'components/HilSimulatorDrawer.tsx' },
+    { name: 'FirstRunWizardModal', file: 'components/FirstRunWizardModal.tsx' },
+    { name: 'SystemSettingsWorkspace', file: 'components/SystemSettingsWorkspace.tsx' },
+    { name: 'BomStudioWorkspace', file: 'components/BomStudioWorkspace.tsx' },
+    { name: 'BarcodeLabelPrintWorkspace', file: 'components/BarcodeLabelPrintWorkspace.tsx' },
+    { name: 'ShiftAndReportsWorkspace', file: 'components/ShiftAndReportsWorkspace.tsx' },
+    { name: 'WarehouseWorkspace', file: 'components/WarehouseWorkspace.tsx' },
+  ] as const;
+
+  const entrySource = [
+    `export { I18nProvider } from ${JSON.stringify(toImport('i18n/index.tsx'))};`,
+    `export { TableQrSlipModal } from ${JSON.stringify(toImport('components/QrOrderingInboxPanel.tsx'))};`,
+    ...componentDefs.map((c) => `export { ${c.name} } from ${JSON.stringify(toImport(c.file))};`),
+  ].join('\n');
+
+  const built = await esbuild.build({
+    stdin: {
+      contents: entrySource,
+      resolveDir: appDir,
+      loader: 'tsx',
+    },
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'cjs',
+    jsx: 'automatic',
+    packages: 'external',
+    logLevel: 'silent',
+  });
+
+  const cjsCode = built.outputFiles[0]!.text;
+  const req = createRequire(import.meta.url);
+  const cjsModule: { exports: Record<string, unknown> } = { exports: {} };
+  const fn = new Function('exports', 'require', 'module', cjsCode);
+  fn(cjsModule.exports, req, cjsModule);
+  const mod = cjsModule.exports as Record<string, React.FC<Record<string, unknown>>>;
+
+  const ownerUser = {
+    id: 'USR-OWNER-01',
+    username: 'owner',
+    displayName: 'Store Owner',
+    role: 'OWNER',
+    active: true,
+    createdAt: '2026-11-28T00:00:00Z',
+  };
+
+  const { DEFAULT_LA_FISCAL_CONFIG, DEFAULT_TH_FISCAL_CONFIG } = await import(
+    '../../packages/shared-contracts/src/currency.ts'
+  );
+
+  for (const locale of ['lo', 'en'] as const) {
+    const fiscalConfig = {
+      ...(locale === 'lo' ? DEFAULT_LA_FISCAL_CONFIG : DEFAULT_TH_FISCAL_CONFIG),
+      uiLocale: locale,
+      receiptLocale: locale,
+      storeAddress: '123 Main Road',
+    };
+
+    const bootstrap = {
+      onboarded: true,
+      isSessionAuthenticated: true,
+      profile: 'HOSPITALITY',
+      fiscalConfig,
+      featureFlags: {
+        profile: 'HOSPITALITY',
+        defaultPosView: 'CAFE_TOUCH_TILES',
+        enableGlobalBarcodeScanner: true,
+        enableScaleBarcodeParser: true,
+        enableMultiLevelBom: true,
+        enableRoleBasedModifiers: true,
+        enableKitchenDisplaySystem: true,
+      },
+      activeShift: null,
+      catalog: [],
+      catalogDetailed: [],
+      categories: [],
+      suppliers: [],
+      outlets: [],
+      bomEdges: [],
+      modifiers: [],
+      modifierGroups: [],
+      kdsTickets: [],
+      recentOrders: [],
+      heldBills: [],
+      shiftsHistory: [],
+      drawerMovements: [],
+      staffUsers: [ownerUser],
+      storeSettings: {
+        outletId: 'OUTLET-HQ',
+        outletCode: 'HQ',
+        storeName: 'Rube Cafe',
+        storeAddress: '123 Main Road',
+        taxId: '0105550000000',
+        branchCode: '00000',
+        rdPosRegNo: 'E01',
+        promptPayId: '0812345678',
+        businessProfile: 'HOSPITALITY',
+        fiscalConfig,
+      },
+      printerConfig: {
+        mode: 'SIMULATED_MEMORY',
+        tcpHost: '',
+        tcpPort: 9100,
+        windowsPrinterName: '',
+        paperWidthMm: 80,
+        autoKickDrawerOnCash: true,
+      },
+      qrOrderingConfig: {
+        ...DEFAULT_QR_ORDERING_CONFIG,
+        enabled: true,
+      },
+      qrOrderingStatus: {
+        running: false,
+        port: 4174,
+        detectedLanIpv4s: ['192.168.1.50'],
+        activeHost: '192.168.1.50',
+        baseUrl: 'http://192.168.1.50:4174',
+      },
+      qrGuestOrders: [],
+      qrTableSessions: [],
+      qrServiceCalls: [],
+      usbBackupConfig: {
+        customBackupDir: '',
+        defaultLocalBackupDir: 'C:\\RubeBackups',
+        activeEffectiveDir: 'C:\\RubeBackups',
+        isExternalCustomDir: false,
+        targetWritable: true,
+        mirrorToLocalFallback: true,
+      },
+      usbBackups: [],
+      ledgerInvariant: { valid: true, mismatches: [] },
+      upsBanner: {
+        visible: false,
+        severity: 'NONE',
+        headlineThai: '',
+        batteryChargePercent: 100,
+        estimatedRuntimeSeconds: 0,
+        walCheckpointFlushed: false,
+      },
+      printer: { ready: true, pendingQueueLength: 0 },
+      cluster: {
+        operatingMode: 'STANDALONE_IPC_ONLY',
+        roleState: 'ACTIVE_LEADER',
+        currentEpoch: 1,
+        terminalId: 'POS-TERM-01',
+        globalTxSeq: 1,
+        ipcStats: { readsRouted: 0, writesRouted: 0 },
+      },
+    };
+
+    const renderCmp = (name: string, props: Record<string, unknown>) => {
+      const rawHtml = renderToStaticMarkup(
+        React.createElement(
+          mod['I18nProvider']!,
+          { fiscalConfig },
+          React.createElement(mod[name]!, props)
+        )
+      );
+      // Native Thai language switcher options (`<option value="th">ภาษาไทย (Thai)</option>` / `>ไทย</button>`) are intentional autonyms
+      const sanitizedHtml = rawHtml
+        .replace(/<option value="th">ภาษาไทย \(Thai\)<\/option>/g, '')
+        .replace(/>ไทย<\/button>/g, '></button>');
+      const match = thaiScriptRe.exec(sanitizedHtml);
+      assert.equal(
+        match,
+        null,
+        `Unexpected Thai text in ${name} under locale="${locale}": "${match ? sanitizedHtml.slice(Math.max(0, match.index - 24), match.index + 48) : ''}"`
+      );
+      return rawHtml;
+    };
+
+    const posHtml = renderCmp('PosRegisterWorkspace', {
+      outletId: 'OUTLET-HQ',
+      bootstrap,
+      currentUser: ownerUser,
+      cart: [],
+      setCart: () => {},
+      searchQuery: '',
+      setSearchQuery: () => {},
+      rollbackCount: 0,
+      onScanBarcodeString: () => {},
+      lastPrintedReceipt: null,
+      setLastPrintedReceipt: () => {},
+      onRefreshState: async () => {},
+      onToast: () => {},
+    });
+    assert.ok(
+      posHtml.includes(locale === 'lo' ? 'ສິນຄ້າ' : 'Products') ||
+        posHtml.includes(locale === 'lo' ? 'ຊຳລະເງິນ' : 'Checkout') ||
+        posHtml.length > 200
+    );
+
+    renderCmp('VoidOrderAuthModal', {
+      open: true,
+      order: {
+        mode: 'HELD_BILL_VOID',
+        salesOrderId: 'HOLD-1',
+        receiptNumber: 'T01',
+        abbTaxInvoiceNo: null,
+        totalSatang: 4_000,
+        subtitle: 'Table T01',
+      },
+      currentUser: ownerUser,
+      onClose: () => {},
+      onVoidAuthorized: async () => {},
+    });
+    renderCmp('QrOrderingInboxPanel', {
+      outletId: 'OUTLET-HQ',
+      bootstrap,
+      guestOrders: [],
+      tableSessions: [],
+      qrStatus: bootstrap.qrOrderingStatus,
+      syncing: false,
+      onRefreshOrders: async () => {},
+      onOpenTableQrModal: async () => {},
+      onAcceptedOrder: () => {},
+      onToast: () => {},
+    });
+    renderCmp('TableQrSlipModal', {
+      open: true,
+      outletId: 'OUTLET-HQ',
+      bootstrap,
+      currentUser: ownerUser,
+      tableSessions: [],
+      onClose: () => {},
+      onSessionsChanged: async () => {},
+      onToast: () => {},
+    });
+    renderCmp('QrOrderingSettingsCard', {
+      outletId: 'OUTLET-HQ',
+      bootstrap,
+      canManage: true,
+      onRefreshState: async () => {},
+      onToast: () => {},
+    });
+    renderCmp('PinLockModal', {
+      open: true,
+      canDismiss: false,
+      staffUsers: [ownerUser],
+      currentUser: ownerUser,
+      simulationModeEnabled: false,
+      onAuthenticated: () => {},
+      onClose: () => {},
+    });
+    renderCmp('KdsWorkspace', {
+      outletId: 'OUTLET-HQ',
+      initialTickets: [],
+      onRefreshBootstrap: async () => {},
+      onToast: () => {},
+    });
+    renderCmp('BarcodeCameraScannerModal', {
+      open: true,
+      mode: 'BARCODE',
+      onClose: () => {},
+      onBarcodeDetected: () => {},
+    });
+    renderCmp('HilSimulatorDrawer', {
+      open: true,
+      onClose: () => {},
+      bootstrap,
+      lastPrintedReceipt: null,
+      onInjectScannedBarcodeToPos: () => {},
+      onRefreshState: async () => {},
+      onToast: () => {},
+    });
+    renderCmp('FirstRunWizardModal', {
+      open: true,
+      isPreviewMode: true,
+      initialStoreSettings: bootstrap.storeSettings,
+      initialPrinterConfig: bootstrap.printerConfig,
+      onCompleted: async () => {},
+      onCancelPreview: async () => {},
+    });
+    renderCmp('SystemSettingsWorkspace', {
+      outletId: 'OUTLET-HQ',
+      bootstrap,
+      currentUser: ownerUser,
+      simulationModeEnabled: false,
+      onToggleSimulationMode: () => {},
+      onClearLocaleOverride: () => {},
+      onRefreshState: async () => {},
+      onToast: () => {},
+    });
+    renderCmp('BomStudioWorkspace', {
+      outletId: 'OUTLET-HQ',
+      bootstrap,
+      currentUser: ownerUser,
+      simulationModeEnabled: false,
+      onRefreshState: async () => {},
+      onToast: () => {},
+    });
+    renderCmp('BarcodeLabelPrintWorkspace', {
+      outletId: 'OUTLET-HQ',
+      bootstrap,
+      currentUser: ownerUser,
+      queueEntries: [],
+      setQueueEntries: () => {},
+      onRefreshState: async () => {},
+      onToast: () => {},
+    });
+    renderCmp('ShiftAndReportsWorkspace', {
+      outletId: 'OUTLET-HQ',
+      bootstrap,
+      currentUser: ownerUser,
+      onRefreshState: async () => {},
+      onToast: () => {},
+    });
+    renderCmp('WarehouseWorkspace', {
+      outletId: 'OUTLET-HQ',
+      bootstrap,
+      currentUser: ownerUser,
+      onRefreshState: async () => {},
+      onToast: () => {},
+    });
+  }
+
+  // 3. Live HTTP Backend + Guest QR Server Error/Warning Localization & CORS X-Rube-Locale check
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rube-pos-i18n-srv-'));
+  const dbPath = path.join(tmpDir, 'rube_i18n_srv.db');
+  const guestPort = await getFreeTcpPort();
+  const server = new RubePosInteractiveAppServer({
+    dbPath,
+    requireFirstRunWizard: false,
+    enforceApiSessionAuth: true,
+  });
+
+  try {
+    const { url: posBase } = await server.start(0, '127.0.0.1');
+
+    // CORS preflight allows X-Rube-Locale header
+    const preflightRes = await fetch(`${posBase}/api/bootstrap`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'http://tauri.localhost',
+        'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Headers': 'Authorization, Content-Type, X-Rube-Locale',
+      },
+    });
+    assert.equal(preflightRes.status, 204);
+    const allowHeaders = preflightRes.headers.get('access-control-allow-headers') ?? '';
+    assert.ok(
+      allowHeaders.toLowerCase().includes('x-rube-locale'),
+      `Expected Access-Control-Allow-Headers to contain X-Rube-Locale, got: ${allowHeaders}`
+    );
+
+    const ownerLoginRes = await fetch(`${posBase}/api/auth/pin-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: '999999', userId: 'USR-OWNER-01' }),
+    });
+    assert.equal(ownerLoginRes.status, 200);
+    const ownerAuth = (await ownerLoginRes.json()) as { sessionToken: string };
+    const ownerHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${ownerAuth.sessionToken}`,
+    };
+
+    const cashierCreateRes = await fetch(`${posBase}/api/auth/users`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        username: 'cash8o',
+        displayName: 'Cashier 8O',
+        role: 'CASHIER',
+        pin: '222222',
+        active: true,
+      }),
+    });
+    assert.equal(cashierCreateRes.status, 200);
+    const cashierId = ((await cashierCreateRes.json()) as { user: { id: string } }).user.id;
+    const cashLoginRes = await fetch(`${posBase}/api/auth/pin-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: '222222', userId: cashierId }),
+    });
+    assert.equal(cashLoginRes.status, 200);
+    const cashToken = ((await cashLoginRes.json()) as { sessionToken: string }).sessionToken;
+
+    // Enable Guest QR ordering server on guestPort
+    const qrCfgRes = await fetch(`${posBase}/api/qr-ordering/config`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        enabled: true,
+        port: guestPort,
+        allowOpenTableSelection: false,
+        approvalMode: 'CASHIER_CONFIRM',
+        tableLabels: ['T01'],
+      }),
+    });
+    assert.equal(qrCfgRes.status, 200);
+
+    for (const loc of ['lo', 'en'] as const) {
+      // Invalid PIN -> HTTP 401 localized
+      const badPinRes = await fetch(`${posBase}/api/auth/pin-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Rube-Locale': loc },
+        body: JSON.stringify({ pin: '000000' }),
+      });
+      assert.equal(badPinRes.status, 401);
+      const badPinJson = (await badPinRes.json()) as { error: string };
+      assert.equal(thaiScriptRe.test(badPinJson.error), false, `401 leaked Thai (${loc}): ${badPinJson.error}`);
+      assert.ok(badPinJson.error.includes('PIN'));
+
+      // Cashier held-bill void without override -> HTTP 403 localized
+      const voidForbiddenRes = await fetch(`${posBase}/api/pos/held-bills/void`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${cashToken}`,
+          'X-Rube-Locale': loc,
+        },
+        body: JSON.stringify({ outletId: 'OUTLET-HQ', id: 'HOLD-NONE', voidReason: 'Mistake' }),
+      });
+      assert.equal(voidForbiddenRes.status, 403);
+      const voidForbiddenJson = (await voidForbiddenRes.json()) as { error: string };
+      assert.equal(
+        thaiScriptRe.test(voidForbiddenJson.error),
+        false,
+        `403 leaked Thai (${loc}): ${voidForbiddenJson.error}`
+      );
+      if (loc === 'lo') assert.ok(laoScriptRe.test(voidForbiddenJson.error));
+      if (loc === 'en') assert.ok(voidForbiddenJson.error.includes('CASHIER'));
+
+      // Simulate USB yank message -> HTTP 200 localized
+      const yankRes = await fetch(`${posBase}/api/shift/simulate-yank-usb`, {
+        method: 'POST',
+        headers: { ...ownerHeaders, 'X-Rube-Locale': loc },
+      });
+      assert.equal(yankRes.status, 200);
+      const yankJson = (await yankRes.json()) as { message: string };
+      assert.equal(thaiScriptRe.test(yankJson.message), false, `USB sim leaked Thai (${loc}): ${yankJson.message}`);
+      if (loc === 'lo') assert.ok(laoScriptRe.test(yankJson.message));
+      if (loc === 'en') assert.ok(yankJson.message.includes('Simulated unexpected USB removal'));
+
+      // Guest QR server -> HTTP 403 when unsigned/no table slip
+      const guestUrl = `http://127.0.0.1:${guestPort}/api/guest/service-call?lang=${loc}`;
+      const guestErrRes = await fetch(guestUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Rube-Locale': loc },
+        body: JSON.stringify({ outletId: 'OUTLET-HQ', tableLabel: 'T01', callType: 'CALL_STAFF' }),
+      });
+      assert.equal(guestErrRes.status, 403);
+      const guestErrJson = (await guestErrRes.json()) as { error: string };
+      assert.equal(
+        thaiScriptRe.test(guestErrJson.error),
+        false,
+        `Guest QR 403 leaked Thai (${loc}): ${guestErrJson.error}`
+      );
+      if (loc === 'lo') assert.ok(laoScriptRe.test(guestErrJson.error));
+      if (loc === 'en') assert.ok(guestErrJson.error.includes('QR'));
+    }
+  } finally {
+    await server.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

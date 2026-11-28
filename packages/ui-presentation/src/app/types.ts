@@ -11,6 +11,10 @@ import type {
 } from '@rube-pos/shared-contracts';
 import type { TaxMode } from '../../../shared-contracts/src/fixed-point.ts';
 import type {
+  HeldBillCartLineDto,
+  HeldBillRecordDto,
+} from '../../../shared-contracts/src/ipc-commands.ts';
+import type {
   CashRoundingStepMajor,
   CashTenderCurrencyCode,
   CountryCode,
@@ -324,36 +328,7 @@ export interface BootstrapPayload {
   };
 }
 
-export interface CartItem {
-  cartKey: string;
-  variantId: string;
-  itemName: string;
-  variantName: string;
-  sku: string;
-  unitName: string;
-  quantityMilli: number;
-  unitPriceSatang: number;
-  overrideLineTotalSatang?: number | undefined;
-  selectedModifierIds: string[];
-  isWeightedScale: boolean;
-  scaleBadgeText?: string | undefined;
-  kdsDispatched?: boolean | undefined;
-  guestNote?: string | undefined;
-}
-
-export interface HeldBillRecordDto {
-  id: string;
-  outletId: string;
-  referenceLabel: string;
-  orderType: CheckoutOrderRequest['orderType'];
-  taxMode: TaxMode;
-  discountMode?: 'BAHT' | 'PERCENT' | undefined;
-  discountInput?: string | undefined;
-  cart: CartItem[];
-  totalSatang: number;
-  heldByName: string;
-  heldAtIso: string;
-}
+export type CartItem = HeldBillCartLineDto;
 
 export interface PrintedReceiptPreview {
   salesOrderId?: string | undefined;
@@ -393,6 +368,8 @@ export type {
   GuestOrderRecordDto,
   GuestServiceCallDto,
   GuestServiceCallType,
+  HeldBillCartLineDto,
+  HeldBillRecordDto,
   ItemVariantDto,
   LaoQrVerificationPolicy,
   LocaleCode,
