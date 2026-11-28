@@ -185,13 +185,15 @@ export class GuestQrOrderingServer {
       activeCfg.customHostOverride.trim() ||
       detectedLanIpv4s[0] ||
       '127.0.0.1';
+    const urlHost =
+      activeHost.includes(':') && !activeHost.startsWith('[') ? `[${activeHost}]` : activeHost;
     const effectivePort = this.boundPort || activeCfg.port;
     return {
       running: this.server !== null,
       port: effectivePort,
       detectedLanIpv4s,
       activeHost,
-      baseUrl: `http://${activeHost}:${effectivePort}`,
+      baseUrl: `http://${urlHost}:${effectivePort}`,
       ...(this.lastError ? { lastError: this.lastError } : {}),
     };
   }

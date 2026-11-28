@@ -1,6 +1,7 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
+  AlertTriangle,
   CheckCircle2,
   Copy,
   Download,
@@ -19,6 +20,8 @@ import {
   DEFAULT_QR_ORDERING_CONFIG,
   NFC_CHIP_USABLE_NDEF_BYTES,
   normalizeTableLabels,
+  sanitizeGuestText,
+  sanitizeHostOverride,
   type NfcRecordLayout,
   type NfcTableTagPackageDto,
   type NfcTagChipType,
@@ -33,6 +36,7 @@ import { posTransport } from '../api/pos-transport.ts';
 import { useI18n } from '../i18n/index.tsx';
 import type { BootstrapPayload } from '../types.ts';
 import { openA4TableQrPrintWindow } from '../utils/a4-qr-sheet-printer.ts';
+import { downloadUtf8BomCsv } from '../utils/csv-exporter.ts';
 import {
   isWebNfcSupported,
   writeNfcPackageViaBrowserReader,
@@ -93,16 +97,29 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
   const [wifiQrPreviewUrl, setWifiQrPreviewUrl] = useState<string | null>(null);
   const [showRouterGuide, setShowRouterGuide] = useState<boolean>(false);
   const [showNfcTagsPanel, setShowNfcTagsPanel] = useState<boolean>(false);
-  const [bridgeQrTarget, setBridgeQrTarget] = useState<{ label: string; url: string } | null>(
-    null
-  );
+  const [bridgeQrTableLabel, setBridgeQrTableLabel] = useState<string | null>(null);
   const [bridgeQrDataUrl, setBridgeQrDataUrl] = useState<string | null>(null);
   const [writingNfcTable, setWritingNfcTable] = useState<string | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
   const webNfcAvailable = isWebNfcSupported();
+  const nfcWriteAbortRef = useRef<AbortController | null>(null);
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
-    const cfg = bootstrap.qrOrderingConfig ?? DEFAULT_QR_ORDERING_CONFIG;
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      nfcWriteAbortRef.current?.abort();
+      nfcWriteAbortRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    nfcWriteAbortRef.current?.abort();
+    nfcWriteAbortRef.current = null;
+  }, [outletId]);
+
+  const applyConfigToForm = (cfg: QrOrderingConfigDto) => {
     setEnabled(cfg.enabled);
     setPortInput(String(cfg.port));
     setWifiSsid(cfg.wifiSsid);
@@ -117,17 +134,87 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
     setNfcTagMode(cfg.nfcTagMode ?? 'STATIC_TABLE');
     setNfcRecordLayout(cfg.nfcRecordLayout ?? 'URI_ONLY');
     setNfcChipType(cfg.nfcChipType ?? 'NTAG215');
-    setRuntimeStatus(bootstrap.qrOrderingStatus);
-    setTableSessions(bootstrap.qrTableSessions ?? []);
-  }, [bootstrap.qrOrderingConfig, bootstrap.qrOrderingStatus, bootstrap.qrTableSessions]);
+  };
+
+  const cfgSyncKey = JSON.stringify(bootstrap.qrOrderingConfig ?? DEFAULT_QR_ORDERING_CONFIG);
+  useEffect(() => {
+    applyConfigToForm(bootstrap.qrOrderingConfig ?? DEFAULT_QR_ORDERING_CONFIG);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfgSyncKey]);
 
   useEffect(() => {
-    if (!bridgeQrTarget?.url) {
+    setRuntimeStatus(bootstrap.qrOrderingStatus);
+    setTableSessions(bootstrap.qrTableSessions ?? []);
+  }, [bootstrap.qrOrderingStatus, bootstrap.qrTableSessions]);
+
+  const parsedPort = Math.max(1024, Math.min(65535, Number(portInput.replace(/\D/g, '')) || 4174));
+  const effectivePort = parsedPort === 4173 ? 4174 : parsedPort;
+  const firewallCmd = `netsh advfirewall firewall add rule name="RUBE-POS Guest QR ${effectivePort}" dir=in action=allow protocol=TCP localport=${effectivePort}`;
+  const effectiveTablesList = normalizeTableLabels(tablesText);
+  const sanitizedHostOverride = sanitizeHostOverride(customHostOverride);
+  const effectiveHost =
+    sanitizedHostOverride || runtimeStatus?.detectedLanIpv4s[0] || '127.0.0.1';
+  const urlFormattedHost =
+    effectiveHost.includes(':') && !effectiveHost.startsWith('[')
+      ? `[${effectiveHost}]`
+      : effectiveHost;
+  const effectiveBaseUrl = `http://${urlFormattedHost}:${effectivePort}`;
+  const liveEffectiveCfg: QrOrderingConfigDto = {
+    enabled,
+    port: effectivePort,
+    wifiSsid: sanitizeGuestText(wifiSsid, 64),
+    wifiPassword: wifiSecurity === 'NOPASS' ? '' : sanitizeGuestText(wifiPassword, 64),
+    wifiSecurity,
+    approvalMode,
+    tableLabels: effectiveTablesList,
+    maxQtyPerItem: Math.max(1, Math.min(99, Number(maxQtyPerItem.replace(/\D/g, '')) || 20)),
+    allowOpenTableSelection,
+    customHostOverride: sanitizedHostOverride,
+    nfcEnabled,
+    nfcTagMode,
+    nfcRecordLayout,
+    nfcChipType,
+  };
+  const sessionByUpper = new Map(
+    tableSessions.map((s) => [s.tableLabel.trim().toUpperCase(), s])
+  );
+  const nfcPackages: NfcTableTagPackageDto[] = effectiveTablesList.map((tableLabel) =>
+    buildNfcTableTagPackage({
+      baseUrl: effectiveBaseUrl,
+      tableLabel,
+      outletId,
+      signedToken: sessionByUpper.get(tableLabel.trim().toUpperCase())?.token ?? null,
+      config: liveEffectiveCfg,
+    })
+  );
+  const rawBridgePkg = bridgeQrTableLabel
+    ? (nfcPackages.find((p) => p.tableLabel.toUpperCase() === bridgeQrTableLabel.toUpperCase()) ??
+      null)
+    : null;
+  const activeBridgePkg =
+    rawBridgePkg &&
+    rawBridgePkg.recordLayout !== 'WIFI_WSC_ONLY' &&
+    !(rawBridgePkg.tagMode === 'SIGNED_SESSION' && !rawBridgePkg.signedSessionActive)
+      ? rawBridgePkg
+      : null;
+
+  useEffect(() => {
+    if (bridgeQrTableLabel !== null && !activeBridgePkg) {
+      setBridgeQrTableLabel(null);
+    }
+  }, [bridgeQrTableLabel, activeBridgePkg]);
+
+  useEffect(() => {
+    if (!activeBridgePkg?.menuUrl) {
       setBridgeQrDataUrl(null);
       return;
     }
     let cancelled = false;
-    void QRCode.toDataURL(bridgeQrTarget.url, { width: 164, margin: 1, errorCorrectionLevel: 'M' })
+    void QRCode.toDataURL(activeBridgePkg.menuUrl, {
+      width: 164,
+      margin: 1,
+      errorCorrectionLevel: 'M',
+    })
       .then((url) => {
         if (!cancelled) setBridgeQrDataUrl(url);
       })
@@ -137,8 +224,7 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [bridgeQrTarget]);
-
+  }, [activeBridgePkg?.menuUrl]);
   useEffect(() => {
     const payload = buildWifiQrPayload(wifiSsid, wifiPassword, wifiSecurity);
     if (!payload) {
@@ -158,48 +244,25 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
     };
   }, [wifiSsid, wifiPassword, wifiSecurity]);
 
-  const parsedPort = Math.max(1024, Math.min(65535, Number(portInput.replace(/\D/g, '')) || 4174));
-  const firewallCmd = `netsh advfirewall firewall add rule name="RUBE-POS Guest QR ${parsedPort}" dir=in action=allow protocol=TCP localport=${parsedPort}`;
-  const effectivePort = parsedPort === 4173 ? 4174 : parsedPort;
-  const effectiveTablesList = normalizeTableLabels(tablesText);
-  const effectiveBaseUrl =
-    runtimeStatus?.baseUrl ??
-    `http://${customHostOverride.trim() || '127.0.0.1'}:${effectivePort}`;
-  const liveEffectiveCfg: QrOrderingConfigDto = {
-    enabled,
-    port: effectivePort,
-    wifiSsid: wifiSsid.trim(),
-    wifiPassword: wifiSecurity === 'NOPASS' ? '' : wifiPassword.trim(),
-    wifiSecurity,
-    approvalMode,
-    tableLabels: effectiveTablesList,
-    maxQtyPerItem: Math.max(1, Math.min(99, Number(maxQtyPerItem.replace(/\D/g, '')) || 20)),
-    allowOpenTableSelection,
-    customHostOverride: customHostOverride.trim(),
-    nfcEnabled,
-    nfcTagMode,
-    nfcRecordLayout,
-    nfcChipType,
-  };
-  const sessionByUpper = new Map(
-    tableSessions.map((s) => [s.tableLabel.trim().toUpperCase(), s])
-  );
-  const nfcPackages: NfcTableTagPackageDto[] = effectiveTablesList.map((tableLabel) =>
-    buildNfcTableTagPackage({
-      baseUrl: effectiveBaseUrl,
-      tableLabel,
-      outletId,
-      signedToken: sessionByUpper.get(tableLabel.trim().toUpperCase())?.token ?? null,
-      config: liveEffectiveCfg,
-    })
-  );
   const wifiWscPreviewBytes = buildWifiWscCredentialBytes(
     liveEffectiveCfg.wifiSsid,
     liveEffectiveCfg.wifiPassword,
     liveEffectiveCfg.wifiSecurity
   );
+  const hasUsableWifiWsc = wifiWscPreviewBytes.length > 0;
+  const isWscLayoutRequested =
+    nfcRecordLayout === 'WIFI_WSC_ONLY' || nfcRecordLayout === 'URI_AND_WIFI_WSC';
+  const missingWifiWscWarning = nfcEnabled && isWscLayoutRequested && !hasUsableWifiWsc;
+  const staticWithoutOpenTableWarning =
+    nfcEnabled && nfcTagMode === 'STATIC_TABLE' && !allowOpenTableSelection;
+  const unopenedSignedCount =
+    nfcEnabled && nfcTagMode === 'SIGNED_SESSION'
+      ? nfcPackages.filter((p) => !p.signedSessionActive).length
+      : 0;
 
   const handleSave = async () => {
+    nfcWriteAbortRef.current?.abort();
+    nfcWriteAbortRef.current = null;
     setBusy(true);
     try {
       const tableLabels = normalizeTableLabels(tablesText);
@@ -213,15 +276,18 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
         approvalMode,
         allowOpenTableSelection,
         maxQtyPerItem: Math.max(1, Math.min(99, Number(maxQtyPerItem.replace(/\D/g, '')) || 20)),
-        customHostOverride: customHostOverride.trim(),
+        customHostOverride: sanitizedHostOverride,
         tableLabels,
         nfcEnabled,
         nfcTagMode,
         nfcRecordLayout,
         nfcChipType,
       });
-      setRuntimeStatus(res.status);
-      setTableSessions(res.tableSessions);
+      if (isMountedRef.current) {
+        applyConfigToForm(res.config);
+        setRuntimeStatus(res.status);
+        setTableSessions(res.tableSessions);
+      }
       await onRefreshState();
       onToast(
         res.status.running
@@ -251,6 +317,7 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
     setBusy(true);
     try {
       const opened = await openA4TableQrPrintWindow({
+        outletId,
         storeName: bootstrap.storeSettings.storeName,
         locale: fiscal.receiptLocale,
         baseUrl: effectiveBaseUrl,
@@ -284,49 +351,55 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
   };
 
   const handleDownloadNfcExport = (format: 'csv' | 'json') => {
-    const content =
-      format === 'json'
-        ? JSON.stringify(
-            {
-              generatedAtIso: new Date().toISOString(),
-              outletId,
-              baseUrl: effectiveBaseUrl,
-              wifiSsid: liveEffectiveCfg.wifiSsid,
-              nfcTagMode,
-              nfcRecordLayout,
-              nfcChipType,
-              tags: nfcPackages,
-            },
-            null,
-            2
-          )
-        : [
-            'tableLabel,recordLayout,chipType,ndefByteLength,fitsSelectedChip,menuUrl,ndefType2TlvHex,wscBase64',
-            ...nfcPackages.map((p) =>
-              [
-                p.tableLabel,
-                p.recordLayout,
-                p.chipType,
-                String(p.ndefByteLength),
-                p.fitsSelectedChip ? 'YES' : 'NO',
-                `"${p.menuUrl.replace(/"/g, '""')}"`,
-                p.ndefType2TlvHex,
-                p.wscBase64 ?? '',
-              ].join(',')
-            ),
-          ].join('\r\n');
-
-    const blob = new Blob([content], {
-      type: format === 'json' ? 'application/json;charset=utf-8' : 'text/csv;charset=utf-8',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `rube-nfc-table-tags-${outletId.toLowerCase()}.${format}`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    if (format === 'csv') {
+      downloadUtf8BomCsv(
+        `rube-nfc-table-tags-${outletId.toLowerCase()}.csv`,
+        [
+          'tableLabel',
+          'recordLayout',
+          'chipType',
+          'ndefByteLength',
+          'fitsSelectedChip',
+          'menuUrl',
+          'ndefType2TlvHex',
+          'wscBase64',
+        ],
+        nfcPackages.map((p) => [
+          p.tableLabel,
+          p.recordLayout,
+          p.chipType,
+          p.ndefByteLength,
+          p.fitsSelectedChip ? 'YES' : 'NO',
+          p.recordLayout === 'WIFI_WSC_ONLY' ? '' : p.menuUrl,
+          p.ndefType2TlvHex,
+          p.wscBase64 ?? '',
+        ])
+      );
+    } else {
+      const content = JSON.stringify(
+        {
+          generatedAtIso: new Date().toISOString(),
+          outletId,
+          baseUrl: effectiveBaseUrl,
+          wifiSsid: liveEffectiveCfg.wifiSsid,
+          nfcTagMode,
+          nfcRecordLayout,
+          nfcChipType,
+          tags: nfcPackages,
+        },
+        null,
+        2
+      );
+      const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `rube-nfc-table-tags-${outletId.toLowerCase()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
     onToast(
       pick(
         `ดาวน์โหลดไฟล์รายการแท็ก NFC (${format.toUpperCase()}) แล้ว`,
@@ -338,9 +411,18 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
   };
 
   const handleWriteBrowserNfcTag = async (pkg: NfcTableTagPackageDto) => {
+    if (writingNfcTable !== null) return;
+    nfcWriteAbortRef.current?.abort();
+    const controller = new AbortController();
+    nfcWriteAbortRef.current = controller;
     setWritingNfcTable(pkg.tableLabel);
     try {
-      const res = await writeNfcPackageViaBrowserReader(pkg);
+      const res = await writeNfcPackageViaBrowserReader(
+        pkg,
+        25_000,
+        controller.signal
+      );
+      if (!isMountedRef.current || controller.signal.aborted) return;
       onToast(
         pick(
           `เขียนแท็ก NFC โต๊ะ ${pkg.tableLabel} สำเร็จ (${res.recordsCount} records · ${res.ndefByteLength} Bytes)`,
@@ -350,9 +432,16 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
         'success'
       );
     } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err), 'error');
+      if (isMountedRef.current && !controller.signal.aborted) {
+        onToast(err instanceof Error ? err.message : String(err), 'error');
+      }
     } finally {
-      setWritingNfcTable(null);
+      if (nfcWriteAbortRef.current === controller) {
+        nfcWriteAbortRef.current = null;
+      }
+      if (isMountedRef.current) {
+        setWritingNfcTable(null);
+      }
     }
   };
 
@@ -423,7 +512,7 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
               {pick('ลิงก์หน้าเมนู Local ของร้าน:', 'ລິ້ງໜ້າເມນູ Local ຂອງຮ້ານ:', 'Local Guest Menu URL:')}
             </span>
             <code className="rounded-[4px] border border-hairline bg-canvas px-2 py-0.5 font-mono-num text-primary-dark">
-              {runtimeStatus?.baseUrl ? `${runtimeStatus.baseUrl}/m` : `http://127.0.0.1:${parsedPort}/m`}
+              {`${effectiveBaseUrl}/m`}
             </code>
           </div>
           {runtimeStatus && runtimeStatus.detectedLanIpv4s.length > 0 && (
@@ -542,6 +631,15 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
                 onChange={(e) => setPortInput(e.target.value.replace(/\D/g, '').slice(0, 5))}
                 className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink tabular-nums-google disabled:bg-surface-1 ${UI_INTERACTION.focusControl}`}
               />
+              {parsedPort === 4173 && (
+                <div className="mt-1 text-[10px] text-danger">
+                  {pick(
+                    'พอร์ต 4173 สงวนไว้สำหรับ POS หลัก — ระบบจะใช้พอร์ต 4174 แทน',
+                    'ພອດ 4173 ສະຫງວນໄວ້ສຳລັບ POS ຫຼັກ — ລະບົບຈະໃຊ້ພອດ 4174 ແທນ',
+                    'Port 4173 is reserved for POS core — coerced to 4174'
+                  )}
+                </div>
+              )}
             </div>
             <div className="sm:col-span-2">
               <label htmlFor={`${uid}-host-override`} className="block text-ink-muted mb-1">
@@ -824,6 +922,53 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
           </p>
         </div>
 
+        {(staticWithoutOpenTableWarning || missingWifiWscWarning || unopenedSignedCount > 0) && (
+          <div className="space-y-2">
+            {staticWithoutOpenTableWarning && (
+              <div className="flex items-start gap-2 rounded-[4px] border border-danger bg-danger-soft px-3 py-2 text-[11px] text-danger">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>
+                  {pick(
+                    'คำเตือน: โหมดแท็ก STATIC_TABLE ไม่มี Signed Token หากปิด "เปิดรับ Walk-in Captive Portal" ลูกค้าที่แตะ NFC จะส่งออเดอร์ไม่ได้ (HTTP 403) — กรุณาเปิดรับ Walk-in table picker หรือเปลี่ยนเป็นโหมด SIGNED_SESSION',
+                    'ຄຳເຕືອນ: ໂໝດ STATIC_TABLE ບໍ່ມີ Signed Token ຫາກປິດ "Walk-in Captive Portal" ລູກຄ້າທີ່ແຕະ NFC ຈະສັ່ງອໍເດີບໍ່ໄດ້ (HTTP 403) — ກະລຸນາເປີດ Walk-in ຫຼື ປ່ຽນເປັນ SIGNED_SESSION',
+                    'Warning: STATIC_TABLE NFC tags are unsigned; with "Allow Walk-in Captive Portal table picker" disabled, NFC orders will fail (HTTP 403). Enable open table selection or switch to SIGNED_SESSION.'
+                  )}
+                </span>
+              </div>
+            )}
+            {missingWifiWscWarning && (
+              <div className="flex items-start gap-2 rounded-[4px] border border-danger bg-danger-soft px-3 py-2 text-[11px] text-danger">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>
+                  {!liveEffectiveCfg.wifiSsid
+                    ? pick(
+                        'คำเตือน: ยังไม่ได้กรอกชื่อ Wi-Fi (SSID) — ไม่สามารถสร้าง Wi-Fi WSC ได้ ระบบจะลดระดับ NDEF เป็น URI_ONLY ชั่วคราว',
+                        'ຄຳເຕືອນ: ຍັງບໍ່ໄດ້ໃສ່ຊື່ Wi-Fi (SSID) — ບໍ່ສາມາດສ້າງ Wi-Fi WSC ໄດ້ ລະບົບຈະຫຼຸດລະດັບ NDEF ເປັນ URI_ONLY ຊົ່ວຄາວ',
+                        'Warning: Wi-Fi SSID is blank — Wi-Fi WSC cannot be encoded; NDEF payloads fall back to URI_ONLY until SSID is set.'
+                      )
+                    : pick(
+                        'คำเตือน: รหัสผ่าน Wi-Fi (WPA) ต้องมีอย่างน้อย 8 ตัวอักษรจึงจะสร้าง WFA WSC ได้ (หรือเลือก Open Wi-Fi) — ระบบจะลดระดับ NDEF เป็น URI_ONLY ชั่วคราว',
+                        'ຄຳເຕືອນ: ລະຫັດ Wi-Fi (WPA) ຕ້ອງມີຢ່າງໜ້ອຍ 8 ຕົວອັກສອນ — ລະບົບຈະໃຊ້ URI_ONLY ຊົ່ວຄາວ',
+                        'Warning: WPA password must be at least 8 characters for WFA WSC (or select Open Wi-Fi) — NDEF payloads fall back to URI_ONLY.'
+                      )}
+                </span>
+              </div>
+            )}
+            {unopenedSignedCount > 0 && (
+              <div className="flex items-start gap-2 rounded-[4px] border border-danger/60 bg-danger-soft/60 px-3 py-2 text-[11px] text-danger">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>
+                  {pick(
+                    `คำเตือน: โหมด SIGNED_SESSION มี ${unopenedSignedCount} โต๊ะที่ยังไม่ได้เปิดรอบ HMAC Token — กรุณากด "เปิดโต๊ะ / พิมพ์ใบ QR โต๊ะ" ที่หน้าขาย POS ก่อนเขียนแท็กหรือคัดลอกลิงก์`,
+                    `ຄຳເຕືອນ: ໂໝດ SIGNED_SESSION ມີ ${unopenedSignedCount} ໂຕະທີ່ຍັງບໍ່ທັນເປີດ HMAC Token — ກະລຸນາເປີດໂຕະໃນໜ້າຂາຍ POS ກ່ອນ`,
+                    `Warning: ${unopenedSignedCount} table(s) have no active HMAC session yet in SIGNED_SESSION mode — open each table in POS Register before writing tags.`
+                  )}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center justify-between gap-2">
           <button
             type="button"
@@ -868,39 +1013,63 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
 
         {showNfcTagsPanel && (
           <div className="space-y-3 pt-2 border-t border-hairline">
-            {bridgeQrTarget && (
+            {nfcRecordLayout === 'WIFI_WSC_ONLY' && hasUsableWifiWsc && (
+              <div className="rounded-[4px] border border-hairline bg-surface-1 px-3 py-2 text-[11px] text-ink-soft">
+                {pick(
+                  'หมายเหตุโครงสร้าง WIFI_WSC_ONLY: แท็กบรรจุเฉพาะข้อมูล Wi-Fi WSC (binary) ไม่มี Menu URL จึงปิดปุ่ม Bridge QR URL — ให้ใช้ปุ่ม "เขียน NFC" บน Android Chrome หรือ Export NDEF JSON/CSV',
+                  'ໝາຍເຫດ WIFI_WSC_ONLY: ແທັກບັນຈຸສະເພາະ Wi-Fi WSC (binary) ບໍ່ມີ Menu URL — ໃຊ້ປຸ່ມ "ຂຽນ NFC" ເທິງ Android Chrome ຫຼື Export NDEF JSON/CSV',
+                  'WIFI_WSC_ONLY note: Tags carry binary Wi-Fi WSC only (no Menu URL, so Bridge QR is disabled). Use Android Web NFC Write or Export NDEF JSON/CSV.'
+                )}
+              </div>
+            )}
+            {nfcRecordLayout === 'URI_AND_WIFI_WSC' && hasUsableWifiWsc && (
+              <div className="rounded-[4px] border border-primary/40 bg-primary-soft/20 px-3 py-2 text-[11px] text-ink-soft">
+                {pick(
+                  'คำแนะนำ Multi-Record (URI + Wi-Fi WSC): ปุ่ม "เขียน NFC" บน Android Chrome จะเขียนครบทั้ง 2 Record อัตโนมัติ แต่หากใช้ Bridge QR เข้าแอป NFC Tools จะส่งได้เฉพาะ Record ลำดับที่ 1 (Menu URL) ต้องเพิ่ม Wi-Fi Network record ในแอป NFC Tools เพิ่มเติม',
+                  'ຄຳແນະນຳ Multi-Record (URI + Wi-Fi WSC): ປຸ່ມ "ຂຽນ NFC" ເທິງ Android Chrome ຈະຂຽນຄົບທັງ 2 Record ອັດຕະໂນມັດ ແຕ່ Bridge QR ຈະສົ່ງໄດ້ສະເພາະ Menu URL ເທົ່ານັ້ນ',
+                  'Multi-Record guidance: Android Web NFC writes both URI + Wi-Fi WSC automatically. Bridge QR transfers Record 1 (Menu URL) only — add a Wi-Fi Network record manually in NFC Tools if needed.'
+                )}
+              </div>
+            )}
+            {activeBridgePkg && (
               <div className="rounded-[4px] border border-primary bg-surface-1 p-3 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   {bridgeQrDataUrl && (
                     <img
                       src={bridgeQrDataUrl}
-                      alt={`NFC Bridge QR ${bridgeQrTarget.label}`}
+                      alt={`NFC Bridge QR ${activeBridgePkg.tableLabel}`}
                       className="h-24 w-24 rounded-[4px] border border-hairline bg-white p-1 shrink-0"
                     />
                   )}
                   <div className="space-y-1">
                     <div className="font-medium text-ink">
                       {pick(
-                        `QR ส่งลิงก์เข้าแอปเขียน NFC บนมือถือ (โต๊ะ ${bridgeQrTarget.label})`,
-                        `QR ສົ່ງລິ້ງເຂົ້າແອັບຂຽນ NFC (ໂຕະ ${bridgeQrTarget.label})`,
-                        `Mobile NFC Writer Bridge QR (${bridgeQrTarget.label})`
+                        `QR ส่งลิงก์เข้าแอปเขียน NFC บนมือถือ (โต๊ะ ${activeBridgePkg.tableLabel})`,
+                        `QR ສົ່ງລິ້ງເຂົ້າແອັບຂຽນ NFC (ໂຕະ ${activeBridgePkg.tableLabel})`,
+                        `Mobile NFC Writer Bridge QR (${activeBridgePkg.tableLabel})`
                       )}
                     </div>
                     <div className="font-mono-num text-[11px] text-primary-dark break-all">
-                      {bridgeQrTarget.url}
+                      {activeBridgePkg.menuUrl}
                     </div>
                     <div className="text-[11px] text-ink-muted">
-                      {pick(
-                        'ใช้มือถือพนักงานสแกน QR นี้ คัดลอก URL แล้ววางในแอป NFC Tools -> Write -> Add Record -> URL/URI',
-                        'ໃຊ້ມືຖືພະນັກງານສະແກນ QR ນີ້ ແລ້ວວາງລິ້ງໃນແອັບ NFC Tools',
-                        'Scan on staff phone -> paste URL into NFC Tools Write -> URL/URI.'
-                      )}
+                      {activeBridgePkg.recordLayout === 'URI_AND_WIFI_WSC'
+                        ? pick(
+                            'ใช้มือถือพนักงานสแกน QR นี้ คัดลอก URL -> NFC Tools -> Write -> Add Record -> URL/URI (และเพิ่ม Wi-Fi Network record เป็น Record ที่ 2 หากต้องการ Auto-Join Wi-Fi)',
+                            'ໃຊ້ມືຖືພະນັກງານສະແກນ QR ນີ້ ວາງ URL ໃນ NFC Tools (Record 1) ແລະ ເພີ່ມ Wi-Fi Network record ເປັນ Record 2',
+                            'Scan on staff phone -> NFC Tools -> URL/URI (Record 1), plus add Wi-Fi Network (Record 2) for WSC.'
+                          )
+                        : pick(
+                            'ใช้มือถือพนักงานสแกน QR นี้ คัดลอก URL แล้ววางในแอป NFC Tools -> Write -> Add Record -> URL/URI',
+                            'ໃຊ້ມືຖືພະນັກງານສະແກນ QR ນີ້ ແລ້ວວາງລິ້ງໃນແອັບ NFC Tools',
+                            'Scan on staff phone -> paste URL into NFC Tools Write -> URL/URI.'
+                          )}
                     </div>
                   </div>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setBridgeQrTarget(null)}
+                  onClick={() => setBridgeQrTableLabel(null)}
                   className={`h-8 rounded-[48px] border border-hairline bg-canvas px-3 text-[11px] font-medium text-ink-muted hover:text-ink ${UI_INTERACTION.focusButton}`}
                 >
                   {pick('ปิด QR นี้', 'ປິດ QR ນີ້', 'Close')}
@@ -919,81 +1088,136 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-hairline">
-                  {nfcPackages.map((pkg) => (
-                    <tr key={pkg.tableLabel} className="hover:bg-surface-1">
-                      <td className="py-2 px-3 font-medium text-ink whitespace-nowrap">
-                        <div>{pkg.tableLabel}</div>
-                        <div className="text-[10px] text-ink-muted">
-                          {pkg.signedSessionActive ? 'Signed HMAC' : 'Static'}
-                        </div>
-                      </td>
-                      <td className="py-2 px-3 max-w-xs">
-                        <div className="font-mono-num text-[11px] text-ink break-all">
-                          {pkg.menuUrl}
-                        </div>
-                      </td>
-                      <td className="py-2 px-3 whitespace-nowrap">
-                        <span
-                          className={`inline-flex items-center rounded-[48px] border px-2 py-0.5 text-[10px] font-medium tabular-nums-google ${
-                            pkg.fitsSelectedChip
-                              ? 'border-primary/40 bg-primary-soft text-primary-dark'
-                              : 'border-danger bg-danger-soft text-danger'
-                          }`}
-                        >
-                          {pkg.ndefByteLength} / {pkg.chipCapacityBytes} B ({pkg.chipType})
-                        </span>
-                        {!pkg.fitsSelectedChip && (
-                          <div className="text-[10px] text-danger mt-0.5">
-                            {pkg.recommendedChipType
-                              ? `Recommend ${pkg.recommendedChipType}`
-                              : 'Exceeds NTAG216'}
+                  {nfcPackages.map((pkg) => {
+                    const isWscOnlyRow = pkg.recordLayout === 'WIFI_WSC_ONLY';
+                    const isMissingSignedSession =
+                      pkg.tagMode === 'SIGNED_SESSION' && !pkg.signedSessionActive;
+                    const writeBlocked =
+                      writingNfcTable !== null ||
+                      isMissingSignedSession ||
+                      (webNfcAvailable && !pkg.fitsSelectedChip);
+                    return (
+                      <tr key={pkg.tableLabel} className="hover:bg-surface-1">
+                        <td className="py-2 px-3 font-medium text-ink whitespace-nowrap">
+                          <div>{pkg.tableLabel}</div>
+                          <div
+                            className={`text-[10px] ${
+                              isMissingSignedSession ? 'text-danger font-medium' : 'text-ink-muted'
+                            }`}
+                          >
+                            {pkg.signedSessionActive
+                              ? 'Signed HMAC'
+                              : pkg.tagMode === 'SIGNED_SESSION'
+                                ? pick('รอเปิดโต๊ะ (No Token)', 'ລໍເປີດໂຕະ (No Token)', 'No Active Session')
+                                : 'Static'}
                           </div>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-right whitespace-nowrap space-x-1.5">
-                        <button
-                          type="button"
-                          onClick={() => void handleCopyText(pkg.menuUrl, `NFC ${pkg.tableLabel}`)}
-                          className={`inline-flex h-8 items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-2.5 text-[11px] font-medium text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
-                        >
-                          <Copy className="h-3 w-3" />
-                          <span>Copy URL</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setBridgeQrTarget({ label: pkg.tableLabel, url: pkg.menuUrl })
-                          }
-                          className={`inline-flex h-8 items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-2.5 text-[11px] font-medium text-primary hover:border-primary ${UI_INTERACTION.focusButton}`}
-                        >
-                          <QrCode className="h-3 w-3" />
-                          <span>Bridge QR</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={writingNfcTable === pkg.tableLabel}
-                          onClick={() => void handleWriteBrowserNfcTag(pkg)}
-                          title={
-                            webNfcAvailable
-                              ? 'Write directly using Android Web NFC'
-                              : 'Requires Android Chrome Web NFC; click for instructions'
-                          }
-                          className={`inline-flex h-8 items-center gap-1 rounded-[48px] px-2.5 text-[11px] font-medium ${UI_INTERACTION.focusButton} ${
-                            webNfcAvailable
-                              ? 'bg-primary text-white hover:bg-primary-hover'
-                              : 'border border-hairline bg-surface-1 text-ink-muted hover:border-primary hover:text-primary'
-                          }`}
-                        >
-                          <Nfc className="h-3 w-3" />
-                          <span>
-                            {writingNfcTable === pkg.tableLabel
-                              ? pick('รอแตะแท็ก...', 'ລໍແຕະແທັກ...', 'Tap Tag...')
-                              : pick('เขียน NFC', 'ຂຽນ NFC', 'Write NFC')}
+                        </td>
+                        <td className="py-2 px-3 max-w-xs">
+                          {isWscOnlyRow ? (
+                            <div className="space-y-0.5">
+                              <div className="font-mono-num text-[11px] text-ink">
+                                WFA WSC · SSID: {liveEffectiveCfg.wifiSsid}
+                              </div>
+                              <div className="text-[10px] text-ink-muted">
+                                {pick(
+                                  'ไม่มี Menu URL ในแท็ก (Android ต่อ Wi-Fi + Captive Portal)',
+                                  'ບໍ່ມີ Menu URL ໃນແທັກ (Android ເຊື່ອມ Wi-Fi + Captive Portal)',
+                                  'Binary Wi-Fi WSC only (no Menu URL record)'
+                                )}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="space-y-0.5">
+                              <div className="font-mono-num text-[11px] text-ink break-all">
+                                {pkg.menuUrl}
+                              </div>
+                              {isMissingSignedSession && (
+                                <div className="text-[10px] text-danger">
+                                  {pick(
+                                    'ต้องเปิดโต๊ะก่อนจึงจะได้ลิงก์ที่มี &s= Token',
+                                    'ຕ້ອງເປີດໂຕະກ່ອນຈຶ່ງຈະໄດ້ລິ້ງທີ່ມີ &s= Token',
+                                    'Open table first to sign URL with &s= token'
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center rounded-[48px] border px-2 py-0.5 text-[10px] font-medium tabular-nums-google ${
+                              pkg.fitsSelectedChip
+                                ? 'border-primary/40 bg-primary-soft text-primary-dark'
+                                : 'border-danger bg-danger-soft text-danger'
+                            }`}
+                          >
+                            {pkg.ndefByteLength} / {pkg.chipCapacityBytes} B ({pkg.chipType})
                           </span>
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                          {!pkg.fitsSelectedChip && (
+                            <div className="text-[10px] text-danger mt-0.5">
+                              {pkg.recommendedChipType
+                                ? `Recommend ${pkg.recommendedChipType}`
+                                : 'Exceeds NTAG216'}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-right whitespace-nowrap space-x-1.5">
+                          <button
+                            type="button"
+                            disabled={isMissingSignedSession || (isWscOnlyRow && !pkg.wscBase64)}
+                            onClick={() =>
+                              void handleCopyText(
+                                isWscOnlyRow ? (pkg.wscBase64 ?? '') : pkg.menuUrl,
+                                isWscOnlyRow ? `Wi-Fi WSC ${pkg.tableLabel}` : `NFC ${pkg.tableLabel}`
+                              )
+                            }
+                            className={`inline-flex h-8 items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-2.5 text-[11px] font-medium text-ink hover:border-primary hover:text-primary disabled:opacity-45 ${UI_INTERACTION.focusButton}`}
+                          >
+                            <Copy className="h-3 w-3" />
+                            <span>{isWscOnlyRow ? 'Copy WSC' : 'Copy URL'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isWscOnlyRow || isMissingSignedSession}
+                            title={
+                              isWscOnlyRow
+                                ? 'Bridge QR carries URI records only (not binary WSC)'
+                                : isMissingSignedSession
+                                  ? 'Open table first to generate Signed Token'
+                                  : 'Show Bridge QR for NFC Tools'
+                            }
+                            onClick={() => setBridgeQrTableLabel(pkg.tableLabel)}
+                            className={`inline-flex h-8 items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-2.5 text-[11px] font-medium text-primary hover:border-primary disabled:opacity-45 ${UI_INTERACTION.focusButton}`}
+                          >
+                            <QrCode className="h-3 w-3" />
+                            <span>Bridge QR</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={writeBlocked}
+                            onClick={() => void handleWriteBrowserNfcTag(pkg)}
+                            title={
+                              webNfcAvailable
+                                ? 'Write directly using Android Web NFC'
+                                : 'Requires Android Chrome Web NFC; click for instructions'
+                            }
+                            className={`inline-flex h-8 items-center gap-1 rounded-[48px] px-2.5 text-[11px] font-medium disabled:opacity-45 ${UI_INTERACTION.focusButton} ${
+                              webNfcAvailable
+                                ? 'bg-primary text-white hover:bg-primary-hover'
+                                : 'border border-hairline bg-surface-1 text-ink-muted hover:border-primary hover:text-primary'
+                            }`}
+                          >
+                            <Nfc className="h-3 w-3" />
+                            <span>
+                              {writingNfcTable === pkg.tableLabel
+                                ? pick('รอแตะแท็ก...', 'ລໍແຕະແທັກ...', 'Tap Tag...')
+                                : pick('เขียน NFC', 'ຂຽນ NFC', 'Write NFC')}
+                            </span>
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1044,11 +1268,11 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
               <strong>2. หากต้องการให้เด้งหน้าเมนูอัตโนมัติเมื่อลูกค้าต่อ Wi-Fi (Captive Portal):</strong>
               <ul className="list-disc pl-5 mt-1 space-y-1 text-[11px]">
                 <li>
-                  ตั้งค่า Static LAN IP ให้เครื่อง POS (เช่น <code>{runtimeStatus?.activeHost ?? '192.168.1.50'}</code>) บน Router (DHCP Reservation)
+                  ตั้งค่า Static LAN IP ให้เครื่อง POS (เช่น <code>{effectiveHost}</code>) บน Router (DHCP Reservation)
                 </li>
                 <li>
                   <strong>MikroTik Hotspot / OpenWrt / UniFi Guest Portal</strong>: ตั้ง Redirect URL / Captive Portal Landing Page ไปที่{' '}
-                  <code>{runtimeStatus?.baseUrl ?? `http://192.168.1.50:${parsedPort}`}/m?captive=1</code> และเพิ่ม IP เครื่อง POS ใน Walled Garden
+                  <code>{`${effectiveBaseUrl}/m?captive=1`}</code> และเพิ่ม IP เครื่อง POS ใน Walled Garden
                 </li>
                 <li>
                   <strong>กรณีใช้ Wi-Fi Router ทั่วไป (ไม่ต้องตั้ง Captive Portal)</strong>: ใช้ปุ่ม &ldquo;เปิดโต๊ะ / พิมพ์ใบ QR โต๊ะ&rdquo; ที่หน้าขาย POS หรือพิมพ์ป้ายตั้งโต๊ะ A4 — ลูกค้าสแกน Wi-Fi QR แล้วสแกน Table QR ได้ทันที!

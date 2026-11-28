@@ -5,11 +5,14 @@
   --color-primary-hover: #1967d2;
   --color-primary-dark: #174ea6;
   --color-primary-soft: #e8f0fe;
+  --color-danger: #d93025;
+  --color-danger-soft: #fce8e6;
   --color-ink: #202124;
   --color-ink-soft: #3c4043;
   --color-ink-muted: #5f6368;
   --color-hairline: #dadce0;
   --color-surface-1: #f8f9fa;
+  --color-surface-2: #f1f3f4;
   --color-canvas: #ffffff;
   --color-hero: #000000;
 }

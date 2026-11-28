@@ -475,23 +475,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Barcode Label Printing System (`Phase 9`, `barcode-printing.ts`, `barcode-label.ts`, `barcode-label-renderer.ts`, `BarcodeLabelPrintWorkspace.tsx`)**:
   - เพิ่มระบบออกแบบและพิมพ์สติ๊กเกอร์บาร์โค้ด (`EAN-13`, `EAN-8`, `Code 128`, Weight/Price-Embedded Scale EAN-13) รองรับเครื่องพิมพ์ **TSPL2**, **ZPL II**, และ **ESC/POS** พร้อมพรีวิว 203-DPI และบันทึกการตั้งค่าข้ามเครื่อง (`store_config`)
 
+#### Fixed & Hardened — NFC Tag Table Ordering & Guest Captive Portal (`/boost`)
+- **NDEF / WFA WSC Binary & Host Sanitization (`packages/shared-contracts/src/qr-ordering.ts`, `packages/ui-presentation/src/server/guest-qr-server.ts`)**:
+  - เพิ่ม `encodeUtf8TruncatedAtCharBoundary` ตัดข้อความ Wi-Fi SSID (`32 B`) และ Password (`64 B`) ตรงขอบ character codepoint ป้องกันตัวอักษรไทย/ลาวแตกกลาง UTF-8
+  - บังคับรหัสผ่าน `WPA >= 8` ตัวอักษร/ไบต์ใน `buildWifiWscCredentialBytes` (มิฉะนั้นคืน `Uint8Array(0)` เพื่อ fallback เป็น `URI_ONLY`), รองรับ prefix URI แบบ case-insensitive (`HTTP://`/`HTTPS://`/`WWW.`) ใน `encodeNdefUriRecordSpec` และเพิ่ม `sanitizeHostOverride` ตัด scheme/path/query/`:port` พร้อมวงเล็บ `[IPv6]`
+- **CSS Theme Tokens & POS UI Controls (`packages/ui-presentation/src/app/styles.css`, `QrOrderingSettingsCard.tsx`, `QrOrderingInboxPanel.tsx`, `csv-exporter.ts`)**:
+  - เพิ่ม `@theme` tokens (`--color-danger`, `--color-danger-soft`, `--color-surface-2`) ให้คลาสเตือนภัยใน UI คอมไพล์ลงไฟล์ CSS จริง
+  - ปรับ `QrOrderingSettingsCard` ให้พรีวิวและคำสั่ง Firewall อัปเดตตาม Host/Port ในฟอร์ม, รีเซ็ตฟอร์มหลังบันทึก idempotent (`applyConfigToForm`), เพิ่มคำเตือนโหมด `STATIC_TABLE` / `SIGNED_SESSION` / Wi-Fi WSC, ป้องกันเขียน Web NFC ซ้อนพร้อมกัน, ยกเลิก `AbortController` เมื่อปิด/สลับสาขา และ Export NFC CSV ด้วย `downloadUtf8BomCsv` (`\uFEFF` + formula-safe escaping)
+  - ปรับ `TableQrSlipModal` ให้แสดงเครื่องมือ NFC สำหรับ `STATIC_TABLE` ได้โดยไม่ต้องรอเปิดรอบโต๊ะ, ซิงค์สถานะโต๊ะ/รอบโต๊ะแบบ synchronous + `sessionOverride` แก้ปัญหาค้าง 1 เฟรมและให้ SSR ถูกต้อง
+- **Web NFC Writer, A4 QR Printer, Guest Captive HTML & RBAC (`web-nfc-writer.ts`, `a4-qr-sheet-printer.ts`, `guest-menu-html.ts`, `pos-desktop-server.ts`)**:
+  - รองรับ `globalThis.atob`, `isSecureContext === false`, external `AbortSignal` และแปล error timeout เป็นภาษาไทยใน `web-nfc-writer.ts`
+  - แยก `renderA4TableQrCardsHtml` พร้อมส่งต่อ `outletId`, ใช้ `input.baseUrl` สำหรับโต๊ะที่มี session, เพิ่มแถบเตือนความจุชิปล้นและคำแนะนำ `WIFI_WSC_ONLY` บนแผ่นป้าย A4
+  - แก้ `Copy Link` ใน Captive Portal (`URL.searchParams.delete('captive')` + fallback `document.execCommand('copy')` บน HTTP LAN), จับคู่ `tableSelect` แบบ case-insensitive, ล็อกการสั่งอาหารเมื่อ Token หมดอายุหรือปิด Walk-in, ปกปิด `wifiPassword`/`wifiQrPayload` สำหรับบทบาท `KITCHEN`/`WAREHOUSE` และแมป `HTTP 404`
+- **Permanent Unit & E2E Regression Tests (`tests/e2e-integration/phase8-local-qr-ordering.test.ts`)**:
+  - เพิ่มชุดทดสอบ `Phase 8G`–`Phase 8L` ครอบคลุม NDEF UTF-8/WPA/SR=0, `web-nfc-writer.ts`, `a4-qr-sheet-printer.ts`, RBAC `401/403/200` ของ `/api/qr-ordering/nfc-tags`, Bootstrap redaction, HTTP `404`, SQLite HMAC tamper fail-closed, Multi-outlet `OUTLET-BR-02` `AUTO_ACCEPT_SIGNED_TABLE` NFC rotation, Guest SPA VM state guards และ React SSR (`Settings` + `TableQrSlipModal`)
+
 #### Verified & Built (2026-11-28)
 - **TypeScript (`npx tsc --noEmit -p packages/ui-presentation/tsconfig.json`)**: **0 errors**
 - **PR Gatekeeping (`npm run verify:pr-gatekeeping`)**: **3/3 Rules PASSED** (`19 Rust files` & `54 TS files`, SQLite Schema SHA-256 `866a600d3e5eaf0351712c2e7d3085dc6abd68f39f800a1dc7d7ada1895b8d37` คงเดิม 100%)
-- **Automated Node.js E2E & Invariant Suite (`npm test`)**: **57/57 tests PASSED (0 failed)** — รวม `Phase 8A`–`Phase 8F` (NFC Tag E2E) และ `Phase 9` (Barcode Label Printing)
+- **Automated Node.js E2E & Invariant Suite (`npm test`)**: **63/63 tests PASSED (0 failed)** — ครอบคลุม `Phase 8A`–`Phase 8L` (NFC Tag Hardening & SSR) และ `Phase 9` (Barcode Label Printing)
 - **Rust Workspace & Tauri Native Tests (`cargo test --workspace` + `src-tauri`)**: **23/23 tests PASSED (0 failed)** (`4` cluster-gateway + `15` core-engine + `1` hal-drivers + `1` shared-contracts + `2` tauri-desktop)
-- **Production Vite UI Bundle (`npx vite build packages/ui-presentation`)**: **Built cleanly** พร้อมฟอนต์ Noto Sans Lao ออฟไลน์ (`Zero CDN`, `Zero #80868b`, `Zero shadow-*`)
-- **Windows Installer Build (`npm run build:installer`)**: สร้าง `dist-installer/RubeStockPOS_3.1.1_x64_Setup.exe` (`47,037,440` bytes), `dist-installer/RubeStockPOS_3.1.1_x64_AirGapped.msi` (`47,037,754` bytes) และ `dist-installer/RubeStockPOS-DesktopShell.exe` (`9,446,912` bytes) สำเร็จ
-
-
-
-
-
-
-
-
-
-
-
-
+- **Production Vite UI Bundle (`npm run build:ui`)**: **Built cleanly (`index-DS-CIbs2.css` 45,975 bytes, `index-BvRIX9NN.js` 1,437.48 kB)** พร้อมฟอนต์ Noto Sans Lao ออฟไลน์ (`--color-danger`/`--color-surface-2` ครบ, `Zero CDN`, `Zero #80868b`, `Zero shadow-*`, `Zero parseFloat(`)
+- **Windows Installer Build (`npm run build:installer`)**: สร้าง `dist-installer/RubeStockPOS_3.1.1_x64_Setup.exe` (`47,058,944` bytes), `dist-installer/RubeStockPOS_3.1.1_x64_AirGapped.msi` (`47,059,258` bytes) และ `dist-installer/RubeStockPOS-DesktopShell.exe` (`9,451,008` bytes) สำเร็จ
 

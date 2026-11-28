@@ -4,6 +4,7 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
+import * as vm from 'node:vm';
 import {
   buildNfcTableTagPackage,
   buildTableMenuUrl,
@@ -11,10 +12,28 @@ import {
   buildWifiQrPayload,
   buildWifiWscCredentialBytes,
   computeGuestOrderLineSatang,
+  DEFAULT_QR_ORDERING_CONFIG,
+  encodeNdefMessageBytes,
   encodeNdefUriRecordSpec,
   NFC_CHIP_USABLE_NDEF_BYTES,
   normalizeQrOrderingConfig,
+  sanitizeHostOverride,
+  wrapNdefInType2TlvBytes,
 } from '../../packages/shared-contracts/src/qr-ordering.ts';
+import {
+  openA4TableQrPrintWindow,
+  renderA4TableQrCardsHtml,
+} from '../../packages/ui-presentation/src/app/utils/a4-qr-sheet-printer.ts';
+import {
+  buildUtf8BomCsvContent,
+  escapeCsvCell,
+} from '../../packages/ui-presentation/src/app/utils/csv-exporter.ts';
+import {
+  buildWebNfcRecordsFromPackage,
+  isWebNfcSupported,
+  writeNfcPackageViaBrowserReader,
+} from '../../packages/ui-presentation/src/app/utils/web-nfc-writer.ts';
+import { renderGuestMenuHtml } from '../../packages/ui-presentation/src/server/guest-menu-html.ts';
 import { checkSlidingWindowBucketLimit } from '../../packages/ui-presentation/src/server/guest-qr-server.ts';
 import { RubePosInteractiveAppServer } from '../../packages/ui-presentation/src/server/pos-desktop-server.ts';
 
@@ -1195,4 +1214,1431 @@ test('Phase 8F: Full E2E NFC Tag Table Ordering (NDEF URI + WFA WSC, Zero-Trust 
     await server.stop();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+function parseWscTlvs(buf: Uint8Array): Map<number, Uint8Array> {
+  const out = new Map<number, Uint8Array>();
+  assert.equal(buf[0], 0x10);
+  assert.equal(buf[1], 0x0e);
+  const innerLen = (buf[2]! << 8) | buf[3]!;
+  assert.equal(innerLen + 4, buf.length);
+  let pos = 4;
+  while (pos + 4 <= buf.length) {
+    const tag = (buf[pos]! << 8) | buf[pos + 1]!;
+    const len = (buf[pos + 2]! << 8) | buf[pos + 3]!;
+    pos += 4;
+    out.set(tag, buf.slice(pos, pos + len));
+    pos += len;
+  }
+  assert.equal(pos, buf.length);
+  return out;
+}
+
+test('Phase 8G: Unit tests — UTF-8 boundary WSC truncation, WPA key guard, case-insensitive NDEF URI, SR=0 long NDEF, :port strip & formula-safe CSV', () => {
+  // 1. UTF-8 whole-character boundary truncation for multi-byte Lao & Thai SSID (<=32B) and Password (<=64B)
+  const longLaoSsid = 'ຮ້ານກາເຟລາວສະບາຍດີທຸກຄົນ'; // 24 Lao chars (3B each = 72B)
+  const longThaiPass = 'รหัสผ่านไวไฟร้านกาแฟรูบสต็อกพส'; // 30 Thai chars (3B each = 90B)
+  const wscUtf8 = buildWifiWscCredentialBytes(longLaoSsid, longThaiPass, 'WPA');
+  assert.ok(wscUtf8.length > 0);
+  const tlvs = parseWscTlvs(wscUtf8);
+  const ssidBytes = tlvs.get(0x1045)!;
+  const passBytes = tlvs.get(0x1027)!;
+  assert.ok(ssidBytes.length <= 32, `SSID bytes ${ssidBytes.length} must be <= 32`);
+  assert.ok(passBytes.length <= 64, `Password bytes ${passBytes.length} must be <= 64`);
+  const utf8Fatal = new TextDecoder('utf-8', { fatal: true });
+  const decodedSsid = utf8Fatal.decode(ssidBytes);
+  const decodedPass = utf8Fatal.decode(passBytes);
+  assert.ok(longLaoSsid.startsWith(decodedSsid));
+  assert.ok(longThaiPass.startsWith(decodedPass));
+
+  // 2. WPA requires non-empty >= 8-char key; empty or short returns empty Uint8Array(0) & triggers URI_ONLY fallback
+  assert.equal(buildWifiWscCredentialBytes('RubeCafe', '', 'WPA').length, 0);
+  assert.equal(buildWifiWscCredentialBytes('RubeCafe', '1234567', 'WPA').length, 0);
+  assert.equal(buildWifiWscCredentialBytes('RubeCafe', 'กขค', 'WPA').length, 0);
+  const minWpa = buildWifiWscCredentialBytes('RubeCafe', '12345678', 'WPA');
+  assert.ok(minWpa.length > 0);
+  assert.equal(parseWscTlvs(minWpa).get(0x1027)?.length, 8);
+
+  // NOPASS allows empty password with Auth=0x0001 / Enc=0x0001
+  const openWsc = buildWifiWscCredentialBytes('RubeCafe_Open', '', 'NOPASS');
+  assert.ok(openWsc.length > 0);
+  const openTlvs = parseWscTlvs(openWsc);
+  assert.deepEqual(Array.from(openTlvs.get(0x1003)!), [0x00, 0x01]);
+  assert.equal(openTlvs.has(0x1027), false);
+
+  const fallbackPkg = buildNfcTableTagPackage({
+    baseUrl: 'http://192.168.1.50:4174',
+    tableLabel: 'T04',
+    config: {
+      ...DEFAULT_QR_ORDERING_CONFIG,
+      wifiSsid: 'RubeCafe',
+      wifiPassword: 'short',
+      wifiSecurity: 'WPA',
+      nfcEnabled: true,
+      nfcRecordLayout: 'WIFI_WSC_ONLY',
+    },
+  });
+  assert.equal(fallbackPkg.wscBase64, null);
+  assert.equal(fallbackPkg.recordLayout, 'URI_ONLY');
+
+  // 3. Case-insensitive HTTP/HTTPS/www prefix compression preserving path & query casing
+  const u1 = encodeNdefUriRecordSpec('HTTP://WWW.Example.COM/Menu?t=T04&s=AbCdEf');
+  assert.equal(u1.payloadBytes[0], 0x01);
+  assert.equal(new TextDecoder().decode(u1.payloadBytes.slice(1)), 'Example.COM/Menu?t=T04&s=AbCdEf');
+
+  const u2 = encodeNdefUriRecordSpec('HTTPS://WWW.Example.COM/M?X=y');
+  assert.equal(u2.payloadBytes[0], 0x02);
+  assert.equal(new TextDecoder().decode(u2.payloadBytes.slice(1)), 'Example.COM/M?X=y');
+
+  const u3 = encodeNdefUriRecordSpec('HTTP://192.168.1.50:4174/m?t=T04&via=nfc');
+  assert.equal(u3.payloadBytes[0], 0x03);
+  assert.equal(new TextDecoder().decode(u3.payloadBytes.slice(1)), '192.168.1.50:4174/m?t=T04&via=nfc');
+
+  const u4 = encodeNdefUriRecordSpec('HTTPS://Shop.Local/Order?Token=XyZ');
+  assert.equal(u4.payloadBytes[0], 0x04);
+  assert.equal(new TextDecoder().decode(u4.payloadBytes.slice(1)), 'Shop.Local/Order?Token=XyZ');
+
+  // 4. Long NDEF record (>255 bytes) sets SR=0 and uses 3-byte Type 2 TLV length (0x03 0xFF hi lo)
+  const longPayload = new Uint8Array(300).fill(0x41);
+  const longNdef = encodeNdefMessageBytes([
+    { tnf: 0x02, typeBytes: new TextEncoder().encode('text/plain'), payloadBytes: longPayload },
+  ]);
+  assert.equal((longNdef[0]! & 0x10) === 0, true, 'SR bit must be 0 when payload > 255 bytes');
+  assert.equal(longNdef[1], 10);
+  const len32 =
+    ((longNdef[2]! << 24) | (longNdef[3]! << 16) | (longNdef[4]! << 8) | longNdef[5]!) >>> 0;
+  assert.equal(len32, 300);
+  const longTlv = wrapNdefInType2TlvBytes(longNdef);
+  assert.equal(longTlv[0], 0x03);
+  assert.equal(longTlv[1], 0xff);
+  assert.equal((longTlv[2]! << 8) | longTlv[3]!, longNdef.length);
+  assert.equal(longTlv[longTlv.length - 1], 0xfe);
+
+  // 5. sanitizeHostOverride / normalizeQrOrderingConfig strips :port, query & hash while preserving/bracketing IPv6
+  assert.equal(sanitizeHostOverride('http://192.168.1.88:4174/m?t=T01'), '192.168.1.88');
+  assert.equal(sanitizeHostOverride('192.168.1.88:4174?t=T01#top'), '192.168.1.88');
+  assert.equal(sanitizeHostOverride('192.168.1.88:abc'), '192.168.1.88');
+  assert.equal(sanitizeHostOverride('pos.local:8080'), 'pos.local');
+  assert.equal(sanitizeHostOverride('[::1]:4174'), '[::1]');
+  assert.equal(sanitizeHostOverride('::1'), '[::1]');
+  assert.equal(
+    sanitizeHostOverride('https://my-pos-terminal-01.local:4174/m?t=T01&via=nfc'),
+    'my-pos-terminal-01.local'
+  );
+  assert.equal(buildTableMenuUrl('  http://192.168.1.88:4174/ ', 'T04'), 'http://192.168.1.88:4174/m?t=T04');
+  const normHostCfg = normalizeQrOrderingConfig({
+    customHostOverride: 'https://192.168.10.22:4174/menu',
+  });
+  assert.equal(normHostCfg.customHostOverride, '192.168.10.22');
+
+  // 6. UTF-8 BOM + formula-safe CSV quoting
+  assert.equal(escapeCsvCell('=CMD("calc")'), `"'=CMD(""calc"")"`);
+  assert.equal(escapeCsvCell('+1+1'), "'+1+1");
+  assert.equal(escapeCsvCell('@SUM(A1)'), "'@SUM(A1)");
+  assert.equal(escapeCsvCell('-CMD()'), "'-CMD()");
+  assert.equal(escapeCsvCell('-50.00'), '-50.00');
+  const csv = buildUtf8BomCsvContent(['col1', 'col2'], [['=HYPERLINK("x")', '-125.50']]);
+  assert.ok(csv.startsWith('\uFEFFcol1,col2\r\n'));
+  assert.ok(csv.includes(`"'=HYPERLINK(""x"")"`));
+  assert.ok(csv.includes('-125.50'));
+});
+
+test('Phase 8H: Unit tests — web-nfc-writer.ts (support check, NDEF records, capacity reject, timeout AbortError localization, external AbortSignal)', async () => {
+  const g = globalThis as unknown as {
+    window?: Record<string, unknown> | undefined;
+    NDEFReader?: unknown;
+  };
+  const hadWindow = Object.prototype.hasOwnProperty.call(g, 'window');
+  const prevWindow = g.window;
+  const hadNdef = Object.prototype.hasOwnProperty.call(g, 'NDEFReader');
+  const prevNdef = g.NDEFReader;
+
+  try {
+    delete g.window;
+    delete g.NDEFReader;
+    assert.equal(isWebNfcSupported(), false);
+
+    const cfg: typeof DEFAULT_QR_ORDERING_CONFIG = {
+      ...DEFAULT_QR_ORDERING_CONFIG,
+      wifiSsid: 'RubeCafe_5G',
+      wifiPassword: 'password123',
+      wifiSecurity: 'WPA',
+      nfcEnabled: true,
+      nfcTagMode: 'STATIC_TABLE',
+      nfcRecordLayout: 'URI_AND_WIFI_WSC',
+      nfcChipType: 'NTAG215',
+    };
+    const comboPkg = buildNfcTableTagPackage({
+      baseUrl: 'http://192.168.1.50:4174',
+      tableLabel: 'T04',
+      config: cfg,
+    });
+    const uriOnlyPkg = buildNfcTableTagPackage({
+      baseUrl: 'http://192.168.1.50:4174',
+      tableLabel: 'T04',
+      config: { ...cfg, nfcRecordLayout: 'URI_ONLY' },
+    });
+    const wscOnlyPkg = buildNfcTableTagPackage({
+      baseUrl: 'http://192.168.1.50:4174',
+      tableLabel: 'T04',
+      config: { ...cfg, nfcRecordLayout: 'WIFI_WSC_ONLY' },
+    });
+
+    assert.deepEqual(buildWebNfcRecordsFromPackage(uriOnlyPkg), [
+      { recordType: 'url', data: uriOnlyPkg.menuUrl },
+    ]);
+    const wscRecords = buildWebNfcRecordsFromPackage(wscOnlyPkg);
+    assert.equal(wscRecords.length, 1);
+    assert.equal(wscRecords[0]?.recordType, 'mime');
+    assert.equal(wscRecords[0]?.mediaType, 'application/vnd.wfa.wsc');
+    assert.ok(wscRecords[0]?.data instanceof ArrayBuffer);
+    assert.equal(
+      Buffer.from(wscRecords[0].data as ArrayBuffer).toString('base64'),
+      wscOnlyPkg.wscBase64
+    );
+    const comboRecords = buildWebNfcRecordsFromPackage(comboPkg);
+    assert.equal(comboRecords.length, 2);
+    assert.equal(comboRecords[0]?.recordType, 'url');
+    assert.equal(comboRecords[1]?.recordType, 'mime');
+
+    // Unsupported browser error
+    await assert.rejects(() => writeNfcPackageViaBrowserReader(comboPkg), /ไม่รองรับ Web NFC/);
+
+    // Mock window.NDEFReader
+    let lastWriteCall = null as {
+      records: unknown[];
+      options?: { overwrite?: boolean; signal?: AbortSignal };
+    } | null;
+    let mockMode: 'OK' | 'TIMEOUT_ABORT_ERROR' | 'EXTERNAL_ABORT' = 'OK';
+
+    class MockNdefReader {
+      async write(
+        message: { records: unknown[] },
+        options?: { overwrite?: boolean; signal?: AbortSignal }
+      ): Promise<void> {
+        lastWriteCall = { records: message.records, ...(options ? { options } : {}) };
+        if (mockMode === 'OK') {
+          return;
+        }
+        return new Promise<void>((_resolve, reject) => {
+          options?.signal?.addEventListener(
+            'abort',
+            () => {
+              const err = new Error('The operation was aborted.');
+              err.name = 'AbortError';
+              reject(err);
+            },
+            { once: true }
+          );
+        });
+      }
+    }
+
+    g.window = { NDEFReader: MockNdefReader };
+    assert.equal(isWebNfcSupported(), true);
+
+    // 1. Successful write
+    const okRes = await writeNfcPackageViaBrowserReader(comboPkg);
+    assert.equal(okRes.recordsCount, 2);
+    assert.equal(okRes.ndefByteLength, comboPkg.ndefByteLength);
+    assert.equal(lastWriteCall?.options?.overwrite, true);
+    assert.ok(lastWriteCall?.options?.signal instanceof AbortSignal);
+
+    // 2. Capacity reject before touching reader
+    const overflowPkg = { ...comboPkg, fitsSelectedChip: false, chipType: 'NTAG213' as const, chipCapacityBytes: 137 };
+    await assert.rejects(() => writeNfcPackageViaBrowserReader(overflowPkg), /ใหญ่เกินความจุชิป NTAG213/);
+
+    // 3. Timeout AbortError localization
+    mockMode = 'TIMEOUT_ABORT_ERROR';
+    await assert.rejects(
+      () => writeNfcPackageViaBrowserReader(comboPkg, 30),
+      /หมดเวลาแตะแท็ก NFC/
+    );
+
+    // 4. Pre-aborted external AbortSignal
+    const preAborted = new AbortController();
+    preAborted.abort();
+    await assert.rejects(
+      () => writeNfcPackageViaBrowserReader(comboPkg, 5_000, preAborted.signal),
+      /ยกเลิกการเขียนแท็ก NFC แล้ว/
+    );
+
+    // 5. Mid-flight external AbortSignal (modal close / unmount cleanup)
+    mockMode = 'EXTERNAL_ABORT';
+    const extController = new AbortController();
+    const pendingWrite = writeNfcPackageViaBrowserReader(comboPkg, 10_000, extController.signal);
+    setTimeout(() => extController.abort(), 25);
+    await assert.rejects(() => pendingWrite, /ยกเลิกการเขียนแท็ก NFC แล้ว/);
+
+    // 6. globalThis.NDEFReader + globalThis.atob works even when window is absent; insecure context returns false
+    delete g.window;
+    g.NDEFReader = MockNdefReader;
+    mockMode = 'OK';
+    assert.equal(isWebNfcSupported(), true);
+    const globalRes = await writeNfcPackageViaBrowserReader(comboPkg);
+    assert.equal(globalRes.recordsCount, 2);
+
+    g.window = { NDEFReader: MockNdefReader, isSecureContext: false };
+    assert.equal(isWebNfcSupported(), false);
+
+    delete g.window;
+    const hadSecureCtx = Object.prototype.hasOwnProperty.call(g, 'isSecureContext');
+    const prevSecureCtx = (g as { isSecureContext?: boolean }).isSecureContext;
+    try {
+      (g as { isSecureContext?: boolean }).isSecureContext = false;
+      assert.equal(isWebNfcSupported(), false);
+    } finally {
+      if (hadSecureCtx) (g as { isSecureContext?: boolean }).isSecureContext = prevSecureCtx;
+      else delete (g as { isSecureContext?: boolean }).isSecureContext;
+    }
+
+    // 7. Missing globalThis.atob throws explicit error when decoding WSC base64
+    const prevAtob = globalThis.atob;
+    try {
+      Object.defineProperty(globalThis, 'atob', { value: undefined, configurable: true, writable: true });
+      assert.throws(() => buildWebNfcRecordsFromPackage(wscOnlyPkg), /globalThis\.atob/);
+    } finally {
+      Object.defineProperty(globalThis, 'atob', { value: prevAtob, configurable: true, writable: true });
+    }
+  } finally {
+    if (hadWindow) g.window = prevWindow;
+    else delete g.window;
+    if (hadNdef) g.NDEFReader = prevNdef;
+    else delete g.NDEFReader;
+  }
+});
+
+test('Phase 8I: Unit tests — a4-qr-sheet-printer.ts (lo/th/en, XSS escaping, nfcEnabled=false, outletId propagation, overflow & WIFI_WSC_ONLY hints)', async () => {
+  const baseCfg = {
+    ...DEFAULT_QR_ORDERING_CONFIG,
+    enabled: true,
+    wifiSsid: 'Rube<script>alert(1)</script>',
+    wifiPassword: 'pass"1234',
+    wifiSecurity: 'WPA' as const,
+    tableLabels: ['T01', 'T04<img src=x onerror=alert(2)>'],
+    nfcEnabled: true,
+    nfcTagMode: 'STATIC_TABLE' as const,
+    nfcRecordLayout: 'URI_ONLY' as const,
+    nfcChipType: 'NTAG213' as const,
+  };
+
+  // 1. Multi-outlet & XSS escaping across th / lo / en
+  const htmlTh = await renderA4TableQrCardsHtml({
+    outletId: 'OUTLET-BR-02',
+    storeName: 'Rube <script>evil()</script> Cafe',
+    locale: 'th',
+    baseUrl: 'http://192.168.1.50:4174',
+    config: baseCfg,
+    activeSessions: [],
+  });
+  assert.ok(!htmlTh.includes('<script>evil()</script>'));
+  assert.ok(!htmlTh.includes('<script>alert(1)</script>'));
+  assert.ok(!htmlTh.includes('<img src=x onerror=alert(2)>'));
+  assert.ok(htmlTh.includes('&lt;script&gt;evil()&lt;/script&gt;'));
+  assert.ok(htmlTh.includes('o=OUTLET-BR-02'), 'Multi-outlet &o= must propagate to static A4 QR cards');
+  assert.ok(htmlTh.includes('class="nfc-zone"'));
+
+  const htmlLo = await renderA4TableQrCardsHtml({
+    outletId: 'OUTLET-HQ',
+    storeName: 'ຮ້ານກາເຟລາວ',
+    locale: 'lo',
+    baseUrl: 'http://192.168.1.50:4174',
+    config: baseCfg,
+    activeSessions: [],
+  });
+  assert.ok(htmlLo.includes('<html lang="lo">'));
+  assert.ok(htmlLo.includes('ປ້າຍ QR ຕັ້ງໂຕະ (A4)'));
+
+  const htmlEn = await renderA4TableQrCardsHtml({
+    outletId: 'OUTLET-HQ',
+    storeName: 'Rube Cafe',
+    locale: 'en',
+    baseUrl: 'http://192.168.1.50:4174',
+    config: baseCfg,
+    activeSessions: [],
+  });
+  assert.ok(htmlEn.includes('<html lang="en">'));
+  assert.ok(htmlEn.includes('Printable Table QR Cards (A4)'));
+
+  // 2. nfcEnabled: false omits .nfc-zone elements completely
+  const noNfcHtml = await renderA4TableQrCardsHtml({
+    storeName: 'Rube Cafe',
+    locale: 'en',
+    baseUrl: 'http://192.168.1.50:4174',
+    config: { ...baseCfg, nfcEnabled: false },
+    activeSessions: [],
+  });
+  assert.ok(!noNfcHtml.includes('class="nfc-zone'));
+
+  // 3. Overflow warning when !nfcPkg.fitsSelectedChip (long combo on NTAG213)
+  const overflowHtml = await renderA4TableQrCardsHtml({
+    outletId: 'OUTLET-BR-02',
+    storeName: 'Rube Cafe',
+    locale: 'en',
+    baseUrl: 'http://192.168.1.50:4174',
+    config: {
+      ...baseCfg,
+      wifiSsid: 'RubeCafe_Super_Long_Guest_WiFi_SSID',
+      wifiPassword: 'SuperLongWifiPassword2026',
+      tableLabels: ['T04'],
+      nfcRecordLayout: 'URI_AND_WIFI_WSC',
+      nfcChipType: 'NTAG213',
+    },
+    activeSessions: [],
+  });
+  assert.ok(overflowHtml.includes('nfc-zone-overflow'));
+  assert.ok(overflowHtml.includes('Exceeds chip capacity NTAG213'));
+  assert.ok(overflowHtml.includes('Recommend NTAG215'));
+
+  // 4. WIFI_WSC_ONLY adjusts iPhone hint text
+  const wscOnlyHtml = await renderA4TableQrCardsHtml({
+    storeName: 'Rube Cafe',
+    locale: 'en',
+    baseUrl: 'http://192.168.1.50:4174',
+    config: {
+      ...baseCfg,
+      wifiSsid: 'RubeCafe_5G',
+      wifiPassword: 'password123',
+      tableLabels: ['T04'],
+      nfcRecordLayout: 'WIFI_WSC_ONLY',
+      nfcChipType: 'NTAG215',
+    },
+    activeSessions: [],
+  });
+  assert.ok(wscOnlyHtml.includes('TAP NFC TO JOIN WI-FI (Android)'));
+  assert.ok(wscOnlyHtml.includes('Does not read Wi-Fi WSC NFC'));
+
+  // 4b. Active session card uses live input.baseUrl and outletId overrides consistently
+  const liveOverrideActiveHtml = await renderA4TableQrCardsHtml({
+    outletId: 'OUTLET-BR-02',
+    storeName: 'Rube Cafe',
+    locale: 'en',
+    baseUrl: 'http://10.0.0.88:4188',
+    config: { ...baseCfg, tableLabels: ['T04'], nfcRecordLayout: 'URI_ONLY', nfcChipType: 'NTAG215' },
+    activeSessions: [
+      {
+        outletId: 'OUTLET-BR-02',
+        tableLabel: 'T04',
+        sessionNonce: 'nonce123',
+        token: 'nonce123.sigabc',
+        menuUrl: 'http://192.168.1.50:4174/m?t=T04&s=nonce123.sigabc&o=OUTLET-BR-02',
+        wifiQrPayload: 'WIFI:T:WPA;S:Rube;P:pass1234;;',
+        openedByName: 'Cashier',
+        openedAtIso: '2026-11-28T00:00:00.000Z',
+      },
+    ],
+  });
+  assert.ok(
+    liveOverrideActiveHtml.includes('http://10.0.0.88:4188/m?t=T04&amp;s=nonce123.sigabc&amp;o=OUTLET-BR-02'),
+    'Active session A4 Menu QR must use live input.baseUrl rather than stale activeSess.menuUrl'
+  );
+  assert.ok(!liveOverrideActiveHtml.includes('192.168.1.50:4174'));
+
+  // 5. openA4TableQrPrintWindow popup-blocked vs popup-opened
+  const g = globalThis as unknown as { window?: { open?: unknown } | undefined };
+  const hadWindow = Object.prototype.hasOwnProperty.call(g, 'window');
+  const prevWindow = g.window;
+  try {
+    g.window = { open: () => null };
+    const blocked = await openA4TableQrPrintWindow({
+      storeName: 'Rube Cafe',
+      locale: 'en',
+      baseUrl: 'http://192.168.1.50:4174',
+      config: { ...baseCfg, tableLabels: ['T01'] },
+      activeSessions: [],
+    });
+    assert.equal(blocked, false);
+
+    let writtenHtml = '';
+    let openedCalled = false;
+    let closedCalled = false;
+    g.window = {
+      open: () => ({
+        document: {
+          open: () => {
+            openedCalled = true;
+          },
+          write: (h: string) => {
+            writtenHtml += h;
+          },
+          close: () => {
+            closedCalled = true;
+          },
+        },
+      }),
+    };
+    const okWin = await openA4TableQrPrintWindow({
+      outletId: 'OUTLET-BR-02',
+      storeName: 'Rube Cafe',
+      locale: 'en',
+      baseUrl: 'http://192.168.1.50:4174',
+      config: { ...baseCfg, tableLabels: ['T01'] },
+      activeSessions: [],
+    });
+    assert.equal(okWin, true);
+    assert.equal(openedCalled, true);
+    assert.equal(closedCalled, true);
+    assert.ok(writtenHtml.includes('o=OUTLET-BR-02'));
+  } finally {
+    if (hadWindow) g.window = prevWindow;
+    else delete g.window;
+  }
+});
+
+test('Phase 8J: RBAC (401/403/200), Bootstrap Wi-Fi Password Redaction, HTTP 404 Mapping, HMAC Tamper Fail-Closed & Multi-Outlet SIGNED_SESSION NFC Rotation', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rube-pos-phase8j-nfc-'));
+  const dbPath = path.join(tmpDir, 'rube_nfc_rbac.db');
+  const guestPort = await getFreeTcpPort();
+
+  const server = new RubePosInteractiveAppServer({
+    dbPath,
+    requireFirstRunWizard: false,
+    enforceApiSessionAuth: true,
+  });
+
+  try {
+    const { url: posBase } = await server.start(0, '127.0.0.1');
+
+    const pinLogin = async (pin: string, userId?: string) => {
+      const r = await fetch(`${posBase}/api/auth/pin-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin, ...(userId ? { userId } : {}) }),
+      });
+      assert.equal(r.status, 200);
+      const data = (await r.json()) as { sessionToken: string };
+      return {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${data.sessionToken}`,
+      };
+    };
+
+    const ownerHeaders = await pinLogin('999999', 'USR-OWNER-01');
+
+    // Provision CASHIER, MANAGER, KITCHEN, WAREHOUSE users + secondary outlet OUTLET-BR-02
+    const createStaff = async (username: string, displayName: string, role: string, pin: string) => {
+      const res = await fetch(`${posBase}/api/auth/users`, {
+        method: 'POST',
+        headers: ownerHeaders,
+        body: JSON.stringify({ username, displayName, role, pin, active: true }),
+      });
+      assert.equal(res.status, 200);
+      const data = (await res.json()) as { user: { id: string } };
+      return data.user.id;
+    };
+    const mgrId = await createStaff('mgr8j', 'Manager 8J', 'MANAGER', '111111');
+    const cashId = await createStaff('cash8j', 'Cashier 8J', 'CASHIER', '222222');
+    const kitchenId = await createStaff('kit8j', 'Kitchen 8J', 'KITCHEN', '333333');
+    const whId = await createStaff('wh8j', 'Warehouse 8J', 'WAREHOUSE', '444444');
+
+    const mgrHeaders = await pinLogin('111111', mgrId);
+    const cashierHeaders = await pinLogin('222222', cashId);
+    const kitchenHeaders = await pinLogin('333333', kitchenId);
+    const whHeaders = await pinLogin('444444', whId);
+
+    const brOutletRes = await fetch(`${posBase}/api/warehouse/outlet`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({ code: 'BR-02', name: 'Branch Two' }),
+    });
+    assert.equal(brOutletRes.status, 200);
+
+    // Enable Guest LAN Server + SIGNED_SESSION NFC + AUTO_ACCEPT_SIGNED_TABLE
+    const cfgRes = await fetch(`${posBase}/api/qr-ordering/config`, {
+      method: 'POST',
+      headers: mgrHeaders,
+      body: JSON.stringify({
+        enabled: true,
+        port: guestPort,
+        wifiSsid: 'RubeCafe_SecretNet',
+        wifiPassword: 'SuperSecretWifiPassword2026',
+        wifiSecurity: 'WPA',
+        approvalMode: 'AUTO_ACCEPT_SIGNED_TABLE',
+        allowOpenTableSelection: true,
+        tableLabels: ['T01', 'T04'],
+        nfcEnabled: true,
+        nfcTagMode: 'SIGNED_SESSION',
+        nfcRecordLayout: 'URI_AND_WIFI_WSC',
+        nfcChipType: 'NTAG215',
+      }),
+    });
+    assert.equal(cfgRes.status, 200);
+
+    // 1. RBAC on GET /api/qr-ordering/nfc-tags: 401 unauth, 403 KITCHEN/WAREHOUSE, 200 CASHIER/MANAGER/OWNER
+    assert.equal((await fetch(`${posBase}/api/qr-ordering/nfc-tags`)).status, 401);
+    assert.equal((await fetch(`${posBase}/api/qr-ordering/nfc-tags`, { headers: kitchenHeaders })).status, 403);
+    assert.equal((await fetch(`${posBase}/api/qr-ordering/nfc-tags`, { headers: whHeaders })).status, 403);
+    assert.equal((await fetch(`${posBase}/api/qr-ordering/nfc-tags`, { headers: cashierHeaders })).status, 200);
+    assert.equal((await fetch(`${posBase}/api/qr-ordering/nfc-tags`, { headers: mgrHeaders })).status, 200);
+    assert.equal((await fetch(`${posBase}/api/qr-ordering/nfc-tags`, { headers: ownerHeaders })).status, 200);
+
+    // 2. Open Table T04 session on OUTLET-BR-02 & verify bootstrap redacts wifiPassword for KITCHEN / WAREHOUSE only
+    const openBrT04 = (await (
+      await fetch(`${posBase}/api/qr-ordering/table-session`, {
+        method: 'POST',
+        headers: cashierHeaders,
+        body: JSON.stringify({ outletId: 'OUTLET-BR-02', tableLabel: 'T04' }),
+      })
+    ).json()) as { session: { token: string; nfcMenuUrl: string; menuUrl: string } };
+    assert.ok(openBrT04.session.nfcMenuUrl.includes('o=OUTLET-BR-02'));
+    assert.ok(openBrT04.session.nfcMenuUrl.includes('via=nfc'));
+    assert.ok(openBrT04.session.nfcMenuUrl.includes(`s=${encodeURIComponent(openBrT04.session.token)}`));
+
+    for (const [roleLabel, hdrs, expectSecret] of [
+      ['KITCHEN', kitchenHeaders, false],
+      ['WAREHOUSE', whHeaders, false],
+      ['CASHIER', cashierHeaders, true],
+      ['MANAGER', mgrHeaders, true],
+      ['OWNER', ownerHeaders, true],
+    ] as const) {
+      const bRes = await fetch(`${posBase}/api/bootstrap?outletId=OUTLET-BR-02`, { headers: hdrs });
+      assert.equal(bRes.status, 200);
+      const bJson = (await bRes.json()) as {
+        qrOrderingConfig: { wifiPassword: string };
+        qrTableSessions: Array<{ wifiQrPayload: string }>;
+      };
+      if (expectSecret) {
+        assert.equal(bJson.qrOrderingConfig.wifiPassword, 'SuperSecretWifiPassword2026', `${roleLabel} keeps wifiPassword`);
+        assert.ok(bJson.qrTableSessions[0]?.wifiQrPayload.includes('SuperSecretWifiPassword2026'));
+      } else {
+        assert.equal(bJson.qrOrderingConfig.wifiPassword, '', `${roleLabel} must have wifiPassword redacted`);
+        assert.equal(bJson.qrTableSessions[0]?.wifiQrPayload ?? '', '', `${roleLabel} must not receive wifiQrPayload`);
+      }
+    }
+
+    // 3. HTTP 404 mapping on pos-desktop-server.ts for nonexistent QR order/service call IDs
+    const accept404 = await fetch(`${posBase}/api/qr-ordering/orders/accept`, {
+      method: 'POST',
+      headers: cashierHeaders,
+      body: JSON.stringify({ guestOrderId: 'GORD-DOES-NOT-EXIST' }),
+    });
+    assert.equal(accept404.status, 404);
+    const reject404 = await fetch(`${posBase}/api/qr-ordering/orders/reject`, {
+      method: 'POST',
+      headers: cashierHeaders,
+      body: JSON.stringify({ guestOrderId: 'GORD-DOES-NOT-EXIST', reason: 'test' }),
+    });
+    assert.equal(reject404.status, 404);
+    const ack404 = await fetch(`${posBase}/api/qr-ordering/service-calls/ack`, {
+      method: 'POST',
+      headers: cashierHeaders,
+      body: JSON.stringify({ callId: 'SCALL-DOES-NOT-EXIST' }),
+    });
+    assert.equal(ack404.status, 404);
+
+    // 4. OUTLET-BR-02 isolation + AUTO_ACCEPT_SIGNED_TABLE via NFC + SIGNED_SESSION rotation
+    const guestBase = `http://127.0.0.1:${guestPort}`;
+    // Seed a menu item with stock in OUTLET-BR-02 so BR-02 can order
+    const brProdRes = await fetch(`${posBase}/api/catalog/variant`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        outletId: 'OUTLET-BR-02',
+        itemName: 'Branch2 Iced Latte',
+        sku: 'SKU-BR2-LATTE',
+        categoryId: 'CAT-CAFE',
+        unitName: 'แก้ว',
+        priceSatang: 7_500,
+        defaultPurchaseCostMicroBaht: 25_000_000,
+        initialStockMilli: 20_000,
+      }),
+    });
+    assert.equal(brProdRes.status, 200);
+    const brProd = (await brProdRes.json()) as { variant: { id: string } };
+
+    // Cross-outlet token (OUTLET-BR-02 token submitted to OUTLET-HQ) MUST fail with 403
+    const crossOutletRes = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        outletId: 'OUTLET-HQ',
+        tableLabel: 'T04',
+        signedToken: openBrT04.session.token,
+        entryChannel: 'NFC',
+        lines: [{ variantId: brProd.variant.id, quantityCount: 1 }],
+      }),
+    });
+    assert.equal(crossOutletRes.status, 403);
+
+    // Valid signed NFC order on OUTLET-BR-02 auto-accepts into BR-02 Held Bill + KDS immediately!
+    const brAutoRes = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        outletId: 'OUTLET-BR-02',
+        tableLabel: 'T04',
+        signedToken: openBrT04.session.token,
+        entryChannel: 'NFC',
+        lines: [{ variantId: brProd.variant.id, quantityCount: 1 }],
+      }),
+    });
+    assert.equal(brAutoRes.status, 201);
+    const brAutoData = (await brAutoRes.json()) as {
+      order: { outletId: string; status: string; entryChannel: string; heldBillId: string | null; kdsSequenceIds: number[] };
+    };
+    assert.equal(brAutoData.order.outletId, 'OUTLET-BR-02');
+    assert.equal(brAutoData.order.status, 'ACCEPTED');
+    assert.equal(brAutoData.order.entryChannel, 'NFC');
+    assert.ok(brAutoData.order.heldBillId);
+    assert.ok(brAutoData.order.kdsSequenceIds.length >= 1);
+
+    // Verify OUTLET-HQ inbox remains isolated (0 orders from OUTLET-BR-02)
+    const hqInbox = (await (
+      await fetch(`${posBase}/api/qr-ordering/orders?outletId=OUTLET-HQ`, { headers: cashierHeaders })
+    ).json()) as { orders: unknown[] };
+    assert.equal(hqInbox.orders.length, 0);
+
+    // Rotate T04 on OUTLET-BR-02 -> old token fails (403), new token succeeds (201)
+    const rotatedBrT04 = (await (
+      await fetch(`${posBase}/api/qr-ordering/table-session`, {
+        method: 'POST',
+        headers: cashierHeaders,
+        body: JSON.stringify({ outletId: 'OUTLET-BR-02', tableLabel: 'T04' }),
+      })
+    ).json()) as { session: { token: string } };
+    assert.notEqual(rotatedBrT04.session.token, openBrT04.session.token);
+
+    const oldTokenOrder = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        outletId: 'OUTLET-BR-02',
+        tableLabel: 'T04',
+        signedToken: openBrT04.session.token,
+        entryChannel: 'NFC',
+        lines: [{ variantId: brProd.variant.id, quantityCount: 1 }],
+      }),
+    });
+    assert.equal(oldTokenOrder.status, 403);
+
+    const newTokenOrder = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        outletId: 'OUTLET-BR-02',
+        tableLabel: 'T04',
+        signedToken: rotatedBrT04.session.token,
+        entryChannel: 'NFC',
+        lines: [{ variantId: brProd.variant.id, quantityCount: 1 }],
+      }),
+    });
+    assert.equal(newTokenOrder.status, 201);
+
+    // 5. SQLite HMAC tamper on `qr_ordering_config` MUST fail closed to defaults
+    await server.engine.executeWriteImmediate((db) => {
+      db.prepare(`UPDATE store_config SET value = ? WHERE key = 'qr_ordering_config'`).run(
+        JSON.stringify({ ...DEFAULT_QR_ORDERING_CONFIG, enabled: true, port: 5555, nfcEnabled: true })
+      );
+    });
+    const afterTamper = server.ipc.getQrOrderingConfig();
+    assert.equal(afterTamper.enabled, false, 'Tampered qr_ordering_config must fail closed (enabled=false)');
+    assert.equal(afterTamper.nfcEnabled, false, 'Tampered qr_ordering_config must fail closed (nfcEnabled=false)');
+    assert.equal(afterTamper.port, 4174);
+  } finally {
+    await server.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Phase 8K: Captive URL &via=nfc normalization + Guest SPA client state guards (case-insensitive tableSelect, captive=1 forward, locked ordering & expired token preservation)', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rube-pos-phase8k-html-'));
+  const dbPath = path.join(tmpDir, 'rube_guest_html.db');
+  const guestPort = await getFreeTcpPort();
+  const server = new RubePosInteractiveAppServer({
+    dbPath,
+    requireFirstRunWizard: false,
+    enforceApiSessionAuth: true,
+  });
+
+  // Minimal DOM + VM runner for the inline script inside renderGuestMenuHtml
+  function runGuestHtmlScriptInVm(
+    html: string,
+    href: string,
+    mockFetch: (url: string, init?: { method?: string; body?: string }) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>,
+    vmOpts?: { rejectClipboard?: boolean; disableUrlCtor?: boolean }
+  ) {
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(html);
+    assert.ok(scriptMatch?.[1], 'Expected inline script inside guest menu HTML');
+
+    const elements = new Map<string, Record<string, unknown>>();
+    const makeEl = (id: string) => {
+      const classSet = new Set<string>();
+      const el: Record<string, unknown> = {
+        id,
+        style: {},
+        value: '',
+        textContent: '',
+        _innerHTML: '',
+        disabled: false,
+        select: () => {},
+        children: [] as Array<Record<string, unknown>>,
+        classList: {
+          toggle: (cls: string, force?: boolean) => {
+            if (force === undefined) {
+              if (classSet.has(cls)) classSet.delete(cls);
+              else classSet.add(cls);
+            } else if (force) classSet.add(cls);
+            else classSet.delete(cls);
+          },
+          add: (cls: string) => classSet.add(cls),
+          remove: (cls: string) => classSet.delete(cls),
+          contains: (cls: string) => classSet.has(cls),
+        },
+        querySelectorAll: (selector: string) => {
+          if (selector === '.card[data-vid]') {
+            const matched: Array<Record<string, unknown>> = [];
+            const re = /data-vid="([^"]+)"/g;
+            let m: RegExpExecArray | null;
+            const htmlText = String(el._innerHTML);
+            while ((m = re.exec(htmlText)) !== null) {
+              const vid = m[1]!;
+              matched.push({
+                getAttribute: (name: string) => (name === 'data-vid' ? vid : null),
+              });
+            }
+            el._cardNodes = matched;
+            return matched;
+          }
+          return [];
+        },
+        getAttribute: () => null,
+        set innerHTML(val: string) {
+          this._innerHTML = val;
+        },
+        get innerHTML() {
+          return String(this._innerHTML);
+        },
+      };
+      return el;
+    };
+
+    for (const id of [
+      'storeNameEl',
+      'storeSubEl',
+      'captiveBanner',
+      'alertBanner',
+      'tabMenuBtn',
+      'tabOrdersBtn',
+      'serviceBar',
+      'menuSection',
+      'ordersSection',
+      'searchInput',
+      'catStrip',
+      'menuGrid',
+      'cartDock',
+      'openCartBtn',
+      'cartDockLabel',
+      'cartDockTotal',
+      'itemSheetBackdrop',
+      'itemSheetContent',
+      'cartSheetBackdrop',
+      'cartSheetContent',
+    ]) {
+      elements.set(id, makeEl(id));
+    }
+
+    const copiedTexts: string[] = [];
+    let lastCreatedTextarea: Record<string, unknown> | null = null;
+    const doc = {
+      getElementById: (id: string) => {
+        if (!elements.has(id)) elements.set(id, makeEl(id));
+        return elements.get(id)!;
+      },
+      querySelectorAll: () => [],
+      createElement: (tag: string) => {
+        const created = makeEl(`tmp-${tag}`);
+        if (tag === 'textarea') lastCreatedTextarea = created;
+        return created;
+      },
+      execCommand: (cmd: string) => {
+        if (cmd === 'copy' && lastCreatedTextarea) {
+          copiedTexts.push(String(lastCreatedTextarea.value ?? ''));
+          return true;
+        }
+        return false;
+      },
+      body: { appendChild: () => {}, removeChild: () => {} },
+    };
+
+    const windowObj = {
+      location: { href },
+      localStorage: { getItem: () => null, setItem: () => {} },
+      setInterval: () => 0,
+      clearInterval: () => {},
+    };
+
+    const ctx = vm.createContext({
+      window: windowObj,
+      document: doc,
+      navigator: {
+        clipboard: {
+          writeText: (txt: string) => {
+            if (vmOpts?.rejectClipboard) {
+              return Promise.reject(new Error('NotAllowedError'));
+            }
+            copiedTexts.push(txt);
+            return Promise.resolve();
+          },
+        },
+      },
+      fetch: mockFetch,
+      ...(vmOpts?.disableUrlCtor ? {} : { URL }),
+      URLSearchParams,
+      console,
+      Math,
+      Number,
+      String,
+      Array,
+      Object,
+      JSON,
+      Date,
+      Promise,
+    });
+
+    vm.runInContext(scriptMatch[1], ctx, { timeout: 1000 });
+    return { elements, copiedTexts };
+  }
+
+  try {
+    const { url: posBase } = await server.start(0, '127.0.0.1');
+    const loginRes = await fetch(`${posBase}/api/auth/pin-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: '999999', userId: 'USR-OWNER-01' }),
+    });
+    const { sessionToken } = (await loginRes.json()) as { sessionToken: string };
+    const authHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${sessionToken}`,
+    };
+
+    await fetch(`${posBase}/api/qr-ordering/config`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        enabled: true,
+        port: guestPort,
+        allowOpenTableSelection: true,
+        tableLabels: ['T01', 'T04'],
+      }),
+    });
+
+    const guestBase = `http://127.0.0.1:${guestPort}`;
+
+    // 1. Live Captive URL with &t=t04&via=nfc -> Copy Link preserves /m?t=t04&via=nfc (NOT /m&t=t04&via=nfc!)
+    const captiveHtmlRes = await fetch(`${guestBase}/m?captive=1&t=t04&via=nfc`);
+    assert.equal(captiveHtmlRes.status, 200);
+    const captiveHtml = await captiveHtmlRes.text();
+    const vmCaptive = runGuestHtmlScriptInVm(
+      captiveHtml,
+      `${guestBase}/m?captive=1&t=t04&via=nfc`,
+      async (reqUrl) => {
+        const res = await fetch(`${guestBase}${reqUrl}`);
+        const json = await res.json();
+        return { ok: res.ok, status: res.status, json: async () => json };
+      }
+    );
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Trigger copyUrlBtn click inside captiveBanner HTML
+    const capBannerHtml = String(vmCaptive.elements.get('captiveBanner')!._innerHTML);
+    assert.ok(capBannerHtml.includes('id="copyUrlBtn"'));
+    const copyBtn = vmCaptive.elements.get('copyUrlBtn') as { onclick?: () => void };
+    assert.equal(typeof copyBtn.onclick, 'function');
+    copyBtn.onclick!();
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(vmCaptive.copiedTexts[0], `${guestBase}/m?t=t04&via=nfc`);
+    const normalizedFetch = await fetch(vmCaptive.copiedTexts[0]!);
+    assert.equal(normalizedFetch.status, 200, 'Normalized captive link MUST return HTTP 200');
+
+    // 1b. Insecure LAN HTTP clipboard rejection falls back to document.execCommand('copy') + relative #hash strip
+    const vmFallbackCopy = runGuestHtmlScriptInVm(
+      captiveHtml,
+      '/m?captive=1&t=t04#menu',
+      async (reqUrl) => {
+        const res = await fetch(`${guestBase}${reqUrl}`);
+        const json = await res.json();
+        return { ok: res.ok, status: res.status, json: async () => json };
+      },
+      { rejectClipboard: true, disableUrlCtor: true }
+    );
+    await new Promise((r) => setTimeout(r, 40));
+    const fallbackCopyBtn = vmFallbackCopy.elements.get('copyUrlBtn') as { onclick?: () => void };
+    fallbackCopyBtn.onclick!();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(vmFallbackCopy.copiedTexts[0], '/m?t=t04#menu');
+
+    // 2. loadMenu() forwards captive=1 when BOOT.entryChannel === 'CAPTIVE'
+    const pureCaptiveHtml = renderGuestMenuHtml({
+      storeName: 'Rube',
+      initialTableLabel: '',
+      initialSignedToken: '',
+      isCaptiveMode: true,
+      entryChannel: 'CAPTIVE',
+      defaultLocale: 'en',
+    });
+    const fetchedUrls: string[] = [];
+    runGuestHtmlScriptInVm(pureCaptiveHtml, `${guestBase}/m?captive=1`, async (reqUrl) => {
+      fetchedUrls.push(reqUrl);
+      const res = await fetch(`${guestBase}${reqUrl}`);
+      const json = await res.json();
+      return { ok: res.ok, status: res.status, json: async () => json };
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(
+      fetchedUrls.some((u) => u.startsWith('/api/guest/menu') && u.includes('captive=1')),
+      `loadMenu() must forward captive=1 when entryChannel==='CAPTIVE'; got ${fetchedUrls.join(', ')}`
+    );
+
+    // 3. Case-insensitive tableSelect match (?t=t04&via=nfc selects 'T04')
+    const menuItemsSample = [
+      {
+        variantId: 'V1',
+        itemName: 'Iced Americano',
+        variantName: 'Reg',
+        categoryId: 'CAT-CAFE',
+        categoryName: 'Coffee',
+        unitName: 'cup',
+        priceSatang: 6000,
+        imageUrl: null,
+        isAvailable: true,
+        isComposite: false,
+        kitchenStation: 'BAR',
+      },
+    ];
+    const htmlLowerT = renderGuestMenuHtml({
+      storeName: 'Rube',
+      initialTableLabel: 't04',
+      initialSignedToken: '',
+      isCaptiveMode: false,
+      entryChannel: 'NFC',
+      defaultLocale: 'en',
+    });
+    // Check that rendered code matches case-insensitively when rendering <select id="tableSelect">
+    assert.ok(htmlLowerT.includes('tbl.toUpperCase() === String(state.selectedTable'));
+    const vmLowerT = runGuestHtmlScriptInVm(htmlLowerT, `${guestBase}/m?t=t04&via=nfc`, async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        storeName: 'Rube',
+        storeAddress: '',
+        outletId: 'OUTLET-HQ',
+        countryCode: 'TH',
+        currencyCode: 'THB',
+        currencySymbol: '฿',
+        currencyDecimals: 2,
+        defaultLocale: 'en',
+        taxMode: 'INCLUSIVE',
+        vatRateBps: 700,
+        wifiSsid: 'RubeWiFi',
+        maxQtyPerItem: 20,
+        allowOpenTableSelection: true,
+        tableLabels: ['T01', 'T04'],
+        lockedTableLabel: null,
+        signedTableValid: false,
+        signedTableExpired: false,
+        nfcEnabled: true,
+        entryChannel: 'NFC',
+        categories: [],
+        items: menuItemsSample,
+        modifierGroups: [],
+      }),
+    }));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.ok(String(vmLowerT.elements.get('storeSubEl')!._innerHTML).includes('Table T04'));
+    // Open item V1 -> add to cart -> open cart sheet -> verify <option value="T04" selected>
+    const lowerCards = vmLowerT.elements.get('menuGrid')!._cardNodes as Array<{ onclick?: () => void }>;
+    assert.equal(lowerCards.length, 1);
+    lowerCards[0]!.onclick!();
+    (vmLowerT.elements.get('confirmAddItemBtn') as { onclick: () => void }).onclick();
+    (vmLowerT.elements.get('openCartBtn') as { onclick: () => void }).onclick();
+    const cartHtml = String(vmLowerT.elements.get('cartSheetContent')!._innerHTML);
+    assert.ok(
+      cartHtml.includes('<option value="T04" selected>T04</option>'),
+      `Expected case-insensitive ?t=t04 match to select T04 in cart sheet, got: ${cartHtml}`
+    );
+
+    // 4. !allowOpenTableSelection && !signedTableValid -> topbar hides Table T04, menu cards disabled, ordering locked
+    const vmLocked = runGuestHtmlScriptInVm(htmlLowerT, `${guestBase}/m?t=t04&via=nfc`, async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        storeName: 'Rube',
+        storeAddress: '',
+        outletId: 'OUTLET-HQ',
+        countryCode: 'TH',
+        currencyCode: 'THB',
+        currencySymbol: '฿',
+        currencyDecimals: 2,
+        defaultLocale: 'en',
+        taxMode: 'INCLUSIVE',
+        vatRateBps: 700,
+        wifiSsid: 'RubeWiFi',
+        maxQtyPerItem: 20,
+        allowOpenTableSelection: false,
+        tableLabels: ['T01', 'T04'],
+        lockedTableLabel: null,
+        signedTableValid: false,
+        signedTableExpired: false,
+        nfcEnabled: true,
+        entryChannel: 'NFC',
+        categories: [],
+        items: menuItemsSample,
+        modifierGroups: [],
+      }),
+    }));
+    await new Promise((r) => setTimeout(r, 30));
+    const lockedTopbar = String(vmLocked.elements.get('storeSubEl')!._innerHTML);
+    assert.ok(!lockedTopbar.includes('Table T04'), 'Topbar must NOT print unverified Table T04 when !allowOpenTableSelection');
+    const lockedGrid = String(vmLocked.elements.get('menuGrid')!._innerHTML);
+    assert.ok(lockedGrid.includes(' disabled>'), 'Menu cards must be disabled when ordering is locked');
+    assert.ok(!lockedGrid.includes('plus-chip'), 'Menu cards must hide + chip when ordering is locked');
+    assert.equal((vmLocked.elements.get('serviceBar')!.style as { display?: string }).display, 'none');
+    const lockedCards = vmLocked.elements.get('menuGrid')!._cardNodes as Array<{ onclick?: () => void }>;
+    lockedCards[0]?.onclick?.();
+    assert.equal(
+      (vmLocked.elements.get('itemSheetBackdrop')!.classList as { contains: (c: string) => boolean }).contains('open'),
+      false,
+      'Clicking locked menu card must not open item sheet'
+    );
+
+    // 5. signedTableExpired && allowOpenTableSelection -> ordering locked & never strips token into Walk-in
+    const htmlExpired = renderGuestMenuHtml({
+      storeName: 'Rube',
+      initialTableLabel: 'T04',
+      initialSignedToken: 'expired.sig',
+      isCaptiveMode: false,
+      entryChannel: 'NFC',
+      defaultLocale: 'en',
+    });
+    const postedBodies: string[] = [];
+    const vmExpired = runGuestHtmlScriptInVm(
+      htmlExpired,
+      `${guestBase}/m?t=T04&s=expired.sig&via=nfc`,
+      async (_u, init) => {
+        if (init?.method === 'POST' && init.body) {
+          postedBodies.push(init.body);
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            storeName: 'Rube',
+            storeAddress: '',
+            outletId: 'OUTLET-HQ',
+            countryCode: 'TH',
+            currencyCode: 'THB',
+            currencySymbol: '฿',
+            currencyDecimals: 2,
+            defaultLocale: 'en',
+            taxMode: 'INCLUSIVE',
+            vatRateBps: 700,
+            wifiSsid: 'RubeWiFi',
+            maxQtyPerItem: 20,
+            allowOpenTableSelection: true,
+            tableLabels: ['T01', 'T04'],
+            lockedTableLabel: null,
+            signedTableValid: false,
+            signedTableExpired: true,
+            nfcEnabled: true,
+            entryChannel: 'NFC',
+            categories: [],
+            items: menuItemsSample,
+            modifierGroups: [],
+          }),
+        };
+      }
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    const expiredGrid = String(vmExpired.elements.get('menuGrid')!._innerHTML);
+    assert.ok(expiredGrid.includes(' disabled>'), 'Expired signed table must lock ordering even when allowOpenTableSelection=true');
+    const expiredCards = vmExpired.elements.get('menuGrid')!._cardNodes as Array<{ onclick?: () => void }>;
+    expiredCards[0]?.onclick?.();
+    assert.equal(
+      (vmExpired.elements.get('itemSheetBackdrop')!.classList as { contains: (c: string) => boolean }).contains('open'),
+      false,
+      'Clicking card on expired signed table must not open item sheet'
+    );
+    assert.equal(postedBodies.length, 0);
+    assert.ok(!htmlExpired.includes('signedToken: state.menu.signedTableValid ? BOOT.initialToken : \'\''));
+
+    // 6. Unlisted ?t=T99 in open mode falls back to first configured tableLabel ('T01') in topbar and <select>
+    const htmlUnlisted = renderGuestMenuHtml({
+      storeName: 'Rube',
+      initialTableLabel: 'T99',
+      initialSignedToken: '',
+      isCaptiveMode: false,
+      entryChannel: 'DIRECT',
+      defaultLocale: 'en',
+    });
+    const vmUnlisted = runGuestHtmlScriptInVm(htmlUnlisted, `${guestBase}/m?t=T99`, async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        storeName: 'Rube',
+        storeAddress: '',
+        outletId: 'OUTLET-HQ',
+        countryCode: 'TH',
+        currencyCode: 'THB',
+        currencySymbol: '฿',
+        currencyDecimals: 2,
+        defaultLocale: 'en',
+        taxMode: 'INCLUSIVE',
+        vatRateBps: 700,
+        wifiSsid: 'RubeWiFi',
+        maxQtyPerItem: 20,
+        allowOpenTableSelection: true,
+        tableLabels: ['T01', 'T04'],
+        lockedTableLabel: null,
+        signedTableValid: false,
+        signedTableExpired: false,
+        nfcEnabled: true,
+        entryChannel: 'DIRECT',
+        categories: [],
+        items: menuItemsSample,
+        modifierGroups: [],
+      }),
+    }));
+    await new Promise((r) => setTimeout(r, 30));
+    const unlistedTopbar = String(vmUnlisted.elements.get('storeSubEl')!._innerHTML);
+    assert.ok(unlistedTopbar.includes('Table T01'), `Expected fallback to T01 in topbar, got ${unlistedTopbar}`);
+    assert.ok(!unlistedTopbar.includes('T99'));
+    const unlistedCards = vmUnlisted.elements.get('menuGrid')!._cardNodes as Array<{ onclick?: () => void }>;
+    unlistedCards[0]!.onclick!();
+    (vmUnlisted.elements.get('confirmAddItemBtn') as { onclick: () => void }).onclick();
+    (vmUnlisted.elements.get('openCartBtn') as { onclick: () => void }).onclick();
+    const unlistedCartHtml = String(vmUnlisted.elements.get('cartSheetContent')!._innerHTML);
+    assert.ok(unlistedCartHtml.includes('<option value="T01" selected>T01</option>'));
+  } finally {
+    await server.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Phase 8L: React SSR verification of QrOrderingSettingsCard & TableQrSlipModal (host preview, warnings, static NFC without activeSession, WIFI_WSC_ONLY & overflow)', async () => {
+  const esbuild = await import('esbuild');
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { createRequire } = await import('node:module');
+
+  const appDir = path.resolve(import.meta.dirname, '../../packages/ui-presentation/src/app');
+  const toImport = (rel: string) => path.join(appDir, rel);
+
+  const entrySource = [
+    `export { I18nProvider } from ${JSON.stringify(toImport('i18n/index.tsx'))};`,
+    `export { QrOrderingSettingsCard } from ${JSON.stringify(toImport('components/QrOrderingSettingsCard.tsx'))};`,
+    `export { TableQrSlipModal } from ${JSON.stringify(toImport('components/QrOrderingInboxPanel.tsx'))};`,
+  ].join('\n');
+
+  const built = await esbuild.build({
+    stdin: {
+      contents: entrySource,
+      resolveDir: appDir,
+      loader: 'tsx',
+    },
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'cjs',
+    jsx: 'automatic',
+    packages: 'external',
+    logLevel: 'silent',
+  });
+
+  const cjsCode = built.outputFiles[0]!.text;
+  const req = createRequire(import.meta.url);
+  const cjsModule: { exports: Record<string, unknown> } = { exports: {} };
+  const fn = new Function('exports', 'require', 'module', cjsCode);
+  fn(cjsModule.exports, req, cjsModule);
+  const mod = cjsModule.exports as {
+    I18nProvider: React.FC<{ fiscalConfig: unknown; children: React.ReactNode }>;
+    QrOrderingSettingsCard: React.FC<Record<string, unknown>>;
+    TableQrSlipModal: React.FC<Record<string, unknown>>;
+  };
+
+  const baseFiscal = {
+    countryCode: 'TH',
+    currencyCode: 'THB',
+    currencySymbol: '฿',
+    currencyDecimals: 2,
+    uiLocale: 'en',
+    receiptLocale: 'en',
+    defaultTaxMode: 'INCLUSIVE',
+    vatRateBps: 700,
+    storeAddress: '',
+    laoQrStaticTemplate: '',
+  };
+
+  const makeBootstrap = (qrCfg: Record<string, unknown>, sessions: unknown[] = []) => ({
+    storeSettings: { storeName: 'Rube Cafe' },
+    printerConfig: { paperWidthMm: 80 },
+    qrOrderingConfig: qrCfg,
+    qrOrderingStatus: {
+      running: true,
+      port: Number(qrCfg.port ?? 4174),
+      detectedLanIpv4s: ['192.168.1.50'],
+      activeHost: String(qrCfg.customHostOverride || '192.168.1.50'),
+      baseUrl: `http://${qrCfg.customHostOverride || '192.168.1.50'}:${qrCfg.port ?? 4174}`,
+    },
+    qrTableSessions: sessions,
+  });
+
+  const renderWithI18n = (el: React.ReactElement) =>
+    renderToStaticMarkup(React.createElement(mod.I18nProvider, { fiscalConfig: baseFiscal }, el));
+
+  // 1. QrOrderingSettingsCard: STATIC_TABLE + !allowOpenTableSelection + WIFI_WSC_ONLY with short WPA key
+  const settingsWarnHtml = renderWithI18n(
+    React.createElement(mod.QrOrderingSettingsCard, {
+      outletId: 'OUTLET-HQ',
+      bootstrap: makeBootstrap({
+        ...DEFAULT_QR_ORDERING_CONFIG,
+        enabled: true,
+        customHostOverride: '10.0.0.88',
+        port: 4199,
+        wifiSsid: 'RubeCafe',
+        wifiPassword: 'short',
+        wifiSecurity: 'WPA',
+        allowOpenTableSelection: false,
+        tableLabels: ['T01', 'T04'],
+        nfcEnabled: true,
+        nfcTagMode: 'STATIC_TABLE',
+        nfcRecordLayout: 'WIFI_WSC_ONLY',
+        nfcChipType: 'NTAG215',
+      }),
+      canManage: true,
+      onRefreshState: async () => {},
+      onToast: () => {},
+    })
+  );
+  assert.ok(settingsWarnHtml.includes('http://10.0.0.88:4199/m'));
+  assert.ok(settingsWarnHtml.includes('STATIC_TABLE NFC tags are unsigned'));
+  assert.ok(settingsWarnHtml.includes('WPA password must be at least 8 characters'));
+
+  // 2. QrOrderingSettingsCard: SIGNED_SESSION unopened tables warning + blank SSID warning
+  const settingsSignedHtml = renderWithI18n(
+    React.createElement(mod.QrOrderingSettingsCard, {
+      outletId: 'OUTLET-HQ',
+      bootstrap: makeBootstrap({
+        ...DEFAULT_QR_ORDERING_CONFIG,
+        enabled: true,
+        wifiSsid: '',
+        wifiPassword: '',
+        tableLabels: ['T01', 'T04'],
+        nfcEnabled: true,
+        nfcTagMode: 'SIGNED_SESSION',
+        nfcRecordLayout: 'URI_AND_WIFI_WSC',
+        nfcChipType: 'NTAG215',
+      }),
+      canManage: true,
+      onRefreshState: async () => {},
+      onToast: () => {},
+    })
+  );
+  assert.ok(settingsSignedHtml.includes('Wi-Fi SSID is blank'));
+  assert.ok(settingsSignedHtml.includes('2 table(s) have no active HMAC session yet'));
+
+  // 3. TableQrSlipModal: STATIC_TABLE renders NFC Tools WITHOUT activeSession, shows capacity & static warning
+  const modalStaticHtml = renderWithI18n(
+    React.createElement(mod.TableQrSlipModal, {
+      open: true,
+      outletId: 'OUTLET-HQ',
+      bootstrap: makeBootstrap({
+        ...DEFAULT_QR_ORDERING_CONFIG,
+        enabled: true,
+        wifiSsid: 'RubeCafe_Super_Long_Guest_WiFi_SSID',
+        wifiPassword: 'SuperLongWifiPassword2026',
+        wifiSecurity: 'WPA',
+        allowOpenTableSelection: false,
+        tableLabels: ['T01', 'T04'],
+        nfcEnabled: true,
+        nfcTagMode: 'STATIC_TABLE',
+        nfcRecordLayout: 'URI_AND_WIFI_WSC',
+        nfcChipType: 'NTAG213',
+      }),
+      currentUser: { id: 'U1', displayName: 'Cashier', role: 'CASHIER' },
+      tableSessions: [],
+      onClose: () => {},
+      onSessionsChanged: async () => {},
+      onToast: () => {},
+    })
+  );
+  assert.ok(
+    modalStaticHtml.includes('NFC Tools (T01)'),
+    'NFC Tools panel must render without activeSession in STATIC_TABLE mode'
+  );
+  assert.ok(modalStaticHtml.includes('Static URL'));
+  assert.ok(modalStaticHtml.includes('137 B (NTAG213)'));
+  assert.ok(modalStaticHtml.includes('NDEF size exceeds NTAG213'));
+  assert.ok(
+    modalStaticHtml.includes('STATIC_TABLE tags are unsigned while open table selection is disabled')
+  );
+  assert.ok(modalStaticHtml.includes('Copy NFC URL'));
+
+  // 4. TableQrSlipModal: WIFI_WSC_ONLY shows Copy WSC Base64 & Android-only note
+  const modalWscOnlyHtml = renderWithI18n(
+    React.createElement(mod.TableQrSlipModal, {
+      open: true,
+      outletId: 'OUTLET-HQ',
+      bootstrap: makeBootstrap({
+        ...DEFAULT_QR_ORDERING_CONFIG,
+        enabled: true,
+        wifiSsid: 'RubeCafe_5G',
+        wifiPassword: 'password123',
+        wifiSecurity: 'WPA',
+        tableLabels: ['T01'],
+        nfcEnabled: true,
+        nfcTagMode: 'STATIC_TABLE',
+        nfcRecordLayout: 'WIFI_WSC_ONLY',
+        nfcChipType: 'NTAG215',
+      }),
+      currentUser: { id: 'U1', displayName: 'Cashier', role: 'CASHIER' },
+      tableSessions: [],
+      onClose: () => {},
+      onSessionsChanged: async () => {},
+      onToast: () => {},
+    })
+  );
+  assert.ok(modalWscOnlyHtml.includes('WIFI_WSC_ONLY'));
+  assert.ok(modalWscOnlyHtml.includes('Copy WSC Base64'));
+  assert.ok(modalWscOnlyHtml.includes('492 B (NTAG215)'));
+
+  // 5. TableQrSlipModal: SIGNED_SESSION with active tableSessions renders Rotate, Signed Token & Slip immediately
+  const modalSignedActiveHtml = renderWithI18n(
+    React.createElement(mod.TableQrSlipModal, {
+      open: true,
+      outletId: 'OUTLET-HQ',
+      bootstrap: makeBootstrap({
+        ...DEFAULT_QR_ORDERING_CONFIG,
+        enabled: true,
+        wifiSsid: 'RubeCafe_5G',
+        wifiPassword: 'password123',
+        wifiSecurity: 'WPA',
+        tableLabels: ['T01', 'T04'],
+        nfcEnabled: true,
+        nfcTagMode: 'SIGNED_SESSION',
+        nfcRecordLayout: 'URI_ONLY',
+        nfcChipType: 'NTAG215',
+      }),
+      currentUser: { id: 'U1', displayName: 'Cashier', role: 'CASHIER' },
+      tableSessions: [
+        {
+          outletId: 'OUTLET-HQ',
+          tableLabel: 'T01',
+          sessionNonce: 'abc12345',
+          token: 'abc12345.deadbeef1234',
+          menuUrl: 'http://192.168.1.50:4174/m?t=T01&s=abc12345.deadbeef1234',
+          nfcMenuUrl: 'http://192.168.1.50:4174/m?t=T01&s=abc12345.deadbeef1234&via=nfc',
+          wifiQrPayload: 'WIFI:T:WPA;S:RubeCafe_5G;P:password123;;',
+          openedByName: 'Cashier',
+          openedAtIso: '2026-11-28T00:00:00.000Z',
+        },
+      ],
+      onClose: () => {},
+      onSessionsChanged: async () => {},
+      onToast: () => {},
+    })
+  );
+  assert.ok(modalSignedActiveHtml.includes('Rotate Table QR for T01'));
+  assert.ok(modalSignedActiveHtml.includes('Signed Token'));
+  assert.ok(!modalSignedActiveHtml.includes('Open table above first to generate a rotating HMAC token'));
 });

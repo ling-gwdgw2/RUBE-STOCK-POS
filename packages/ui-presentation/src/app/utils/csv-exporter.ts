@@ -3,13 +3,39 @@
  * Guarantees zero Thai character mojibake when opened directly in Microsoft Excel on Windows.
  */
 
-function escapeCsvCell(value: string | number | boolean | null | undefined): string {
+const NEGATIVE_DECIMAL_RE = /^-\d+(?:\.\d+)?$/;
+
+/**
+ * Escapes CSV cells per RFC 4180 and neutralizes spreadsheet formula injection (`=`, `+`, `@`, `\t`, `\r`, non-numeric `-`).
+ */
+export function escapeCsvCell(value: string | number | boolean | null | undefined): string {
   if (value === null || value === undefined) return '';
-  const raw = String(value);
+  let raw = String(value);
+  const trimmedStart = raw.trimStart();
+  if (
+    trimmedStart.length > 0 &&
+    (trimmedStart[0] === '=' ||
+      trimmedStart[0] === '+' ||
+      trimmedStart[0] === '@' ||
+      raw[0] === '\t' ||
+      raw[0] === '\r' ||
+      (trimmedStart[0] === '-' && !NEGATIVE_DECIMAL_RE.test(trimmedStart)))
+  ) {
+    raw = `'${raw}`;
+  }
   if (raw.includes('"') || raw.includes(',') || raw.includes('\n') || raw.includes('\r')) {
     return `"${raw.replace(/"/g, '""')}"`;
   }
   return raw;
+}
+
+export function buildUtf8BomCsvContent(
+  headers: readonly string[],
+  rows: ReadonlyArray<ReadonlyArray<string | number | boolean | null | undefined>>
+): string {
+  const headerLine = headers.map(escapeCsvCell).join(',');
+  const bodyLines = rows.map((row) => row.map(escapeCsvCell).join(','));
+  return `\uFEFF${[headerLine, ...bodyLines].join('\r\n')}\r\n`;
 }
 
 export function downloadUtf8BomCsv(
@@ -17,9 +43,7 @@ export function downloadUtf8BomCsv(
   headers: readonly string[],
   rows: ReadonlyArray<ReadonlyArray<string | number | boolean | null | undefined>>
 ): void {
-  const headerLine = headers.map(escapeCsvCell).join(',');
-  const bodyLines = rows.map((row) => row.map(escapeCsvCell).join(','));
-  const csvContent = `\uFEFF${[headerLine, ...bodyLines].join('\r\n')}\r\n`;
+  const csvContent = buildUtf8BomCsvContent(headers, rows);
 
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);

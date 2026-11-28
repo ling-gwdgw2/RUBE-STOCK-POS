@@ -318,6 +318,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
       width: 100%;
     }
     .card.soldout { opacity: 0.55; cursor: not-allowed; }
+    .card.locked { opacity: 0.88; cursor: default; }
     .card-img-wrap {
       height: 112px;
       width: 100%;
@@ -660,6 +661,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           tablePrefix: 'โต๊ะ',
           signedOk: 'ยืนยันโต๊ะอัตโนมัติ',
           signedExpired: 'QR โต๊ะนี้หมดอายุหรือปิดบิลแล้ว กรุณาขอใบ QR ใหม่จากพนักงาน',
+          signedRequiredOnly: 'ร้านนี้เปิดรับเฉพาะออเดอร์ที่สแกนจาก QR / NFC ประจำโต๊ะที่เปิดใช้งานแล้วเท่านั้น กรุณาขอใบ QR จากพนักงาน',
           captiveTip: 'หากกำลังเปิดผ่านหน้าต่าง Wi-Fi แนะนำให้คัดลอกลิงก์ไปเปิดใน Safari / Chrome เพื่อให้สั่งเพิ่มได้สะดวก',
           copyLink: 'คัดลอกลิงก์เมนู',
           copied: 'คัดลอกลิงก์แล้ว',
@@ -710,6 +712,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           tablePrefix: 'ໂຕະ',
           signedOk: 'ຢືນຢັນໂຕະອັດຕະໂນມັດ',
           signedExpired: 'QR ໂຕະນີ້ໝົດອາຍຸ ຫຼື ປິດບິນແລ້ວ ກະລຸນາຂໍໃບ QR ໃໝ່ຈາກພະນັກງານ',
+          signedRequiredOnly: 'ຮ້ານນີ້ເປີດຮັບສະເພາະອໍເດີທີ່ສະແກນຈາກ QR / NFC ປະຈຳໂຕະທີ່ເປີດໃຊ້ງານແລ້ວເທົ່ານັ້ນ',
           captiveTip: 'ຫາກເປີດຜ່ານໜ້າຕ່າງ Wi-Fi ແນະນຳໃຫ້ຄັດລອກລິ້ງໄປເປີດໃນ Safari / Chrome ເພື່ອສັ່ງເພີ່ມໄດ້ສະດວກ',
           copyLink: 'ຄັດລອກລິ້ງເມນູ',
           copied: 'ຄັດລອກລິ້ງແລ້ວ',
@@ -760,6 +763,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           tablePrefix: 'Table',
           signedOk: 'Verified Table',
           signedExpired: 'This Table QR has expired or been settled. Please ask staff for a new QR slip.',
+          signedRequiredOnly: 'This store accepts verified Table QR / NFC orders only. Please ask staff for an active table slip.',
           captiveTip: 'Opened inside Wi-Fi login popup? Copy the menu link to open full-screen in Safari or Chrome.',
           copyLink: 'Copy Link',
           copied: 'Link Copied',
@@ -824,6 +828,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
         trackedOrders: {},
         bannerText: '',
         bannerTone: 'info',
+        lockBannerMode: '',
       };
 
       try {
@@ -844,6 +849,19 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
 
       function L() {
         return TEXT[state.lang] || TEXT.th;
+      }
+
+      function isOrderingLocked() {
+        if (!state.menu) return true;
+        if (state.menu.signedTableExpired) return true;
+        if (!state.menu.signedTableValid && !state.menu.allowOpenTableSelection) return true;
+        return false;
+      }
+
+      function getLockReasonText() {
+        if (!state.menu) return L().loadError;
+        if (state.menu.signedTableExpired) return L().signedExpired;
+        return L().signedRequiredOnly;
       }
 
       function esc(str) {
@@ -868,9 +886,12 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
         return sign + '฿' + baht.toLocaleString('en-US') + '.' + String(rem).padStart(2, '0');
       }
 
-      function setBanner(text, tone) {
+      function setBanner(text, tone, lockMode) {
         state.bannerText = text;
         state.bannerTone = tone || 'info';
+        if (lockMode !== undefined) {
+          state.lockBannerMode = lockMode;
+        }
         renderBanner();
       }
 
@@ -885,9 +906,24 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
         el.innerHTML = '<span>' + esc(state.bannerText) + '</span>';
       }
 
+      function stripCaptiveParamFromUrl(rawHref) {
+        try {
+          const parsed = new URL(rawHref);
+          parsed.searchParams.delete('captive');
+          return parsed.toString();
+        } catch (_e) {
+          return String(rawHref || '').replace(/([?&])captive=[^&#]*(&|#|$)/, function (_m, p1, p2) {
+            if (p1 === '?' && p2 === '&') return '?';
+            if (p2 === '&') return '&';
+            if (p2 === '#') return '#';
+            return '';
+          });
+        }
+      }
+
       function renderCaptiveBanner() {
         const el = document.getElementById('captiveBanner');
-        if (!BOOT.isCaptiveMode) {
+        if (!BOOT.isCaptiveMode && BOOT.entryChannel !== 'CAPTIVE') {
           el.style.display = 'none';
           return;
         }
@@ -897,12 +933,35 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           '<button type="button" id="copyUrlBtn" class="btn btn-sm">' + esc(L().copyLink) + '</button>';
         const btn = document.getElementById('copyUrlBtn');
         if (btn) {
+          const fallbackCopy = function (targetUrl) {
+            if (document.execCommand) {
+              try {
+                const ta = document.createElement('textarea');
+                ta.value = targetUrl;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (ok !== false) {
+                  btn.textContent = L().copied;
+                  return;
+                }
+              } catch (_err) {}
+            }
+            setBanner(targetUrl, 'info', '');
+          };
           btn.onclick = function () {
-            const targetUrl = window.location.href.replace(/[?&]captive=1/, '');
+            const targetUrl = stripCaptiveParamFromUrl(window.location.href);
             if (navigator.clipboard && navigator.clipboard.writeText) {
               navigator.clipboard.writeText(targetUrl).then(function () {
                 btn.textContent = L().copied;
-              }).catch(function () {});
+              }).catch(function () {
+                fallbackCopy(targetUrl);
+              });
+            } else {
+              fallbackCopy(targetUrl);
             }
           };
         }
@@ -919,7 +978,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           const badges = [];
           if (state.menu.lockedTableLabel && state.menu.signedTableValid) {
             badges.push('<span class="badge badge-primary">' + esc(L().tablePrefix) + ' ' + esc(state.menu.lockedTableLabel) + ' · ' + esc(L().signedOk) + '</span>');
-          } else if (state.selectedTable) {
+          } else if (state.menu.allowOpenTableSelection && !state.menu.signedTableExpired && state.selectedTable) {
             badges.push('<span class="badge">' + esc(L().tablePrefix) + ' ' + esc(state.selectedTable) + '</span>');
           }
           if (state.menu.wifiSsid) {
@@ -948,10 +1007,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
       function renderServiceBar() {
         const bar = document.getElementById('serviceBar');
         if (!bar) return;
-        const canCall = Boolean(
-          state.menu &&
-          ((state.menu.lockedTableLabel && state.menu.signedTableValid) || state.menu.allowOpenTableSelection)
-        );
+        const canCall = Boolean(state.menu && !isOrderingLocked());
         if (!canCall) {
           bar.style.display = 'none';
           bar.innerHTML = '';
@@ -966,7 +1022,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
       }
 
       async function sendServiceCall(callType) {
-        if (!state.menu) return;
+        if (!state.menu || isOrderingLocked()) return;
         const tableToSend = (state.menu.lockedTableLabel && state.menu.signedTableValid)
           ? state.menu.lockedTableLabel
           : (state.selectedTable || (state.menu.tableLabels && state.menu.tableLabels[0]) || 'T01');
@@ -977,16 +1033,16 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
             body: JSON.stringify({
               outletId: BOOT.outletId,
               tableLabel: tableToSend,
-              signedToken: state.menu.signedTableValid ? BOOT.initialToken : '',
+              signedToken: BOOT.initialToken || '',
               callType: callType,
               entryChannel: BOOT.entryChannel || 'QR',
             }),
           });
           const data = await res.json().catch(function () { return {}; });
           if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-          setBanner(L().serviceCallSent + ' (' + tableToSend + ')', 'ok');
+          setBanner(L().serviceCallSent + ' (' + tableToSend + ')', 'ok', '');
         } catch (err) {
-          setBanner(err && err.message ? err.message : L().loadError, 'error');
+          setBanner(err && err.message ? err.message : L().loadError, 'error', '');
         }
       }
 
@@ -1033,16 +1089,21 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           return;
         }
 
+        const orderingLocked = isOrderingLocked();
         grid.innerHTML = filtered.map(function (it) {
           const initials = (it.itemName || 'M').slice(0, 2).toUpperCase();
           const imgHtml = it.imageUrl
             ? '<img src="' + esc(it.imageUrl) + '" alt="' + esc(it.itemName) + '" loading="lazy" />'
             : '<div class="card-placeholder">' + esc(initials) + '</div>';
-          const rightAction = it.isAvailable
-            ? '<span class="plus-chip">+</span>'
-            : '<span class="badge badge-danger">' + esc(L().soldOut) + '</span>';
+          const canOrderItem = it.isAvailable && !orderingLocked;
+          const rightAction = !it.isAvailable
+            ? '<span class="badge badge-danger">' + esc(L().soldOut) + '</span>'
+            : orderingLocked
+              ? ''
+              : '<span class="plus-chip">+</span>';
+          const cardClass = !it.isAvailable ? ' soldout' : (orderingLocked ? ' locked' : '');
           return (
-            '<button type="button" class="card' + (it.isAvailable ? '' : ' soldout') + '" data-vid="' + esc(it.variantId) + '"' + (it.isAvailable ? '' : ' disabled') + '>' +
+            '<button type="button" class="card' + cardClass + '" data-vid="' + esc(it.variantId) + '"' + (canOrderItem ? '' : ' disabled') + '>' +
               '<div class="card-img-wrap">' + imgHtml + '</div>' +
               '<div class="card-body">' +
                 '<div class="card-cat">' + esc(it.categoryName) + '</div>' +
@@ -1058,6 +1119,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
 
         grid.querySelectorAll('.card[data-vid]').forEach(function (card) {
           card.onclick = function () {
+            if (isOrderingLocked()) return;
             const vid = card.getAttribute('data-vid');
             const found = state.menu.items.find(function (x) { return x.variantId === vid; });
             if (found && found.isAvailable) {
@@ -1075,7 +1137,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
       function renderCartDock() {
         const dock = document.getElementById('cartDock');
         const totalCount = state.cart.reduce(function (s, l) { return s + l.quantityCount; }, 0);
-        if (totalCount === 0 || state.tab !== 'menu') {
+        if (totalCount === 0 || state.tab !== 'menu' || isOrderingLocked()) {
           dock.style.display = 'none';
           return;
         }
@@ -1086,6 +1148,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
       }
 
       function openItemSheet(item) {
+        if (!state.menu || isOrderingLocked()) return;
         state.activeItem = item;
         state.itemQty = 1;
         state.itemMods = {};
@@ -1218,6 +1281,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
       }
 
       function openCartSheet() {
+        if (!state.menu || isOrderingLocked()) return;
         renderCartSheet();
         document.getElementById('cartSheetBackdrop').classList.add('open');
       }
@@ -1231,6 +1295,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
         if (!state.menu) return;
         const maxQty = state.menu.maxQtyPerItem || 20;
         const isLockedTable = Boolean(state.menu.lockedTableLabel && state.menu.signedTableValid);
+        const orderingLocked = isOrderingLocked();
         const subtotal = state.cart.reduce(function (s, l) { return s + computeCartLineTotalSatang(l); }, 0);
 
         let html =
@@ -1239,13 +1304,15 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
             '<button type="button" class="close-btn" id="closeCartSheetBtn" aria-label="Close">&times;</button>' +
           '</div>';
 
-        if (isLockedTable) {
+        if (orderingLocked) {
+          html += '<div class="banner banner-warn" style="margin-bottom:12px;"><span>' + esc(getLockReasonText()) + '</span></div>';
+        } else if (isLockedTable) {
           html += '<div class="banner banner-ok" style="margin-bottom:12px;"><span>' + esc(L().tablePrefix) + ' <strong>' + esc(state.menu.lockedTableLabel) + '</strong> · ' + esc(L().signedOk) + '</span></div>';
         } else {
           html += '<label class="field-label" for="tableSelect">' + esc(L().selectTableLabel) + '</label>';
           html += '<select id="tableSelect" class="select">';
           (state.menu.tableLabels || []).forEach(function (tbl) {
-            const sel = tbl === state.selectedTable ? ' selected' : '';
+            const sel = tbl.toUpperCase() === String(state.selectedTable || '').toUpperCase() ? ' selected' : '';
             html += '<option value="' + esc(tbl) + '"' + sel + '>' + esc(tbl) + '</option>';
           });
           html += '</select>';
@@ -1282,7 +1349,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
             '<span style="font-size:13px;color:var(--ink-muted);">' + esc(L().estimatedTotal) + '</span>' +
             '<strong class="tnum" style="font-size:18px;color:var(--ink);">' + esc(formatSatang(subtotal)) + '</strong>' +
           '</div>' +
-          '<button type="button" id="submitOrderBtn" class="btn btn-primary" style="width:100%;min-height:48px;font-size:15px;"' + (state.submitting || state.cart.length === 0 ? ' disabled' : '') + '>' +
+          '<button type="button" id="submitOrderBtn" class="btn btn-primary" style="width:100%;min-height:48px;font-size:15px;"' + (state.submitting || state.cart.length === 0 || orderingLocked ? ' disabled' : '') + '>' +
             esc(state.submitting ? L().sending : L().placeOrder) +
           '</button>';
 
@@ -1336,6 +1403,10 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
 
       async function submitGuestOrder() {
         if (state.submitting || state.cart.length === 0 || !state.menu) return;
+        if (isOrderingLocked()) {
+          setBanner(getLockReasonText(), 'error', state.menu.signedTableExpired ? 'expired' : 'required');
+          return;
+        }
         const tableToSend = (state.menu.lockedTableLabel && state.menu.signedTableValid)
           ? state.menu.lockedTableLabel
           : (state.selectedTable || (state.menu.tableLabels && state.menu.tableLabels[0]) || 'T01');
@@ -1349,7 +1420,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           const payload = {
             outletId: BOOT.outletId,
             tableLabel: tableToSend,
-            signedToken: state.menu.signedTableValid ? BOOT.initialToken : '',
+            signedToken: BOOT.initialToken || '',
             customerName: state.customerName.trim(),
             customerNote: state.customerNote.trim(),
             clientSubmissionKey: state.cartSubmissionKey,
@@ -1385,7 +1456,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
               window.localStorage.setItem(STORAGE_ORDERS_KEY, JSON.stringify(state.trackedOrderIds));
               window.localStorage.setItem(STORAGE_TOKENS_KEY, JSON.stringify(state.trackedOrderTokens));
             } catch (_e) {}
-            setBanner(L().orderSuccess + ' ' + created.orderCode, 'ok');
+            setBanner(L().orderSuccess + ' ' + created.orderCode, 'ok', '');
           }
           state.cart = [];
           state.cartSubmissionKey = '';
@@ -1396,7 +1467,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           renderCartDock();
           renderOrdersTracker();
         } catch (err) {
-          setBanner(err && err.message ? err.message : L().loadError, 'error');
+          setBanner(err && err.message ? err.message : L().loadError, 'error', '');
         } finally {
           state.submitting = false;
           if (document.getElementById('cartSheetBackdrop').classList.contains('open')) {
@@ -1518,15 +1589,36 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           if (BOOT.initialTable) qs.set('t', BOOT.initialTable);
           if (BOOT.initialToken) qs.set('s', BOOT.initialToken);
           if (BOOT.entryChannel === 'NFC') qs.set('via', 'nfc');
+          if (BOOT.isCaptiveMode || BOOT.entryChannel === 'CAPTIVE') qs.set('captive', '1');
           const res = await fetch('/api/guest/menu' + (qs.toString() ? '?' + qs.toString() : ''));
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || L().loadError);
           state.menu = data;
-          if (!state.selectedTable) {
-            state.selectedTable = data.lockedTableLabel || (data.tableLabels && data.tableLabels[0]) || 'T01';
+          const candidateTable = data.lockedTableLabel || state.selectedTable || '';
+          if (data.lockedTableLabel && data.signedTableValid) {
+            state.selectedTable = data.lockedTableLabel;
+          } else if (Array.isArray(data.tableLabels) && data.tableLabels.length > 0) {
+            const matchedTable = candidateTable
+              ? data.tableLabels.find(function (tbl) {
+                  return String(tbl).toUpperCase() === String(candidateTable).toUpperCase();
+                })
+              : null;
+            state.selectedTable = matchedTable || data.tableLabels[0];
+          } else if (!state.selectedTable) {
+            state.selectedTable = data.lockedTableLabel || 'T01';
           }
           if (data.signedTableExpired) {
-            setBanner(L().signedExpired, 'error');
+            state.cart = [];
+            closeItemSheet();
+            closeCartSheet();
+            setBanner(L().signedExpired, 'error', 'expired');
+          } else if (!data.signedTableValid && !data.allowOpenTableSelection) {
+            state.cart = [];
+            closeItemSheet();
+            closeCartSheet();
+            setBanner(L().signedRequiredOnly, 'error', 'required');
+          } else if (state.lockBannerMode) {
+            setBanner('', 'info', '');
           }
           renderTopbar();
           renderCaptiveBanner();
@@ -1534,7 +1626,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           renderCategoriesAndMenu();
           renderCartDock();
         } catch (err) {
-          setBanner(err && err.message ? err.message : L().loadError, 'error');
+          setBanner(err && err.message ? err.message : L().loadError, 'error', '');
         }
       }
 
@@ -1542,6 +1634,11 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
       document.querySelectorAll('.lang-btn').forEach(function (btn) {
         btn.onclick = function () {
           state.lang = btn.getAttribute('data-lang') || 'th';
+          if (state.lockBannerMode === 'expired') {
+            setBanner(L().signedExpired, 'error', 'expired');
+          } else if (state.lockBannerMode === 'required') {
+            setBanner(L().signedRequiredOnly, 'error', 'required');
+          }
           renderTopbar();
           renderCaptiveBanner();
           renderTabs();

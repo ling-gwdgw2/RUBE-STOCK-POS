@@ -28,6 +28,7 @@ function escHtml(s: string): string {
 }
 
 export interface A4TableQrSheetInput {
+  outletId?: string | undefined;
   storeName: string;
   locale: LocaleCode;
   baseUrl: string;
@@ -35,7 +36,8 @@ export interface A4TableQrSheetInput {
   activeSessions: readonly TableQrSessionDto[];
 }
 
-export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Promise<boolean> {
+export async function renderA4TableQrCardsHtml(input: A4TableQrSheetInput): Promise<string> {
+  const effectiveOutletId = input.outletId?.trim() || 'OUTLET-HQ';
   const wifiPayload = buildWifiQrPayload(
     input.config.wifiSsid,
     input.config.wifiPassword,
@@ -65,6 +67,12 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
           closeBtn: 'ປິດໜ້າຕ່າງ',
           nfcZoneTitle: 'ແຕະມືຖືຈຸດ NFC ທີ່ນີ້ (TAP NFC)',
           nfcZoneSub: 'Android: ແຕະເປີດໄດ້ທັນທີ · iPhone: ສະແກນ Wi-Fi QR ກ່ອນ ແລ້ວແຕະ NFC',
+          nfcWifiOnlyTitle: 'ແຕະ NFC ເຊື່ອມ Wi-Fi ຮ້ານ (Android)',
+          nfcWifiOnlySub:
+            'Android: ແຕະເພື່ອເຊື່ອມ Wi-Fi ອັດຕະໂນມັດ · iPhone: ບໍ່ຮອງຮັບ Wi-Fi WSC NFC — ກະລຸນາສະແກນ Wi-Fi QR ແລະ Menu QR ດ້ານເທິງ',
+          nfcOverflowPrefix: 'ຂະໜາດເກີນຄວາມຈຸຊິບ',
+          nfcRecommendPrefix: 'ແນະນຳໃຊ້',
+          nfcExceedsMax: 'ຂະໜາດເກີນ NTAG216',
         }
       : input.locale === 'en'
         ? {
@@ -81,6 +89,12 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
             closeBtn: 'Close',
             nfcZoneTitle: 'TAP NFC HERE (iOS & Android)',
             nfcZoneSub: 'Android: Tap for Wi-Fi/Menu · iPhone: Scan Wi-Fi QR once, then tap NFC for Menu',
+            nfcWifiOnlyTitle: 'TAP NFC TO JOIN WI-FI (Android)',
+            nfcWifiOnlySub:
+              'Android: Tap to auto-join Wi-Fi · iPhone: Does not read Wi-Fi WSC NFC — scan Step 1 Wi-Fi QR & Step 2 Menu QR above',
+            nfcOverflowPrefix: 'Exceeds chip capacity',
+            nfcRecommendPrefix: 'Recommend',
+            nfcExceedsMax: 'Exceeds NTAG216 capacity',
           }
         : {
             pageTitle: 'แผ่นป้าย QR ตั้งโต๊ะสั่งอาหาร (A4)',
@@ -96,14 +110,24 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
             closeBtn: 'ปิดหน้าต่าง',
             nfcZoneTitle: 'แตะสมาร์ตโฟนจุด NFC ที่นี่',
             nfcZoneSub: 'Android: แตะเชื่อม Wi-Fi/เมนู · iPhone: สแกน Wi-Fi QR ก่อน แล้วแตะจุด NFC เพื่อเปิดเมนู',
+            nfcWifiOnlyTitle: 'แตะ NFC เชื่อม Wi-Fi ร้าน (Android)',
+            nfcWifiOnlySub:
+              'Android: แตะเพื่อเชื่อม Wi-Fi อัตโนมัติ · iPhone: ไม่อ่านแท็ก Wi-Fi WSC — กรุณาสแกน Wi-Fi QR และ Menu QR ด้านบน',
+            nfcOverflowPrefix: 'ขนาดเกินความจุชิป',
+            nfcRecommendPrefix: 'แนะนำใช้',
+            nfcExceedsMax: 'เกินความจุสูงสุดของ NTAG216',
           };
 
   const cardsHtmlParts: string[] = [];
   for (const tableLabel of input.config.tableLabels) {
     const activeSess = sessionMap.get(tableLabel.trim().toUpperCase());
+    const cardOutletId =
+      input.outletId?.trim() || activeSess?.outletId?.trim() || effectiveOutletId;
     const menuUrl = activeSess
-      ? activeSess.menuUrl
-      : buildTableMenuUrl(input.baseUrl, tableLabel, null);
+      ? activeSess.token
+        ? buildTableMenuUrl(input.baseUrl, tableLabel, activeSess.token, cardOutletId)
+        : activeSess.menuUrl
+      : buildTableMenuUrl(input.baseUrl, tableLabel, null, cardOutletId);
     const menuQrDataUrl = await QRCode.toDataURL(menuUrl, {
       width: 240,
       margin: 1,
@@ -113,10 +137,23 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
       ? buildNfcTableTagPackage({
           baseUrl: input.baseUrl,
           tableLabel,
+          outletId: cardOutletId,
           signedToken: activeSess?.token ?? null,
           config: input.config,
         })
       : null;
+
+    const isWifiWscOnly = nfcPkg?.recordLayout === 'WIFI_WSC_ONLY';
+    const nfcTitle = isWifiWscOnly ? labels.nfcWifiOnlyTitle : labels.nfcZoneTitle;
+    const nfcSub = isWifiWscOnly ? labels.nfcWifiOnlySub : labels.nfcZoneSub;
+    const nfcOverflowText =
+      nfcPkg && !nfcPkg.fitsSelectedChip
+        ? `${labels.nfcOverflowPrefix} ${nfcPkg.chipType} (${nfcPkg.ndefByteLength} / ${nfcPkg.chipCapacityBytes} B) · ${
+            nfcPkg.recommendedChipType
+              ? `${labels.nfcRecommendPrefix} ${nfcPkg.recommendedChipType}`
+              : labels.nfcExceedsMax
+          }`
+        : '';
 
     cardsHtmlParts.push(`
       <article class="qr-card">
@@ -144,16 +181,17 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
             <div class="step-label">${escHtml(labels.step2)}</div>
             <img src="${menuQrDataUrl}" alt="Menu QR ${escHtml(tableLabel)}" />
             <div class="meta-line"><strong>${escHtml(activeSess ? labels.signedTag : labels.staticTag)}</strong></div>
-            <div class="meta-url">${escHtml(input.baseUrl)}</div>
+            <div class="meta-url">${escHtml(menuUrl)}</div>
           </div>
         </div>
         ${
           nfcPkg
-            ? `<div class="nfc-zone">
+            ? `<div class="nfc-zone${nfcPkg.fitsSelectedChip ? '' : ' nfc-zone-overflow'}">
                  <div class="nfc-copy">
-                   <div class="nfc-title">${escHtml(labels.nfcZoneTitle)}</div>
-                   <div class="nfc-sub">${escHtml(labels.nfcZoneSub)}</div>
-                   <div class="nfc-meta">${escHtml(nfcPkg.chipType)} · ${escHtml(nfcPkg.recordLayout)} (${nfcPkg.ndefByteLength} B)</div>
+                   <div class="nfc-title">${escHtml(nfcTitle)}</div>
+                   <div class="nfc-sub">${escHtml(nfcSub)}</div>
+                   <div class="nfc-meta">${escHtml(nfcPkg.chipType)} · ${escHtml(nfcPkg.recordLayout)} (${nfcPkg.ndefByteLength} / ${nfcPkg.chipCapacityBytes} B)</div>
+                   ${nfcOverflowText ? `<div class="nfc-warn">${escHtml(nfcOverflowText)}</div>` : ''}
                  </div>
                  <div class="nfc-sticker-target">
                    <span>NFC</span>
@@ -165,7 +203,7 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
     `);
   }
 
-  const html = `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="${escHtml(input.locale)}">
 <head>
   <meta charset="utf-8" />
@@ -295,10 +333,17 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
       justify-content: space-between;
       gap: 10px;
     }
+    .nfc-zone-overflow {
+      border-color: #d93025;
+      background: #fce8e6;
+    }
+    .nfc-zone-overflow .nfc-title { color: #d93025; }
+    .nfc-zone-overflow .nfc-sticker-target { border-color: #d93025; color: #d93025; }
     .nfc-copy { flex: 1; min-width: 0; }
     .nfc-title { font-size: 11px; font-weight: 700; color: #1557b0; }
     .nfc-sub { font-size: 9.5px; color: #3c4043; margin-top: 2px; line-height: 1.3; }
     .nfc-meta { font-size: 9px; color: #5f6368; margin-top: 2px; font-family: monospace; }
+    .nfc-warn { font-size: 9.5px; font-weight: 700; color: #d93025; margin-top: 3px; }
     .nfc-sticker-target {
       width: 44px;
       height: 44px;
@@ -332,7 +377,10 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
   </div>
 </body>
 </html>`;
+}
 
+export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Promise<boolean> {
+  const html = await renderA4TableQrCardsHtml(input);
   const printWin = window.open('', '_blank', 'width=960,height=780');
   if (!printWin) {
     return false;

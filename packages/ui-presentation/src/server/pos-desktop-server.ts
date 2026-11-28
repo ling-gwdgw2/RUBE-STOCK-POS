@@ -1889,6 +1889,17 @@ export class RubePosInteractiveAppServer {
         const qrOrderingStatus = this.guestQrServer.getRuntimeStatus(qrOrderingConfig);
         const qrGuestOrders = this.ipc.listGuestOrders(outletId);
         const qrTableSessions = this.ipc.listTableQrSessions(outletId, qrOrderingStatus.baseUrl);
+        const canViewWifiSecrets =
+          !sessionUser ||
+          sessionUser.role === 'OWNER' ||
+          sessionUser.role === 'MANAGER' ||
+          sessionUser.role === 'CASHIER';
+        const safeQrOrderingConfig = canViewWifiSecrets
+          ? qrOrderingConfig
+          : { ...qrOrderingConfig, wifiPassword: '' };
+        const safeQrTableSessions = canViewWifiSecrets
+          ? qrTableSessions
+          : qrTableSessions.map((s) => ({ ...s, wifiQrPayload: '' }));
         const qrServiceCalls = this.ipc.listGuestServiceCalls(outletId);
         const ledgerInvariant = this.ipc.verifyLedgerConservationInvariant(outletId);
         const upsBanner = this.upsMonitor.getActiveUiAlertBanner();
@@ -1917,10 +1928,10 @@ export class RubePosInteractiveAppServer {
           storeSettings,
           printerConfig: this.getPrinterConfig(),
           barcodeLabelConfig: this.getBarcodeLabelConfig(),
-          qrOrderingConfig,
+          qrOrderingConfig: safeQrOrderingConfig,
           qrOrderingStatus,
           qrGuestOrders,
-          qrTableSessions,
+          qrTableSessions: safeQrTableSessions,
           qrServiceCalls,
           usbBackupConfig: this.getUsbBackupConfigStatus(),
           usbBackups: this.listUsbBackupFiles(),
@@ -4028,7 +4039,15 @@ export class RubePosInteractiveAppServer {
         const orders = this.ipc.listGuestOrders(outletId);
         const pendingCount = orders.filter((o) => o.status === 'PENDING_CONFIRM').length;
         const status = this.guestQrServer.getRuntimeStatus();
-        const tableSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
+        const rawSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
+        const canViewWifiSecrets =
+          !sessionUser ||
+          sessionUser.role === 'OWNER' ||
+          sessionUser.role === 'MANAGER' ||
+          sessionUser.role === 'CASHIER';
+        const tableSessions = canViewWifiSecrets
+          ? rawSessions
+          : rawSessions.map((s) => ({ ...s, wifiQrPayload: '' }));
         const serviceCalls = this.ipc.listGuestServiceCalls(outletId);
         const pendingServiceCallsCount = serviceCalls.filter((c) => c.status === 'PENDING').length;
         this.sendJson(res, 200, {
@@ -4120,17 +4139,19 @@ export class RubePosInteractiveAppServer {
         ? 401
         : message.includes('403')
           ? 403
-          : message.includes('409') || message.includes('Duplicate')
-            ? 409
-            : message.includes('413')
-              ? 413
-              : message.includes('422') || message.includes('Circular')
-                ? 422
-                : message.includes('423') || message.includes('QUARANTINE')
-                  ? 423
-                  : message.includes('429')
-                    ? 429
-                    : 400;
+          : message.includes('404')
+            ? 404
+            : message.includes('409') || message.includes('Duplicate')
+              ? 409
+              : message.includes('413')
+                ? 413
+                : message.includes('422') || message.includes('Circular')
+                  ? 422
+                  : message.includes('423') || message.includes('QUARANTINE')
+                    ? 423
+                    : message.includes('429')
+                      ? 429
+                      : 400;
       this.sendJson(res, statusCode, { error: message });
     }
   }

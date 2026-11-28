@@ -305,6 +305,26 @@ export function normalizeTableLabels(raw: unknown): string[] {
   return unique.length > 0 ? unique : [...DEFAULT_QR_TABLE_LABELS];
 }
 
+export function sanitizeHostOverride(raw: unknown): string {
+  const cleaned = sanitizeGuestText(raw ?? '', 256)
+    .replace(/^https?:\/\//i, '')
+    .replace(/[/?#].*$/, '')
+    .trim();
+  if (!cleaned) return '';
+  let host = cleaned;
+  if (host.startsWith('[')) {
+    host = host.replace(/^(\[[^\]]+\]):.*$/, '$1');
+  } else {
+    const colonCount = (host.match(/:/g) ?? []).length;
+    if (colonCount === 1) {
+      host = host.replace(/:.*$/, '').trim();
+    } else if (colonCount >= 2) {
+      host = `[${host}]`;
+    }
+  }
+  return host.slice(0, 64);
+}
+
 export function normalizeQrOrderingConfig(
   raw?: Partial<QrOrderingConfigDto> | Record<string, unknown> | null
 ): QrOrderingConfigDto {
@@ -329,10 +349,7 @@ export function normalizeQrOrderingConfig(
       ? rawMaxQty
       : DEFAULT_QR_ORDERING_CONFIG.maxQtyPerItem;
 
-  const customHostOverride = sanitizeGuestText(src.customHostOverride ?? '', 64).replace(
-    /^https?:\/\//i,
-    ''
-  ).replace(/\/.*$/, '');
+  const customHostOverride = sanitizeHostOverride(src.customHostOverride);
 
   const nfcTagMode: NfcTagMode =
     src.nfcTagMode === 'SIGNED_SESSION' ? 'SIGNED_SESSION' : 'STATIC_TABLE';
@@ -399,7 +416,7 @@ export function buildTableMenuUrl(
   signedToken?: string | null,
   outletId?: string | null
 ): string {
-  const cleanBase = baseUrl.replace(/\/+$/, '');
+  const cleanBase = baseUrl.trim().replace(/\/+$/, '');
   const params = new URLSearchParams();
   if (tableLabel.trim()) {
     params.set('t', tableLabel.trim());
@@ -490,8 +507,27 @@ function concatUint8Arrays(parts: readonly Uint8Array[]): Uint8Array {
 }
 
 /**
+ * Encodes UTF-8 bytes truncated cleanly on whole Unicode codepoint boundaries (never splitting multi-byte chars).
+ */
+export function encodeUtf8TruncatedAtCharBoundary(text: string, maxBytes: number): Uint8Array {
+  if (!text || maxBytes <= 0) return new Uint8Array(0);
+  const chunks: Uint8Array[] = [];
+  let usedBytes = 0;
+  for (const ch of text) {
+    const chBytes = UTF8_ENCODER.encode(ch);
+    if (usedBytes + chBytes.length > maxBytes) {
+      break;
+    }
+    chunks.push(chBytes);
+    usedBytes += chBytes.length;
+  }
+  return concatUint8Arrays(chunks);
+}
+
+/**
  * Encodes an offline Wi-Fi Alliance Simple Configuration (`application/vnd.wfa.wsc`) binary credential TLV
  * natively supported by Android NFC for one-tap Store Wi-Fi Auto-Join.
+ * Returns empty `Uint8Array(0)` when SSID is empty or WPA key is missing / shorter than 8 characters.
  */
 export function buildWifiWscCredentialBytes(
   ssid: string,
@@ -500,9 +536,20 @@ export function buildWifiWscCredentialBytes(
 ): Uint8Array {
   const cleanSsid = sanitizeGuestText(ssid, 64);
   if (!cleanSsid) return new Uint8Array(0);
-  const ssidBytes = UTF8_ENCODER.encode(cleanSsid).slice(0, 32);
-  const cleanPass = security === 'NOPASS' ? '' : sanitizeGuestText(password, 64);
-  const passBytes = cleanPass ? UTF8_ENCODER.encode(cleanPass).slice(0, 64) : new Uint8Array(0);
+  const ssidBytes = encodeUtf8TruncatedAtCharBoundary(cleanSsid, 32);
+  if (ssidBytes.length === 0) return new Uint8Array(0);
+
+  let passBytes: Uint8Array = new Uint8Array(0);
+  if (security !== 'NOPASS') {
+    const cleanPass = sanitizeGuestText(password, 64);
+    if (!cleanPass || Array.from(cleanPass).length < 8) {
+      return new Uint8Array(0);
+    }
+    passBytes = encodeUtf8TruncatedAtCharBoundary(cleanPass, 64);
+    if (passBytes.length < 8) {
+      return new Uint8Array(0);
+    }
+  }
 
   const authBytes = security === 'NOPASS' ? new Uint8Array([0x00, 0x01]) : new Uint8Array([0x00, 0x20]);
   const encBytes = security === 'NOPASS' ? new Uint8Array([0x00, 0x01]) : new Uint8Array([0x00, 0x08]);
@@ -531,23 +578,25 @@ export interface NdefRawRecordSpec {
 
 /**
  * Encodes a URI string into an NFC Forum RTD-U record (`TNF=0x01`, type `'U'`),
- * applying standard `http://` (`0x03`) or `https://` (`0x04`) prefix compression to fit NTAG213.
+ * applying case-insensitive `http://` (`0x03`) or `https://` (`0x04`) prefix compression while preserving path/query casing.
  */
 export function encodeNdefUriRecordSpec(uri: string): NdefRawRecordSpec {
+  const cleanUri = uri.trim();
+  const lower = cleanUri.toLowerCase();
   let prefixCode = 0x00;
-  let body = uri;
-  if (uri.startsWith('http://www.')) {
+  let body = cleanUri;
+  if (lower.startsWith('http://www.')) {
     prefixCode = 0x01;
-    body = uri.slice('http://www.'.length);
-  } else if (uri.startsWith('https://www.')) {
+    body = cleanUri.slice('http://www.'.length);
+  } else if (lower.startsWith('https://www.')) {
     prefixCode = 0x02;
-    body = uri.slice('https://www.'.length);
-  } else if (uri.startsWith('http://')) {
+    body = cleanUri.slice('https://www.'.length);
+  } else if (lower.startsWith('http://')) {
     prefixCode = 0x03;
-    body = uri.slice('http://'.length);
-  } else if (uri.startsWith('https://')) {
+    body = cleanUri.slice('http://'.length);
+  } else if (lower.startsWith('https://')) {
     prefixCode = 0x04;
-    body = uri.slice('https://'.length);
+    body = cleanUri.slice('https://'.length);
   }
   const bodyBytes = UTF8_ENCODER.encode(body);
   const payload = new Uint8Array(1 + bodyBytes.length);

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   BellRing,
   CheckCircle2,
@@ -19,8 +19,8 @@ import { formatMilliUnitsToQtyString } from '../../../../shared-contracts/src/fi
 import { formatMoney } from '../../../../shared-contracts/src/currency.ts';
 import {
   buildNfcTableTagPackage,
-  buildTableNfcUrl,
   DEFAULT_QR_ORDERING_CONFIG,
+  sanitizeHostOverride,
 } from '../../../../shared-contracts/src/qr-ordering.ts';
 import { posTransport } from '../api/pos-transport.ts';
 import { useI18n } from '../i18n/index.tsx';
@@ -700,18 +700,61 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
   const paperWidthMm: 80 | 58 = bootstrap.printerConfig.paperWidthMm;
 
   const [selectedTable, setSelectedTable] = useState<string>(qrCfg.tableLabels[0] ?? 'T01');
-  const [activeSession, setActiveSession] = useState<TableQrSessionDto | null>(null);
+  const [sessionOverride, setSessionOverride] = useState<{
+    tableUpper: string;
+    session: TableQrSessionDto | null;
+  } | null>(null);
   const [slipRaster, setSlipRaster] = useState<PackedCanvasRasterResult | null>(null);
   const [busy, setBusy] = useState(false);
   const webNfcAvailable = isWebNfcSupported();
+  const nfcWriteAbortRef = useRef<AbortController | null>(null);
+  const isMountedRef = useRef(true);
+
+  const matchedTableLabel = qrCfg.tableLabels.find(
+    (lbl) => lbl.toUpperCase() === selectedTable.toUpperCase()
+  );
+  const effectiveSelectedTable = matchedTableLabel ?? qrCfg.tableLabels[0] ?? 'T01';
+  const effectiveTableUpper = effectiveSelectedTable.trim().toUpperCase();
+  const matchedPropSession =
+    tableSessions.find((s) => s.tableLabel.trim().toUpperCase() === effectiveTableUpper) ?? null;
+  const activeSession =
+    sessionOverride && sessionOverride.tableUpper === effectiveTableUpper
+      ? sessionOverride.session
+      : matchedPropSession;
 
   useEffect(() => {
-    if (!open) return;
-    const found = tableSessions.find(
-      (s) => s.tableLabel.toUpperCase() === selectedTable.toUpperCase()
-    );
-    setActiveSession(found ?? null);
-  }, [open, selectedTable, tableSessions]);
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      nfcWriteAbortRef.current?.abort();
+      nfcWriteAbortRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      nfcWriteAbortRef.current?.abort();
+      nfcWriteAbortRef.current = null;
+      setSessionOverride(null);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    nfcWriteAbortRef.current?.abort();
+    nfcWriteAbortRef.current = null;
+  }, [effectiveSelectedTable]);
+
+  const tableLabelsKey = qrCfg.tableLabels.join('\u0000');
+  useEffect(() => {
+    if (qrCfg.tableLabels.length === 0) return;
+    if (effectiveSelectedTable !== selectedTable) {
+      setSelectedTable(effectiveSelectedTable);
+    }
+  }, [open, tableLabelsKey, selectedTable, effectiveSelectedTable]);
+
+  useEffect(() => {
+    setSessionOverride(null);
+  }, [tableSessions]);
 
   useEffect(() => {
     if (!open || !activeSession) {
@@ -755,8 +798,13 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
         tableLabel: tableLbl,
         openedByName: currentUser.displayName,
       });
-      setActiveSession(res.session);
+      if (!isMountedRef.current) return;
+      setSessionOverride({
+        tableUpper: tableLbl.trim().toUpperCase(),
+        session: res.session,
+      });
       await onSessionsChanged();
+      if (!isMountedRef.current) return;
       onToast(
         pick(
           `สร้าง Signed Table QR ใหม่สำหรับโต๊ะ ${tableLbl} แล้ว (QR เก่าถูกยกเลิกอัตโนมัติ)`,
@@ -766,9 +814,13 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
         'success'
       );
     } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err), 'error');
+      if (isMountedRef.current) {
+        onToast(err instanceof Error ? err.message : String(err), 'error');
+      }
     } finally {
-      setBusy(false);
+      if (isMountedRef.current) {
+        setBusy(false);
+      }
     }
   };
 
@@ -783,6 +835,7 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
         kickCashDrawer: false,
         receiptNumber: `QR-TABLE-${activeSession.tableLabel}`,
       });
+      if (!isMountedRef.current) return;
       onToast(
         res.hardwareOutcome.dispatchedToHardware
           ? pick(
@@ -798,89 +851,136 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
         'success'
       );
     } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err), 'error');
+      if (isMountedRef.current) {
+        onToast(err instanceof Error ? err.message : String(err), 'error');
+      }
     } finally {
-      setBusy(false);
+      if (isMountedRef.current) {
+        setBusy(false);
+      }
     }
   };
 
   const handleRevokeSession = async () => {
     if (!activeSession) return;
+    const targetTable = activeSession.tableLabel;
     setBusy(true);
     try {
       await posTransport.revokeTableQrSession({
         outletId,
-        tableLabel: activeSession.tableLabel,
+        tableLabel: targetTable,
       });
-      setActiveSession(null);
+      if (!isMountedRef.current) return;
+      setSessionOverride({
+        tableUpper: targetTable.trim().toUpperCase(),
+        session: null,
+      });
       await onSessionsChanged();
+      if (!isMountedRef.current) return;
       onToast(
         pick(
-          `ยกเลิก QR ประจำโต๊ะ ${activeSession.tableLabel} แล้ว`,
-          `ຍົກເລີກ QR ປະຈຳໂຕະ ${activeSession.tableLabel} ແລ້ວ`,
-          `Revoked Table QR session for ${activeSession.tableLabel}`
+          `ยกเลิก QR ประจำโต๊ะ ${targetTable} แล้ว`,
+          `ຍົກເລີກ QR ປະຈຳໂຕະ ${targetTable} ແລ້ວ`,
+          `Revoked Table QR session for ${targetTable}`
         ),
         'warn'
       );
     } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err), 'error');
+      if (isMountedRef.current) {
+        onToast(err instanceof Error ? err.message : String(err), 'error');
+      }
     } finally {
-      setBusy(false);
+      if (isMountedRef.current) {
+        setBusy(false);
+      }
     }
   };
 
-  const activeNfcUrl = activeSession
-    ? activeSession.nfcMenuUrl ||
-      buildTableNfcUrl(
-        bootstrap.qrOrderingStatus?.baseUrl ?? `http://127.0.0.1:${qrCfg.port}`,
-        activeSession.tableLabel,
-        activeSession.token,
-        outletId
-      )
-    : '';
+  const nfcEffectiveHost =
+    sanitizeHostOverride(qrCfg.customHostOverride) ||
+    bootstrap.qrOrderingStatus?.detectedLanIpv4s[0] ||
+    bootstrap.qrOrderingStatus?.activeHost ||
+    '127.0.0.1';
+  const nfcUrlHost =
+    nfcEffectiveHost.includes(':') && !nfcEffectiveHost.startsWith('[')
+      ? `[${nfcEffectiveHost}]`
+      : nfcEffectiveHost;
+  const nfcBaseUrl =
+    bootstrap.qrOrderingStatus?.baseUrl ?? `http://${nfcUrlHost}:${qrCfg.port}`;
+  const nfcTargetTable = activeSession?.tableLabel ?? effectiveSelectedTable;
+  const nfcRequiresOpenSession = qrCfg.nfcTagMode === 'SIGNED_SESSION' && !activeSession;
+  const nfcPkg = qrCfg.nfcEnabled
+    ? buildNfcTableTagPackage({
+        baseUrl: nfcBaseUrl,
+        tableLabel: nfcTargetTable,
+        outletId,
+        signedToken:
+          qrCfg.nfcTagMode === 'SIGNED_SESSION' ? (activeSession?.token ?? null) : null,
+        config: { ...qrCfg, nfcEnabled: true },
+      })
+    : null;
+  const nfcLayoutFellBack =
+    Boolean(nfcPkg) &&
+    (qrCfg.nfcRecordLayout ?? 'URI_ONLY') !== nfcPkg!.recordLayout;
 
-  const handleCopyNfcLink = async () => {
-    if (!activeNfcUrl || !activeSession) return;
+  const handleCopyNfcPayload = async () => {
+    if (!nfcPkg || nfcRequiresOpenSession) return;
+    const isWscOnly = nfcPkg.recordLayout === 'WIFI_WSC_ONLY';
+    const textToCopy = isWscOnly ? (nfcPkg.wscBase64 ?? '') : nfcPkg.menuUrl;
+    if (!textToCopy) return;
     try {
-      await navigator.clipboard.writeText(activeNfcUrl);
+      await navigator.clipboard.writeText(textToCopy);
       onToast(
-        pick(
-          `คัดลอกลิงก์ NFC โต๊ะ ${activeSession.tableLabel} แล้ว`,
-          `ຄັດລອກລິ້ງ NFC ໂຕະ ${activeSession.tableLabel} ແລ້ວ`,
-          `Copied NFC URL for ${activeSession.tableLabel}`
-        ),
+        isWscOnly
+          ? pick(
+              `คัดลอกข้อมูล Wi-Fi WSC (Base64) โต๊ะ ${nfcPkg.tableLabel} แล้ว`,
+              `ຄັດລອກຂໍ້ມູນ Wi-Fi WSC (Base64) ໂຕະ ${nfcPkg.tableLabel} ແລ້ວ`,
+              `Copied Wi-Fi WSC payload for ${nfcPkg.tableLabel}`
+            )
+          : pick(
+              `คัดลอกลิงก์ NFC โต๊ะ ${nfcPkg.tableLabel} แล้ว`,
+              `ຄັດລອກລິ້ງ NFC ໂຕະ ${nfcPkg.tableLabel} ແລ້ວ`,
+              `Copied NFC URL for ${nfcPkg.tableLabel}`
+            ),
         'success'
       );
     } catch {
-      onToast(activeNfcUrl, 'warn');
+      onToast(textToCopy, 'warn');
     }
   };
 
   const handleWriteSessionToNfcTag = async () => {
-    if (!activeSession) return;
-    const baseUrl = bootstrap.qrOrderingStatus?.baseUrl ?? `http://127.0.0.1:${qrCfg.port}`;
-    const pkg = buildNfcTableTagPackage({
-      baseUrl,
-      tableLabel: activeSession.tableLabel,
-      outletId,
-      signedToken: activeSession.token,
-      config: { ...qrCfg, nfcEnabled: true },
-    });
+    if (!nfcPkg || nfcRequiresOpenSession) return;
+    nfcWriteAbortRef.current?.abort();
+    const controller = new AbortController();
+    nfcWriteAbortRef.current = controller;
     setBusy(true);
     try {
-      const result = await writeNfcPackageViaBrowserReader(pkg);
+      const result = await writeNfcPackageViaBrowserReader(
+        nfcPkg,
+        25_000,
+        controller.signal
+      );
+      if (!isMountedRef.current || controller.signal.aborted) return;
       onToast(
         pick(
-          `เขียนแท็ก NFC โต๊ะ ${activeSession.tableLabel} สำเร็จ (${result.ndefByteLength} Bytes)`,
-          `ຂຽນແທັກ NFC ໂຕະ ${activeSession.tableLabel} ສຳເລັດ (${result.ndefByteLength} Bytes)`,
-          `Wrote NFC tag for ${activeSession.tableLabel} (${result.ndefByteLength} bytes)`
+          `เขียนแท็ก NFC โต๊ะ ${nfcPkg.tableLabel} สำเร็จ (${result.ndefByteLength} Bytes)`,
+          `ຂຽນແທັກ NFC ໂຕະ ${nfcPkg.tableLabel} ສຳເລັດ (${result.ndefByteLength} Bytes)`,
+          `Wrote NFC tag for ${nfcPkg.tableLabel} (${result.ndefByteLength} bytes)`
         ),
         'success'
       );
     } catch (err) {
-      onToast(err instanceof Error ? err.message : String(err), 'error');
+      if (isMountedRef.current && !controller.signal.aborted) {
+        onToast(err instanceof Error ? err.message : String(err), 'error');
+      }
     } finally {
-      setBusy(false);
+      if (nfcWriteAbortRef.current === controller) {
+        nfcWriteAbortRef.current = null;
+      }
+      if (isMountedRef.current) {
+        setBusy(false);
+      }
     }
   };
 
@@ -927,7 +1027,7 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
           </div>
           <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-56 overflow-y-auto pr-1">
             {qrCfg.tableLabels.map((lbl) => {
-              const isSelected = lbl.toUpperCase() === selectedTable.toUpperCase();
+              const isSelected = lbl.toUpperCase() === effectiveSelectedTable.toUpperCase();
               const hasActive = tableSessions.some(
                 (s) => s.tableLabel.toUpperCase() === lbl.toUpperCase()
               );
@@ -935,8 +1035,9 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
                 <button
                   key={lbl}
                   type="button"
+                  disabled={busy}
                   onClick={() => setSelectedTable(lbl)}
-                  className={`h-11 rounded-[4px] border px-2 text-xs font-medium flex flex-col items-center justify-center ${UI_INTERACTION.focusButton} ${
+                  className={`h-11 rounded-[4px] border px-2 text-xs font-medium flex flex-col items-center justify-center disabled:opacity-50 ${UI_INTERACTION.focusButton} ${
                     isSelected
                       ? 'border-primary bg-primary text-white'
                       : hasActive
@@ -959,21 +1060,21 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
             <button
               type="button"
               disabled={busy}
-              onClick={() => void handleOpenOrRotateSession(selectedTable)}
+              onClick={() => void handleOpenOrRotateSession(effectiveSelectedTable)}
               className={`flex h-11 w-full items-center justify-center gap-2 rounded-[48px] bg-primary px-5 font-google-display text-xs font-medium text-white hover:bg-primary-hover disabled:opacity-45 ${UI_INTERACTION.focusButtonPrimary}`}
             >
               <QrCode className="h-4 w-4" />
               <span>
                 {activeSession
                   ? pick(
-                      `ออก QR ใหม่ให้โต๊ะ ${selectedTable} (ยกเลิกใบเดิม)`,
-                      `ອອກ QR ໃໝ່ໃຫ້ໂຕະ ${selectedTable} (ຍົກເລີກໃບເດີມ)`,
-                      `Rotate Table QR for ${selectedTable}`
+                      `ออก QR ใหม่ให้โต๊ะ ${effectiveSelectedTable} (ยกเลิกใบเดิม)`,
+                      `ອອກ QR ໃໝ່ໃຫ້ໂຕະ ${effectiveSelectedTable} (ຍົກເລີກໃບເດີມ)`,
+                      `Rotate Table QR for ${effectiveSelectedTable}`
                     )
                   : pick(
-                      `เปิดโต๊ะ ${selectedTable} & สร้าง Signed QR`,
-                      `ເປີດໂຕະ ${selectedTable} & ສ້າງ Signed QR`,
-                      `Open Table ${selectedTable} & Generate QR`
+                      `เปิดโต๊ะ ${effectiveSelectedTable} & สร้าง Signed QR`,
+                      `ເປີດໂຕະ ${effectiveSelectedTable} & ສ້າງ Signed QR`,
+                      `Open Table ${effectiveSelectedTable} & Generate QR`
                     )}
               </span>
             </button>
@@ -1001,16 +1102,16 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
               </div>
             )}
 
-            {activeSession && qrCfg.nfcEnabled && (
+            {qrCfg.nfcEnabled && nfcPkg && (
               <div className="rounded-[4px] border border-primary/40 bg-primary-soft/30 p-3 space-y-2 text-xs">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-medium text-primary-dark flex items-center gap-1.5">
                     <Nfc className="h-3.5 w-3.5" />
                     <span>
                       {pick(
-                        `เครื่องมือ NFC โต๊ะ ${activeSession.tableLabel}`,
-                        `ເຄື່ອງມື NFC ໂຕະ ${activeSession.tableLabel}`,
-                        `NFC Tools (${activeSession.tableLabel})`
+                        `เครื่องมือ NFC โต๊ะ ${nfcPkg.tableLabel}`,
+                        `ເຄື່ອງມື NFC ໂຕະ ${nfcPkg.tableLabel}`,
+                        `NFC Tools (${nfcPkg.tableLabel})`
                       )}
                     </span>
                   </span>
@@ -1018,19 +1119,90 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
                     {qrCfg.nfcTagMode === 'SIGNED_SESSION' ? 'Signed Token' : 'Static URL'}
                   </span>
                 </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                  <span className="rounded-[48px] border border-hairline bg-canvas px-2 py-0.5 font-mono-num text-ink">
+                    {nfcPkg.recordLayout}
+                  </span>
+                  <span
+                    className={`rounded-[48px] border px-2 py-0.5 font-medium tabular-nums-google ${
+                      nfcPkg.fitsSelectedChip
+                        ? 'border-primary/40 bg-canvas text-primary-dark'
+                        : 'border-danger bg-danger-soft text-danger'
+                    }`}
+                  >
+                    {nfcPkg.ndefByteLength} / {nfcPkg.chipCapacityBytes} B ({nfcPkg.chipType})
+                  </span>
+                </div>
+
+                {!nfcPkg.fitsSelectedChip && (
+                  <div className="rounded-[4px] border border-danger bg-danger-soft px-2.5 py-1.5 text-[11px] text-danger">
+                    {pick(
+                      `ข้อมูล NDEF เกินความจุชิป ${nfcPkg.chipType} (${nfcPkg.ndefByteLength} B)${nfcPkg.recommendedChipType ? ` — แนะนำเปลี่ยนเป็น ${nfcPkg.recommendedChipType}` : ' — เกินความจุสูงสุด NTAG216'}`,
+                      `ຂໍ້ມູນ NDEF ເກີນຄວາມຈຸຊິບ ${nfcPkg.chipType}${nfcPkg.recommendedChipType ? ` — ແນະນຳ ${nfcPkg.recommendedChipType}` : ''}`,
+                      `NDEF size exceeds ${nfcPkg.chipType} (${nfcPkg.ndefByteLength} B)${nfcPkg.recommendedChipType ? ` — use ${nfcPkg.recommendedChipType}` : ' — exceeds NTAG216'}`
+                    )}
+                  </div>
+                )}
+
+                {nfcLayoutFellBack && (
+                  <div className="rounded-[4px] border border-danger/60 bg-danger-soft/60 px-2.5 py-1.5 text-[11px] text-danger">
+                    {pick(
+                      'ไม่สามารถสร้าง Wi-Fi WSC (ต้องมี SSID และรหัสผ่าน WPA >= 8 ตัวอักษร) จึงสลับเป็น URI_ONLY ชั่วคราว',
+                      'ບໍ່ສາມາດສ້າງ Wi-Fi WSC (ຕ້ອງມີ SSID ແລະ ລະຫັດ WPA >= 8 ຕົວ) ຈຶ່ງໃຊ້ URI_ONLY ຊົ່ວຄາວ',
+                      'Wi-Fi WSC unavailable (needs SSID + >=8-char WPA key); falling back to URI_ONLY'
+                    )}
+                  </div>
+                )}
+
+                {nfcRequiresOpenSession && (
+                  <div className="rounded-[4px] border border-hairline bg-canvas px-2.5 py-1.5 text-[11px] text-ink-soft">
+                    {pick(
+                      'โหมด Signed Session ต้องกดเปิดโต๊ะด้านบนก่อน เพื่อสร้าง HMAC Token สำหรับเขียนแท็ก NFC',
+                      'ໂໝດ Signed Session ຕ້ອງກົດເປີດໂຕະດ້ານເທິງກ່ອນ ເພື່ອສ້າງ HMAC Token',
+                      'Open table above first to generate a rotating HMAC token for Signed Session NFC.'
+                    )}
+                  </div>
+                )}
+
+                {qrCfg.nfcTagMode === 'STATIC_TABLE' && !qrCfg.allowOpenTableSelection && (
+                  <div className="rounded-[4px] border border-danger bg-danger-soft px-2.5 py-1.5 text-[11px] text-danger">
+                    {pick(
+                      'คำเตือน: โหมด STATIC_TABLE ไม่มี Signed Token และร้านปิด Walk-in Captive Portal อยู่ — แท็ก Static จะสั่งอาหารไม่ได้ (HTTP 403)',
+                      'ຄຳເຕືອນ: ໂໝດ STATIC_TABLE ບໍ່ມີ Token ແລະ ປິດ Walk-in ຢູ່ — ແທັກ Static ຈະສັ່ງອໍເດີບໍ່ໄດ້ (HTTP 403)',
+                      'Warning: STATIC_TABLE tags are unsigned while open table selection is disabled — orders will fail (HTTP 403).'
+                    )}
+                  </div>
+                )}
+
+                {nfcPkg.recordLayout === 'WIFI_WSC_ONLY' && (
+                  <div className="text-[11px] text-ink-muted">
+                    {pick(
+                      'โหมด WIFI_WSC_ONLY บรรจุเฉพาะค่า Wi-Fi Auto-Join สำหรับ Android (ไม่มี Menu URL ในแท็ก)',
+                      'ໂໝດ WIFI_WSC_ONLY ບັນຈຸສະເພາະ Wi-Fi Auto-Join ສຳລັບ Android (ບໍ່ມີ Menu URL)',
+                      'WIFI_WSC_ONLY contains Android Wi-Fi credentials only (no Menu URL record).'
+                    )}
+                  </div>
+                )}
+
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    onClick={() => void handleCopyNfcLink()}
-                    className={`flex-1 inline-flex h-9 items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 text-[11px] font-medium text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+                    disabled={busy || nfcRequiresOpenSession}
+                    onClick={() => void handleCopyNfcPayload()}
+                    className={`flex-1 inline-flex h-9 items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 text-[11px] font-medium text-ink hover:border-primary hover:text-primary disabled:opacity-45 ${UI_INTERACTION.focusButton}`}
                   >
                     <Copy className="h-3 w-3" />
-                    <span>{pick('คัดลอกลิงก์ NFC', 'ຄັດລອກລິ້ງ NFC', 'Copy NFC URL')}</span>
+                    <span>
+                      {nfcPkg.recordLayout === 'WIFI_WSC_ONLY'
+                        ? pick('คัดลอก Wi-Fi WSC', 'ຄັດລອກ Wi-Fi WSC', 'Copy WSC Base64')
+                        : pick('คัดลอกลิงก์ NFC', 'ຄັດລອກລິ້ງ NFC', 'Copy NFC URL')}
+                    </span>
                   </button>
                   {webNfcAvailable && (
                     <button
                       type="button"
-                      disabled={busy}
+                      disabled={busy || nfcRequiresOpenSession || !nfcPkg.fitsSelectedChip}
                       onClick={() => void handleWriteSessionToNfcTag()}
                       className={`flex-1 inline-flex h-9 items-center justify-center gap-1.5 rounded-[48px] bg-primary px-3 text-[11px] font-medium text-white hover:bg-primary-hover disabled:opacity-45 ${UI_INTERACTION.focusButtonPrimary}`}
                     >
@@ -1083,9 +1255,9 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
               <QrCode className="h-10 w-10 text-ink-muted mx-auto" />
               <div className="text-xs text-ink-muted max-w-xs">
                 {pick(
-                  `กดปุ่ม "เปิดโต๊ะ ${selectedTable} & สร้าง Signed QR" เพื่อสร้างสลิป Wi-Fi + เมนูประจำโต๊ะ`,
-                  `ກົດປຸ່ມ "ເປີດໂຕະ ${selectedTable} & ສ້າງ Signed QR" ເພື່ອສ້າງສະລິບ QR`,
-                  `Click "Open Table ${selectedTable}" to generate the 203-DPI printable QR slip`
+                  `กดปุ่ม "เปิดโต๊ะ ${effectiveSelectedTable} & สร้าง Signed QR" เพื่อสร้างสลิป Wi-Fi + เมนูประจำโต๊ะ`,
+                  `ກົດປຸ່ມ "ເປີດໂຕະ ${effectiveSelectedTable} & ສ້າງ Signed QR" ເພື່ອສ້າງສະລິບ QR`,
+                  `Click "Open Table ${effectiveSelectedTable}" to generate the 203-DPI printable QR slip`
                 )}
               </div>
             </div>
