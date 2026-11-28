@@ -77,6 +77,7 @@ import {
   normalizeScalePriceEmbeddedMultiplier,
 } from '../../../shared-contracts/src/currency.ts';
 import {
+  type GuestEntryChannel,
   type GuestOrderLineInputDto,
   type GuestOrderLineSnapshotDto,
   type GuestOrderRecordDto,
@@ -86,8 +87,10 @@ import {
   type QrOrderingConfigDto,
   type TableQrSessionDto,
   buildTableMenuUrl,
+  buildTableNfcUrl,
   buildWifiQrPayload,
   computeGuestOrderLineSatang,
+  normalizeGuestEntryChannel,
   normalizeQrOrderingConfig,
   sanitizeGuestText,
 } from '../../../shared-contracts/src/qr-ordering.ts';
@@ -6568,8 +6571,8 @@ export class SqliteReadWritePoolEngine {
          ) VALUES ('QR_ORDERING_CONFIG_UPDATED', ?, 'POS-TERM-01', 'qr_ordering_config', ?, ?)`
       ).run(
         actor,
-        `enabled=${current.enabled}:port=${current.port}:mode=${current.approvalMode}`,
-        `enabled=${merged.enabled}:port=${merged.port}:mode=${merged.approvalMode}:ssid=${merged.wifiSsid || '-'}:tables=${merged.tableLabels.length}`
+        `enabled=${current.enabled}:port=${current.port}:mode=${current.approvalMode}:nfc=${Boolean(current.nfcEnabled)}`,
+        `enabled=${merged.enabled}:port=${merged.port}:mode=${merged.approvalMode}:nfc=${Boolean(merged.nfcEnabled)}:ssid=${merged.wifiSsid || '-'}:tables=${merged.tableLabels.length}`
       );
     });
 
@@ -6672,6 +6675,7 @@ export class SqliteReadWritePoolEngine {
       sessionNonce,
       token,
       menuUrl: buildTableMenuUrl(effectiveBase, cleanTable, token, outletId),
+      nfcMenuUrl: buildTableNfcUrl(effectiveBase, cleanTable, token, outletId),
       wifiQrPayload: buildWifiQrPayload(cfg.wifiSsid, cfg.wifiPassword, cfg.wifiSecurity),
       openedByName,
       openedAtIso,
@@ -6696,6 +6700,7 @@ export class SqliteReadWritePoolEngine {
             sessionNonce: entry.sessionNonce,
             token,
             menuUrl: buildTableMenuUrl(effectiveBase, entry.tableLabel, token, outletId),
+            nfcMenuUrl: buildTableNfcUrl(effectiveBase, entry.tableLabel, token, outletId),
             wifiQrPayload,
             openedByName: entry.openedByName,
             openedAtIso: entry.openedAtIso,
@@ -7373,6 +7378,7 @@ export class SqliteReadWritePoolEngine {
     customerName?: string | undefined;
     customerNote?: string | undefined;
     clientSubmissionKey?: string | undefined;
+    entryChannel?: GuestEntryChannel | undefined;
     lines: GuestOrderLineInputDto[];
   }): Promise<GuestOrderRecordDto> {
     const outletId = input.outletId ?? 'OUTLET-HQ';
@@ -7578,6 +7584,10 @@ export class SqliteReadWritePoolEngine {
         customerNote: sanitizeGuestText(input.customerNote ?? '', 160),
         isSignedTableSession,
         tableSessionNonce,
+        entryChannel: normalizeGuestEntryChannel(
+          input.entryChannel,
+          isSignedTableSession ? 'QR' : 'DIRECT'
+        ),
         status: 'PENDING_CONFIRM',
         lines: snapshots,
         subtotalSatang,
@@ -7745,6 +7755,7 @@ export class SqliteReadWritePoolEngine {
     signedToken?: string | null | undefined;
     callType: GuestServiceCallType;
     note?: string | undefined;
+    entryChannel?: GuestEntryChannel | undefined;
   }): Promise<GuestServiceCallDto> {
     const outletId = input.outletId ?? 'OUTLET-HQ';
     const callType: GuestServiceCallType =
@@ -7796,6 +7807,10 @@ export class SqliteReadWritePoolEngine {
         callType,
         note: sanitizeGuestText(input.note ?? '', 120),
         isSignedTableSession: isSigned,
+        entryChannel: normalizeGuestEntryChannel(
+          input.entryChannel,
+          isSigned ? 'QR' : 'DIRECT'
+        ),
         status: 'PENDING',
         createdAtIso: new Date(nowMs).toISOString(),
         acknowledgedByName: null,

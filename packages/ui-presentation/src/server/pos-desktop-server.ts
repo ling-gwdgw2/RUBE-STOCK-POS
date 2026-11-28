@@ -94,7 +94,13 @@ import {
   type BarcodeLabelPrinterConfigDto,
   type BarcodeLabelTargetMode,
 } from '../../../shared-contracts/src/barcode-printing.ts';
-import type { QrOrderingConfigDto } from '../../../shared-contracts/src/qr-ordering.ts';
+import {
+  buildNfcTableTagPackage,
+  buildWifiWscCredentialBytes,
+  uint8ArrayToBase64,
+  type NfcTableTagPackageDto,
+  type QrOrderingConfigDto,
+} from '../../../shared-contracts/src/qr-ordering.ts';
 import { GuestQrOrderingServer } from './guest-qr-server.ts';
 import { PosTerminalViewController } from '../views/pos-terminal/PosTerminalView.ts';
 import { FinancialAndBackupReportViewController } from '../views/reports/FinancialAndBackupReportView.ts';
@@ -3919,6 +3925,40 @@ export class RubePosInteractiveAppServer {
         const status = this.guestQrServer.getRuntimeStatus(config);
         const tableSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
         this.sendJson(res, 200, { config, status, tableSessions });
+        return;
+      }
+
+      if (method === 'GET' && url.pathname === '/api/qr-ordering/nfc-tags') {
+        await this.ensureSeededIfAppropriate();
+        this.requireRole(sessionUser, ['OWNER', 'MANAGER', 'CASHIER']);
+        const outletId = url.searchParams.get('outletId') ?? 'OUTLET-HQ';
+        const config = this.ipc.getQrOrderingConfig();
+        const status = this.guestQrServer.getRuntimeStatus(config);
+        const tableSessions = this.ipc.listTableQrSessions(outletId, status.baseUrl);
+        const sessionByUpper = new Map(
+          tableSessions.map((s) => [s.tableLabel.trim().toUpperCase(), s])
+        );
+        const wscOnly = buildWifiWscCredentialBytes(
+          config.wifiSsid,
+          config.wifiPassword,
+          config.wifiSecurity
+        );
+        const tags: NfcTableTagPackageDto[] = config.tableLabels.map((tableLabel) => {
+          const sess = sessionByUpper.get(tableLabel.trim().toUpperCase());
+          return buildNfcTableTagPackage({
+            baseUrl: status.baseUrl,
+            tableLabel,
+            outletId,
+            signedToken: sess?.token ?? null,
+            config,
+          });
+        });
+        this.sendJson(res, 200, {
+          config,
+          status,
+          wifiOnlyWscBase64: wscOnly.length > 0 ? uint8ArrayToBase64(wscOnly) : null,
+          tags,
+        });
         return;
       }
 

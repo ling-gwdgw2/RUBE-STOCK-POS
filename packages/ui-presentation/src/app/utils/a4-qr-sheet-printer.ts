@@ -11,6 +11,7 @@
 import QRCode from 'qrcode';
 import type { LocaleCode } from '../../../../shared-contracts/src/currency.ts';
 import {
+  buildNfcTableTagPackage,
   buildTableMenuUrl,
   buildWifiQrPayload,
   type QrOrderingConfigDto,
@@ -62,6 +63,8 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
           staticTag: 'Table Menu QR',
           printBtn: 'ພິມແຜ່ນປ້າຍ QR (A4)',
           closeBtn: 'ປິດໜ້າຕ່າງ',
+          nfcZoneTitle: 'ແຕະມືຖືຈຸດ NFC ທີ່ນີ້ (TAP NFC)',
+          nfcZoneSub: 'Android: ແຕະເປີດໄດ້ທັນທີ · iPhone: ສະແກນ Wi-Fi QR ກ່ອນ ແລ້ວແຕະ NFC',
         }
       : input.locale === 'en'
         ? {
@@ -76,6 +79,8 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
             staticTag: 'Table Menu QR',
             printBtn: 'Print A4 Table QR Sheet',
             closeBtn: 'Close',
+            nfcZoneTitle: 'TAP NFC HERE (iOS & Android)',
+            nfcZoneSub: 'Android: Tap for Wi-Fi/Menu · iPhone: Scan Wi-Fi QR once, then tap NFC for Menu',
           }
         : {
             pageTitle: 'แผ่นป้าย QR ตั้งโต๊ะสั่งอาหาร (A4)',
@@ -89,6 +94,8 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
             staticTag: 'Table Menu QR',
             printBtn: 'พิมพ์แผ่นป้าย QR ทั้งหมด (A4)',
             closeBtn: 'ปิดหน้าต่าง',
+            nfcZoneTitle: 'แตะสมาร์ตโฟนจุด NFC ที่นี่',
+            nfcZoneSub: 'Android: แตะเชื่อม Wi-Fi/เมนู · iPhone: สแกน Wi-Fi QR ก่อน แล้วแตะจุด NFC เพื่อเปิดเมนู',
           };
 
   const cardsHtmlParts: string[] = [];
@@ -102,6 +109,14 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
       margin: 1,
       errorCorrectionLevel: 'M',
     });
+    const nfcPkg = input.config.nfcEnabled
+      ? buildNfcTableTagPackage({
+          baseUrl: input.baseUrl,
+          tableLabel,
+          signedToken: activeSess?.token ?? null,
+          config: input.config,
+        })
+      : null;
 
     cardsHtmlParts.push(`
       <article class="qr-card">
@@ -132,6 +147,20 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
             <div class="meta-url">${escHtml(input.baseUrl)}</div>
           </div>
         </div>
+        ${
+          nfcPkg
+            ? `<div class="nfc-zone">
+                 <div class="nfc-copy">
+                   <div class="nfc-title">${escHtml(labels.nfcZoneTitle)}</div>
+                   <div class="nfc-sub">${escHtml(labels.nfcZoneSub)}</div>
+                   <div class="nfc-meta">${escHtml(nfcPkg.chipType)} · ${escHtml(nfcPkg.recordLayout)} (${nfcPkg.ndefByteLength} B)</div>
+                 </div>
+                 <div class="nfc-sticker-target">
+                   <span>NFC</span>
+                 </div>
+               </div>`
+            : ''
+        }
       </article>
     `);
   }
@@ -255,6 +284,35 @@ export async function openA4TableQrPrintWindow(input: A4TableQrSheetInput): Prom
     .meta-line { font-size: 11px; color: #202124; word-break: break-all; }
     .meta-sub { font-size: 10px; color: #5f6368; margin-top: 2px; word-break: break-all; }
     .meta-url { font-size: 9px; color: #5f6368; margin-top: 2px; word-break: break-all; }
+    .nfc-zone {
+      margin-top: 8px;
+      border: 1px solid #1a73e8;
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #e8f0fe;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .nfc-copy { flex: 1; min-width: 0; }
+    .nfc-title { font-size: 11px; font-weight: 700; color: #1557b0; }
+    .nfc-sub { font-size: 9.5px; color: #3c4043; margin-top: 2px; line-height: 1.3; }
+    .nfc-meta { font-size: 9px; color: #5f6368; margin-top: 2px; font-family: monospace; }
+    .nfc-sticker-target {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 1.5px dashed #1a73e8;
+      background: #ffffff;
+      color: #1557b0;
+      font-size: 11px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
     @media print {
       body { padding: 0; }
       .toolbar { display: none; }

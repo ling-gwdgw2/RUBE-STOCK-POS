@@ -16,14 +16,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LocalIpcBridge } from '../../../cluster-gateway/src/local-ipc-bridge.ts';
-import type {
-  GuestMenuPayloadDto,
-  GuestOrderLineInputDto,
-  GuestOrderRecordDto,
-  GuestServiceCallDto,
-  GuestServiceCallType,
-  QrOrderingConfigDto,
-  QrOrderingRuntimeStatusDto,
+import {
+  normalizeGuestEntryChannel,
+  type GuestEntryChannel,
+  type GuestMenuPayloadDto,
+  type GuestOrderLineInputDto,
+  type GuestOrderRecordDto,
+  type GuestServiceCallDto,
+  type GuestServiceCallType,
+  type QrOrderingConfigDto,
+  type QrOrderingRuntimeStatusDto,
 } from '../../../shared-contracts/src/qr-ordering.ts';
 import { renderGuestMenuHtml } from './guest-menu-html.ts';
 
@@ -63,6 +65,7 @@ const FORBIDDEN_POS_PREFIXES = [
   '/api/catalog',
   '/api/usb-backup',
   '/api/profile',
+  '/api/qr-ordering',
 ];
 
 export interface SlidingWindowBucketOptions {
@@ -359,10 +362,21 @@ export class GuestQrOrderingServer {
     res.end(JSON.stringify(payload));
   }
 
+  private resolveEntryChannel(
+    rawVia: string | null,
+    isCaptive: boolean,
+    hasTableOrToken: boolean
+  ): GuestEntryChannel {
+    if (rawVia && rawVia.trim().toLowerCase() === 'nfc') return 'NFC';
+    if (isCaptive) return 'CAPTIVE';
+    return hasTableOrToken ? 'QR' : 'DIRECT';
+  }
+
   private buildSanitizedMenuPayload(
     outletId: string,
     tableParam: string,
-    tokenParam: string
+    tokenParam: string,
+    entryChannel: GuestEntryChannel = 'DIRECT'
   ): GuestMenuPayloadDto {
     const qrCfg = this.deps.ipc.getQrOrderingConfig();
     const fiscal = this.deps.ipc.getFiscalConfig();
@@ -460,6 +474,8 @@ export class GuestQrOrderingServer {
       lockedTableLabel,
       signedTableValid,
       signedTableExpired,
+      nfcEnabled: Boolean(qrCfg.nfcEnabled),
+      entryChannel,
       categories: visibleCategories,
       items: visibleItems,
       modifierGroups: sanitizedModGroups,
@@ -520,12 +536,21 @@ export class GuestQrOrderingServer {
         const outletId = this.resolveEffectiveOutletId(url.searchParams.get('o'));
         const store = this.deps.ipc.getStoreIdentitySettings(outletId);
         const fiscal = this.deps.ipc.getFiscalConfig();
+        const initialTableLabel = (url.searchParams.get('t') ?? '').trim().slice(0, 24);
+        const initialSignedToken = (url.searchParams.get('s') ?? '').trim().slice(0, 80);
+        const isCaptiveMode = url.searchParams.get('captive') === '1';
+        const entryChannel = this.resolveEntryChannel(
+          url.searchParams.get('via'),
+          isCaptiveMode,
+          Boolean(initialTableLabel || initialSignedToken)
+        );
         const html = renderGuestMenuHtml({
           storeName: store.storeName,
           initialOutletId: outletId,
-          initialTableLabel: (url.searchParams.get('t') ?? '').trim().slice(0, 24),
-          initialSignedToken: (url.searchParams.get('s') ?? '').trim().slice(0, 80),
-          isCaptiveMode: url.searchParams.get('captive') === '1',
+          initialTableLabel,
+          initialSignedToken,
+          isCaptiveMode,
+          entryChannel,
           defaultLocale: fiscal.uiLocale,
         });
         res.writeHead(200, {
@@ -557,7 +582,17 @@ export class GuestQrOrderingServer {
         const outletId = this.resolveEffectiveOutletId(url.searchParams.get('o'));
         const tableParam = (url.searchParams.get('t') ?? '').trim().slice(0, 24);
         const tokenParam = (url.searchParams.get('s') ?? '').trim().slice(0, 80);
-        const menuPayload = this.buildSanitizedMenuPayload(outletId, tableParam, tokenParam);
+        const entryChannel = this.resolveEntryChannel(
+          url.searchParams.get('via'),
+          url.searchParams.get('captive') === '1',
+          Boolean(tableParam || tokenParam)
+        );
+        const menuPayload = this.buildSanitizedMenuPayload(
+          outletId,
+          tableParam,
+          tokenParam,
+          entryChannel
+        );
         this.sendJson(res, 200, menuPayload);
         return;
       }
@@ -630,6 +665,7 @@ export class GuestQrOrderingServer {
           customerName?: string;
           customerNote?: string;
           clientSubmissionKey?: string;
+          entryChannel?: GuestEntryChannel;
           lines?: GuestOrderLineInputDto[];
         }>(req);
 
@@ -642,6 +678,10 @@ export class GuestQrOrderingServer {
           ...(typeof body.clientSubmissionKey === 'string' && body.clientSubmissionKey.trim()
             ? { clientSubmissionKey: body.clientSubmissionKey.trim() }
             : {}),
+          entryChannel: normalizeGuestEntryChannel(
+            body.entryChannel,
+            typeof body.signedToken === 'string' && body.signedToken.trim() ? 'QR' : 'DIRECT'
+          ),
           lines: Array.isArray(body.lines) ? body.lines : [],
         });
 
@@ -671,6 +711,7 @@ export class GuestQrOrderingServer {
           signedToken?: string;
           callType?: GuestServiceCallType;
           note?: string;
+          entryChannel?: GuestEntryChannel;
         }>(req);
 
         const call = await this.deps.ipc.submitGuestServiceCall({
@@ -679,6 +720,10 @@ export class GuestQrOrderingServer {
           signedToken: typeof body.signedToken === 'string' ? body.signedToken : '',
           callType: body.callType === 'REQUEST_BILL' ? 'REQUEST_BILL' : 'CALL_STAFF',
           ...(typeof body.note === 'string' ? { note: body.note } : {}),
+          entryChannel: normalizeGuestEntryChannel(
+            body.entryChannel,
+            typeof body.signedToken === 'string' && body.signedToken.trim() ? 'QR' : 'DIRECT'
+          ),
         });
 
         this.deps.onGuestServiceCallSubmitted?.(call);

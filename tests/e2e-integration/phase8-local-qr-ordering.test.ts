@@ -5,9 +5,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 import {
+  buildNfcTableTagPackage,
   buildTableMenuUrl,
+  buildTableNfcUrl,
   buildWifiQrPayload,
+  buildWifiWscCredentialBytes,
   computeGuestOrderLineSatang,
+  encodeNdefUriRecordSpec,
+  NFC_CHIP_USABLE_NDEF_BYTES,
   normalizeQrOrderingConfig,
 } from '../../packages/shared-contracts/src/qr-ordering.ts';
 import { checkSlidingWindowBucketLimit } from '../../packages/ui-presentation/src/server/guest-qr-server.ts';
@@ -44,9 +49,55 @@ test('Phase 8A: QR ordering shared contracts — Wi-Fi QR escaping, config guard
   assert.equal(cfg.port, 4174);
   assert.equal(cfg.maxQtyPerItem, 20);
   assert.deepEqual(cfg.tableLabels, ['T01', 'T02', 'TAKEAWAY']);
+  assert.equal(cfg.nfcEnabled, false);
+  assert.equal(cfg.nfcTagMode, 'STATIC_TABLE');
+  assert.equal(cfg.nfcRecordLayout, 'URI_ONLY');
+  assert.equal(cfg.nfcChipType, 'NTAG215');
 
   const url = buildTableMenuUrl('http://192.168.1.50:4174/', 'T04', 'abc.123');
   assert.equal(url, 'http://192.168.1.50:4174/m?t=T04&s=abc.123');
+
+  const nfcUrl = buildTableNfcUrl('http://192.168.1.50:4174/', 'T04', 'abc.123');
+  assert.equal(nfcUrl, 'http://192.168.1.50:4174/m?t=T04&s=abc.123&via=nfc');
+
+  // NDEF URI compression (0x03 = http://) + WFA WSC Credential TLV + NTAG213/215 fit guardrails
+  const uriRec = encodeNdefUriRecordSpec('http://192.168.1.50:4174/m?t=T04&via=nfc');
+  assert.equal(uriRec.tnf, 0x01);
+  assert.equal(uriRec.typeBytes[0], 0x55); // 'U'
+  assert.equal(uriRec.payloadBytes[0], 0x03); // 'http://'
+
+  const wscBytes = buildWifiWscCredentialBytes('RubeCafe_WiFi', 'secret2026', 'WPA');
+  assert.equal(wscBytes[0], 0x10);
+  assert.equal(wscBytes[1], 0x0e); // Credential TLV
+  assert.ok(wscBytes.length > 40);
+
+  const staticUriPkg = buildNfcTableTagPackage({
+    baseUrl: 'http://192.168.1.50:4174',
+    tableLabel: 'T04',
+    config: { ...cfg, nfcEnabled: true, nfcTagMode: 'STATIC_TABLE', nfcRecordLayout: 'URI_ONLY', nfcChipType: 'NTAG213' },
+  });
+  assert.equal(staticUriPkg.fitsSelectedChip, true);
+  assert.ok(staticUriPkg.ndefByteLength <= NFC_CHIP_USABLE_NDEF_BYTES.NTAG213);
+  assert.ok(staticUriPkg.ndefType2TlvHex.startsWith('03'));
+  assert.ok(staticUriPkg.ndefType2TlvHex.endsWith('FE'));
+
+  const longComboNtag213 = buildNfcTableTagPackage({
+    baseUrl: 'http://192.168.1.50:4174',
+    tableLabel: 'T04',
+    signedToken: '1234567890abcdef.1234567890abcdef12345678',
+    config: {
+      ...cfg,
+      wifiSsid: 'RubeCafe_Super_Fast_5GHz_Main_Hall',
+      wifiPassword: 'SuperLongWifiPasswordForGuests2026',
+      wifiSecurity: 'WPA',
+      nfcEnabled: true,
+      nfcTagMode: 'SIGNED_SESSION',
+      nfcRecordLayout: 'URI_AND_WIFI_WSC',
+      nfcChipType: 'NTAG213',
+    },
+  });
+  assert.equal(longComboNtag213.fitsSelectedChip, false);
+  assert.equal(longComboNtag213.recommendedChipType, 'NTAG215');
 
   const pricing = computeGuestOrderLineSatang({
     quantityMilli: 3_000,
@@ -971,6 +1022,175 @@ test('Phase 8E: Concurrent HTTP burst (Promise.all) & clock-driven time-window r
       }),
     });
     assert.equal(afterCallReset.status, 201);
+  } finally {
+    await server.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Phase 8F: Full E2E NFC Tag Table Ordering (NDEF URI + WFA WSC, Zero-Trust Isolation, &via=nfc Entry Tracking, Signed Rotation & Held Bill + KDS)', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rube-pos-phase8f-nfc-'));
+  const dbPath = path.join(tmpDir, 'rube_nfc_e2e.db');
+  const guestPort = await getFreeTcpPort();
+
+  const server = new RubePosInteractiveAppServer({
+    dbPath,
+    requireFirstRunWizard: false,
+    enforceApiSessionAuth: true,
+  });
+
+  try {
+    const { url: posBase } = await server.start(0, '127.0.0.1');
+    const loginRes = await fetch(`${posBase}/api/auth/pin-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: '999999', userId: 'USR-OWNER-01' }),
+    });
+    assert.equal(loginRes.status, 200);
+    const { sessionToken } = (await loginRes.json()) as { sessionToken: string };
+    const authHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${sessionToken}`,
+    };
+
+    // 1. Enable Guest LAN Server + NFC Ordering (Combo URI + Wi-Fi WSC on NTAG215)
+    const cfgRes = await fetch(`${posBase}/api/qr-ordering/config`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        enabled: true,
+        port: guestPort,
+        wifiSsid: 'RubeCafe_NFC_5G',
+        wifiPassword: 'nfcpass2026',
+        wifiSecurity: 'WPA',
+        approvalMode: 'CASHIER_CONFIRM',
+        allowOpenTableSelection: true,
+        tableLabels: ['T01', 'T04'],
+        nfcEnabled: true,
+        nfcTagMode: 'STATIC_TABLE',
+        nfcRecordLayout: 'URI_AND_WIFI_WSC',
+        nfcChipType: 'NTAG215',
+      }),
+    });
+    assert.equal(cfgRes.status, 200);
+
+    const guestBase = `http://127.0.0.1:${guestPort}`;
+
+    // 2. Zero-Trust Isolation: Guest Port 4174 MUST reject /api/qr-ordering/nfc-tags with 403
+    const isolatedNfcRes = await fetch(`${guestBase}/api/qr-ordering/nfc-tags`);
+    assert.equal(isolatedNfcRes.status, 403);
+
+    // 3. Authenticated POS Loopback Port 4173 returns NFC tag packages & WFA WSC payload
+    const nfcTagsRes = await fetch(`${posBase}/api/qr-ordering/nfc-tags`, { headers: authHeaders });
+    assert.equal(nfcTagsRes.status, 200);
+    const nfcTagsData = (await nfcTagsRes.json()) as {
+      wifiOnlyWscBase64: string | null;
+      tags: Array<{
+        tableLabel: string;
+        recordLayout: string;
+        chipType: string;
+        fitsSelectedChip: boolean;
+        ndefByteLength: number;
+        menuUrl: string;
+        wscBase64: string | null;
+      }>;
+    };
+    assert.ok(nfcTagsData.wifiOnlyWscBase64);
+    assert.equal(nfcTagsData.tags.length, 2);
+    const t04Tag = nfcTagsData.tags.find((t) => t.tableLabel === 'T04')!;
+    assert.ok(t04Tag);
+    assert.equal(t04Tag.recordLayout, 'URI_AND_WIFI_WSC');
+    assert.equal(t04Tag.chipType, 'NTAG215');
+    assert.equal(t04Tag.fitsSelectedChip, true);
+    assert.ok(t04Tag.menuUrl.includes('t=T04'));
+    assert.ok(t04Tag.menuUrl.includes('via=nfc'));
+    assert.ok(t04Tag.wscBase64);
+
+    // 4. Guest taps Static NFC tag -> opens HTML & menu API without leaking Wi-Fi password
+    const htmlRes = await fetch(`${guestBase}/m?t=T04&via=nfc`);
+    assert.equal(htmlRes.status, 200);
+    const html = await htmlRes.text();
+    assert.ok(html.includes('"entryChannel":"NFC"'));
+    assert.ok(!html.includes('nfcpass2026'), 'Guest HTML must never leak Wi-Fi passphrase');
+
+    const menuRes = await fetch(`${guestBase}/api/guest/menu?t=T04&via=nfc`);
+    assert.equal(menuRes.status, 200);
+    const menuText = await menuRes.text();
+    assert.ok(!menuText.includes('nfcpass2026'), 'Guest menu API must never leak Wi-Fi passphrase');
+    const menu = JSON.parse(menuText) as {
+      nfcEnabled: boolean;
+      entryChannel: string;
+      items: Array<{ variantId: string; isAvailable: boolean; isComposite: boolean }>;
+      modifierGroups: Array<{ minSelections: number; modifiers: Array<{ id: string }> }>;
+    };
+    assert.equal(menu.nfcEnabled, true);
+    assert.equal(menu.entryChannel, 'NFC');
+    const sellable = menu.items.find((i) => i.isAvailable)!;
+    const reqMods = sellable.isComposite
+      ? menu.modifierGroups
+          .filter((g) => g.minSelections > 0)
+          .flatMap((g) => g.modifiers.slice(0, g.minSelections).map((m) => m.id))
+      : [];
+
+    // 5. Submit guest order & service call tagged with entryChannel: NFC
+    const orderRes = await fetch(`${guestBase}/api/guest/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tableLabel: 'T04',
+        entryChannel: 'NFC',
+        customerName: 'NFC Guest',
+        lines: [{ variantId: sellable.variantId, quantityCount: 1, selectedModifierIds: reqMods }],
+      }),
+    });
+    assert.equal(orderRes.status, 201);
+    const orderData = (await orderRes.json()) as {
+      order: { id: string; status: string; entryChannel: string; isSignedTableSession: boolean };
+    };
+    assert.equal(orderData.order.entryChannel, 'NFC');
+    assert.equal(orderData.order.status, 'PENDING_CONFIRM');
+    assert.equal(orderData.order.isSignedTableSession, false);
+
+    const callRes = await fetch(`${guestBase}/api/guest/service-call`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tableLabel: 'T04',
+        callType: 'REQUEST_BILL',
+        entryChannel: 'NFC',
+      }),
+    });
+    assert.equal(callRes.status, 201);
+    const callData = (await callRes.json()) as { call: { entryChannel: string; callType: string } };
+    assert.equal(callData.call.entryChannel, 'NFC');
+
+    // Verify POS inbox preserves NFC channel tag and can accept into Held Bill + KDS cleanly
+    const inboxData = (await (
+      await fetch(`${posBase}/api/qr-ordering/orders`, { headers: authHeaders })
+    ).json()) as {
+      orders: Array<{ id: string; entryChannel: string }>;
+      serviceCalls: Array<{ tableLabel: string; entryChannel: string }>;
+    };
+    assert.equal(inboxData.orders.find((o) => o.id === orderData.order.id)?.entryChannel, 'NFC');
+    assert.equal(inboxData.serviceCalls.find((c) => c.tableLabel === 'T04')?.entryChannel, 'NFC');
+
+    const acceptRes = await fetch(`${posBase}/api/qr-ordering/orders/accept`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ guestOrderId: orderData.order.id }),
+    });
+    assert.equal(acceptRes.status, 200);
+
+    // 6. Signed Table Session exposes nfcMenuUrl with token & ?via=nfc when rotated
+    const openT04 = (await (
+      await fetch(`${posBase}/api/qr-ordering/table-session`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ tableLabel: 'T04' }),
+      })
+    ).json()) as { session: { menuUrl: string; nfcMenuUrl: string; token: string } };
+    assert.ok(openT04.session.nfcMenuUrl.includes('via=nfc'));
+    assert.ok(openT04.session.nfcMenuUrl.includes(`s=${encodeURIComponent(openT04.session.token)}`));
   } finally {
     await server.stop();
     fs.rmSync(tmpDir, { recursive: true, force: true });

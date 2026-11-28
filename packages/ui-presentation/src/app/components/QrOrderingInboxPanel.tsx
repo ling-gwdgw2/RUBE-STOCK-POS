@@ -3,7 +3,9 @@ import {
   BellRing,
   CheckCircle2,
   Clock,
+  Copy,
   ExternalLink,
+  Nfc,
   Printer,
   QrCode,
   RefreshCw,
@@ -15,7 +17,11 @@ import {
 } from 'lucide-react';
 import { formatMilliUnitsToQtyString } from '../../../../shared-contracts/src/fixed-point.ts';
 import { formatMoney } from '../../../../shared-contracts/src/currency.ts';
-import { DEFAULT_QR_ORDERING_CONFIG } from '../../../../shared-contracts/src/qr-ordering.ts';
+import {
+  buildNfcTableTagPackage,
+  buildTableNfcUrl,
+  DEFAULT_QR_ORDERING_CONFIG,
+} from '../../../../shared-contracts/src/qr-ordering.ts';
 import { posTransport } from '../api/pos-transport.ts';
 import { useI18n } from '../i18n/index.tsx';
 import type {
@@ -31,6 +37,10 @@ import {
   renderTableQrSlipTo203DpiCanvasRaster,
   type PackedCanvasRasterResult,
 } from '../utils/thai-canvas-rasterizer.ts';
+import {
+  isWebNfcSupported,
+  writeNfcPackageViaBrowserReader,
+} from '../utils/web-nfc-writer.ts';
 import { ModalDialog, UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 /**
@@ -323,6 +333,12 @@ export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
                         <span className="rounded-[48px] bg-ink px-2.5 py-0.5 text-xs font-medium text-white">
                           {pick('โต๊ะ', 'ໂຕະ', 'Table')} {call.tableLabel}
                         </span>
+                        {call.entryChannel === 'NFC' && (
+                          <span className="inline-flex items-center gap-1 rounded-[48px] border border-primary/50 bg-canvas px-2 py-0.5 text-[10px] font-medium text-primary-dark">
+                            <Nfc className="h-3 w-3" />
+                            NFC Tap
+                          </span>
+                        )}
                         <span className="text-sm font-medium text-ink">
                           {isBill
                             ? pick('ขอเช็กบิล', 'ຂໍເຊັກບິນ', 'Request Bill')
@@ -415,6 +431,12 @@ export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
                           ) : (
                             <span className="rounded-[48px] border border-hairline bg-canvas px-2.5 py-0.5 text-[11px] text-ink-muted">
                               Walk-in Captive
+                            </span>
+                          )}
+                          {ord.entryChannel === 'NFC' && (
+                            <span className="inline-flex items-center gap-1 rounded-[48px] border border-primary/60 bg-canvas px-2.5 py-0.5 text-[11px] font-medium text-primary-dark">
+                              <Nfc className="h-3 w-3" />
+                              NFC Tap
                             </span>
                           )}
                           {renderStatusPill(ord.status)}
@@ -533,6 +555,12 @@ export const QrOrderingInboxPanel: React.FC<QrOrderingInboxPanelProps> = ({
                       <span className="rounded-[4px] border border-hairline bg-surface-1 px-2 py-0.5 font-medium text-ink">
                         {ord.tableLabel}
                       </span>
+                      {ord.entryChannel === 'NFC' && (
+                        <span className="inline-flex items-center gap-1 rounded-[48px] border border-primary/50 bg-canvas px-2 py-0.5 text-[10px] font-medium text-primary-dark">
+                          <Nfc className="h-3 w-3" />
+                          NFC
+                        </span>
+                      )}
                       {renderStatusPill(ord.status)}
                     </div>
                     <div className="text-ink-muted">
@@ -675,6 +703,7 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
   const [activeSession, setActiveSession] = useState<TableQrSessionDto | null>(null);
   const [slipRaster, setSlipRaster] = useState<PackedCanvasRasterResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const webNfcAvailable = isWebNfcSupported();
 
   useEffect(() => {
     if (!open) return;
@@ -800,6 +829,61 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
     }
   };
 
+  const activeNfcUrl = activeSession
+    ? activeSession.nfcMenuUrl ||
+      buildTableNfcUrl(
+        bootstrap.qrOrderingStatus?.baseUrl ?? `http://127.0.0.1:${qrCfg.port}`,
+        activeSession.tableLabel,
+        activeSession.token,
+        outletId
+      )
+    : '';
+
+  const handleCopyNfcLink = async () => {
+    if (!activeNfcUrl || !activeSession) return;
+    try {
+      await navigator.clipboard.writeText(activeNfcUrl);
+      onToast(
+        pick(
+          `คัดลอกลิงก์ NFC โต๊ะ ${activeSession.tableLabel} แล้ว`,
+          `ຄັດລອກລິ້ງ NFC ໂຕະ ${activeSession.tableLabel} ແລ້ວ`,
+          `Copied NFC URL for ${activeSession.tableLabel}`
+        ),
+        'success'
+      );
+    } catch {
+      onToast(activeNfcUrl, 'warn');
+    }
+  };
+
+  const handleWriteSessionToNfcTag = async () => {
+    if (!activeSession) return;
+    const baseUrl = bootstrap.qrOrderingStatus?.baseUrl ?? `http://127.0.0.1:${qrCfg.port}`;
+    const pkg = buildNfcTableTagPackage({
+      baseUrl,
+      tableLabel: activeSession.tableLabel,
+      outletId,
+      signedToken: activeSession.token,
+      config: { ...qrCfg, nfcEnabled: true },
+    });
+    setBusy(true);
+    try {
+      const result = await writeNfcPackageViaBrowserReader(pkg);
+      onToast(
+        pick(
+          `เขียนแท็ก NFC โต๊ะ ${activeSession.tableLabel} สำเร็จ (${result.ndefByteLength} Bytes)`,
+          `ຂຽນແທັກ NFC ໂຕະ ${activeSession.tableLabel} ສຳເລັດ (${result.ndefByteLength} Bytes)`,
+          `Wrote NFC tag for ${activeSession.tableLabel} (${result.ndefByteLength} bytes)`
+        ),
+        'success'
+      );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <ModalDialog
       open={open}
@@ -914,6 +998,47 @@ export const TableQrSlipModal: React.FC<TableQrSlipModalProps> = ({
                   <Trash2 className="h-3.5 w-3.5" />
                   <span>{pick('ปิด QR โต๊ะนี้', 'ປິດ QR ໂຕະນີ້', 'Revoke')}</span>
                 </button>
+              </div>
+            )}
+
+            {activeSession && qrCfg.nfcEnabled && (
+              <div className="rounded-[4px] border border-primary/40 bg-primary-soft/30 p-3 space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium text-primary-dark flex items-center gap-1.5">
+                    <Nfc className="h-3.5 w-3.5" />
+                    <span>
+                      {pick(
+                        `เครื่องมือ NFC โต๊ะ ${activeSession.tableLabel}`,
+                        `ເຄື່ອງມື NFC ໂຕະ ${activeSession.tableLabel}`,
+                        `NFC Tools (${activeSession.tableLabel})`
+                      )}
+                    </span>
+                  </span>
+                  <span className="text-[10px] text-ink-muted">
+                    {qrCfg.nfcTagMode === 'SIGNED_SESSION' ? 'Signed Token' : 'Static URL'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyNfcLink()}
+                    className={`flex-1 inline-flex h-9 items-center justify-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3 text-[11px] font-medium text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+                  >
+                    <Copy className="h-3 w-3" />
+                    <span>{pick('คัดลอกลิงก์ NFC', 'ຄັດລອກລິ້ງ NFC', 'Copy NFC URL')}</span>
+                  </button>
+                  {webNfcAvailable && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void handleWriteSessionToNfcTag()}
+                      className={`flex-1 inline-flex h-9 items-center justify-center gap-1.5 rounded-[48px] bg-primary px-3 text-[11px] font-medium text-white hover:bg-primary-hover disabled:opacity-45 ${UI_INTERACTION.focusButtonPrimary}`}
+                    >
+                      <Nfc className="h-3 w-3" />
+                      <span>{pick('แตะเขียนแท็ก NFC', 'ແຕະຂຽນແທັກ NFC', 'Write NFC Tag')}</span>
+                    </button>
+                  )}
+                </div>
               </div>
             )}
           </div>

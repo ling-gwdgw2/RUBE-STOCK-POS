@@ -15,6 +15,7 @@ export interface GuestHtmlRenderOptions {
   initialTableLabel: string;
   initialSignedToken: string;
   isCaptiveMode: boolean;
+  entryChannel?: 'QR' | 'NFC' | 'CAPTIVE' | 'DIRECT' | undefined;
   defaultLocale: 'th' | 'lo' | 'en';
 }
 
@@ -41,6 +42,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
     initialTable: options.initialTableLabel,
     initialToken: options.initialSignedToken,
     isCaptiveMode: options.isCaptiveMode,
+    entryChannel: options.entryChannel || (options.isCaptiveMode ? 'CAPTIVE' : 'QR'),
     defaultLocale: options.defaultLocale,
   });
 
@@ -689,6 +691,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           callStaff: 'เรียกพนักงาน',
           requestBill: 'ขอเช็กบิล',
           serviceCallSent: 'ส่งคำขอไปยังเคาน์เตอร์เรียบร้อยแล้ว',
+          nfcTagBadge: 'NFC Tap',
           reasonPrefix: 'เหตุผล:',
           loadingMenu: 'กำลังโหลดรายการเมนู...',
           loadError: 'ไม่สามารถเชื่อมต่อระบบร้านค้าในวง Wi-Fi ได้ กรุณาลองใหม่',
@@ -738,6 +741,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           callStaff: 'ເອີ້ນພະນັກງານ',
           requestBill: 'ຂໍເຊັກບິນ',
           serviceCallSent: 'ສົ່ງຄຳຂໍໄປຍັງເຄົາເຕີສຳເລັດແລ້ວ',
+          nfcTagBadge: 'ແຕະ NFC',
           reasonPrefix: 'ເຫດຜົນ:',
           loadingMenu: 'ກຳລັງໂຫຼດລາຍການເມນູ...',
           loadError: 'ບໍ່ສາມາດເຊື່ອມຕໍ່ລະບົບຮ້ານໃນວົງ Wi-Fi ໄດ້',
@@ -787,6 +791,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           callStaff: 'Call Staff',
           requestBill: 'Request Bill',
           serviceCallSent: 'Request sent to staff',
+          nfcTagBadge: 'NFC Tap',
           reasonPrefix: 'Reason:',
           loadingMenu: 'Loading menu...',
           loadError: 'Unable to reach the store Wi-Fi ordering server.',
@@ -920,6 +925,9 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           if (state.menu.wifiSsid) {
             badges.push('<span class="badge">Wi-Fi: ' + esc(state.menu.wifiSsid) + '</span>');
           }
+          if ((state.menu.entryChannel || BOOT.entryChannel) === 'NFC') {
+            badges.push('<span class="badge badge-primary">' + esc(L().nfcTagBadge) + '</span>');
+          }
           subEl.innerHTML = badges.join('');
         }
       }
@@ -971,6 +979,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
               tableLabel: tableToSend,
               signedToken: state.menu.signedTableValid ? BOOT.initialToken : '',
               callType: callType,
+              entryChannel: BOOT.entryChannel || 'QR',
             }),
           });
           const data = await res.json().catch(function () { return {}; });
@@ -1344,6 +1353,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
             customerName: state.customerName.trim(),
             customerNote: state.customerNote.trim(),
             clientSubmissionKey: state.cartSubmissionKey,
+            entryChannel: BOOT.entryChannel || 'QR',
             lines: state.cart.map(function (l) {
               return {
                 variantId: l.variantId,
@@ -1507,6 +1517,7 @@ export function renderGuestMenuHtml(options: GuestHtmlRenderOptions): string {
           if (BOOT.outletId && BOOT.outletId !== 'OUTLET-HQ') qs.set('o', BOOT.outletId);
           if (BOOT.initialTable) qs.set('t', BOOT.initialTable);
           if (BOOT.initialToken) qs.set('s', BOOT.initialToken);
+          if (BOOT.entryChannel === 'NFC') qs.set('via', 'nfc');
           const res = await fetch('/api/guest/menu' + (qs.toString() ? '?' + qs.toString() : ''));
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || L().loadError);

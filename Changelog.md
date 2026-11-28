@@ -451,6 +451,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **UI/UX & Offline Audit**: **0 violations** (Zero CDN, Zero `#80868b`, Zero `shadow-*`, Zero `window.alert/confirm/prompt`)
 - **Windows Installer Build (`npm run build:installer`)**: สร้าง `dist-installer/RubeStockPOS_3.1.1_x64_Setup.exe` (`46,904,832` bytes) สำเร็จพร้อมฟอนต์ลาวออฟไลน์ครบชุด
 
+---
+
+## [3.1.1] - 2026-11-28
+
+### NFC Tag Table Ordering (NDEF URI & WFA WSC), Local QR Ordering v2 Hardening & Barcode Label Printing System
+
+#### Added — NFC Tag Table Ordering Integration (`NTAG213` / `NTAG215` / `NTAG216`)
+- **Pure Offline NDEF URI & Wi-Fi WSC Encoders (`packages/shared-contracts/src/qr-ordering.ts`)**:
+  - เพิ่มโครงสร้างข้อมูลและค่าปรับตั้งแบบ Additive/Optional-Safe บน `QrOrderingConfigDto` (`nfcEnabled`, `nfcTagMode`: `'STATIC_TABLE' | 'SIGNED_SESSION'`, `nfcRecordLayout`: `'URI_ONLY' | 'WIFI_WSC_ONLY' | 'URI_AND_WIFI_WSC'`, `nfcChipType`: `'NTAG213' | 'NTAG215' | 'NTAG216'`) โดยคงชื่อตัวแปร พอร์ต และพฤติกรรม `buildTableMenuUrl` เดิมไว้ครบ 100%
+  - เพิ่มฟังก์ชัน `buildTableNfcUrl`, `buildWifiWscCredentialBytes` (เข้ารหัสไบนารี TLV ตามมาตรฐาน Wi-Fi Alliance Simple Configuration `application/vnd.wfa.wsc` สำหรับ Android Tap-to-Join Wi-Fi), `encodeNdefUriRecordSpec` (บีบอัด Prefix `0x03` `"http://"`), `encodeNdefMimeRecordSpec`, `encodeNdefMessageBytes`, `wrapNdefInType2TlvBytes` และ `buildNfcTableTagPackage` พร้อมตรวจขนาด EEPROM (`137 / 492 / 872` Bytes)
+- **Zero-Trust NFC Routing & POS Endpoint (`guest-qr-server.ts`, `guest-menu-html.ts`, `pos-desktop-server.ts`, `sqlite-engine.ts`)**:
+  - รองรับพารามิเตอร์ `?via=nfc` และ `entryChannel: 'NFC'` บนหน้าเมนูมือถือ Port `4174` (แสดงป้าย `NFC Tap` 3 ภาษา `lo`/`th`/`en` และบันทึกช่องทางลง `GuestOrderRecordDto` / `GuestServiceCallDto` ใน `store_config` โดยไม่แก้ Schema Migration)
+  - เพิ่ม Endpoint เฉพาะ Loopback Port `4173` (`GET /api/qr-ordering/nfc-tags`) สำหรับเตรียมแพ็กเกจเขียนแท็กทุกโต๊ะ พร้อมบล็อก `/api/qr-ordering/*` บนพอร์ต `4174` ด้วย `HTTP 403` และคงการปกป้องรหัส Wi-Fi ไม่ให้หลุดออกไปฝั่งลูกค้า
+- **POS NFC Settings, Web NFC Writer & A4 Sticker Zone (`QrOrderingSettingsCard.tsx`, `QrOrderingInboxPanel.tsx`, `web-nfc-writer.ts`, `a4-qr-sheet-printer.ts`)**:
+  - เพิ่ม **Web NFC Writer (`NDEFReader`)** ใน `packages/ui-presentation/src/app/utils/web-nfc-writer.ts` สำหรับเขียนแท็ก NFC โดยตรงจากแท็บเล็ต Android Chrome พร้อม **Bridge QR**, **Copy URL**, และ **Export CSV / NDEF JSON** สำหรับเครื่อง Windows POS และแอปเขียนแท็ก NFC Tools
+  - แสดง Badge `NFC Tap` ในคิวรับออเดอร์แคชเชียร์ / `TableQrSlipModal` และเพิ่มกรอบจุดติดสติ๊กเกอร์ NFC (`TAP NFC`) บนแผ่นป้ายตั้งโต๊ะ A4 ควบคู่กับ Wi-Fi QR และ Table QR เดิม (รองรับ iOS Safari URI + Wi-Fi QR และ Android WSC + Captive Portal)
+
+#### Added & Hardened — Local QR Ordering v2 & Barcode Label Printing System
+- **Local QR Table Ordering v2 Hardening (`Phase 8C–8E`)**:
+  - รองรับ `clientSubmissionKey` Idempotency ป้องกันการกดส่งออเดอร์ซ้ำ, ตรวจความถูกต้องของ Modifier Groups และ Cumulative BOM Stock Deduction แบบเรียลไทม์, Tracking Token Privacy (`token`), คำขอ **Call Staff / Request Bill** พร้อมหน้ารับทราบของแคชเชียร์, และ Per-Line `skipKds` Deduplication เพื่อไม่ให้บิลรวมโต๊ะยิงตั๋วครัวซ้ำเมื่อชำระเงิน
+  - ปรับปรุง Per-IP Sliding-Window Rate Limiter และ Bounded FIFO Tracking Map พร้อมล็อกสถานะ `SETTLED` เมื่อเช็กบิลโต๊ะสำเร็จ
+- **Barcode Label Printing System (`Phase 9`, `barcode-printing.ts`, `barcode-label.ts`, `barcode-label-renderer.ts`, `BarcodeLabelPrintWorkspace.tsx`)**:
+  - เพิ่มระบบออกแบบและพิมพ์สติ๊กเกอร์บาร์โค้ด (`EAN-13`, `EAN-8`, `Code 128`, Weight/Price-Embedded Scale EAN-13) รองรับเครื่องพิมพ์ **TSPL2**, **ZPL II**, และ **ESC/POS** พร้อมพรีวิว 203-DPI และบันทึกการตั้งค่าข้ามเครื่อง (`store_config`)
+
+#### Verified & Built (2026-11-28)
+- **TypeScript (`npx tsc --noEmit -p packages/ui-presentation/tsconfig.json`)**: **0 errors**
+- **PR Gatekeeping (`npm run verify:pr-gatekeeping`)**: **3/3 Rules PASSED** (`19 Rust files` & `54 TS files`, SQLite Schema SHA-256 `866a600d3e5eaf0351712c2e7d3085dc6abd68f39f800a1dc7d7ada1895b8d37` คงเดิม 100%)
+- **Automated Node.js E2E & Invariant Suite (`npm test`)**: **57/57 tests PASSED (0 failed)** — รวม `Phase 8A`–`Phase 8F` (NFC Tag E2E) และ `Phase 9` (Barcode Label Printing)
+- **Rust Workspace & Tauri Native Tests (`cargo test --workspace` + `src-tauri`)**: **23/23 tests PASSED (0 failed)** (`4` cluster-gateway + `15` core-engine + `1` hal-drivers + `1` shared-contracts + `2` tauri-desktop)
+- **Production Vite UI Bundle (`npx vite build packages/ui-presentation`)**: **Built cleanly** พร้อมฟอนต์ Noto Sans Lao ออฟไลน์ (`Zero CDN`, `Zero #80868b`, `Zero shadow-*`)
+- **Windows Installer Build (`npm run build:installer`)**: สร้าง `dist-installer/RubeStockPOS_3.1.1_x64_Setup.exe` (`47,037,440` bytes), `dist-installer/RubeStockPOS_3.1.1_x64_AirGapped.msi` (`47,037,754` bytes) และ `dist-installer/RubeStockPOS-DesktopShell.exe` (`9,446,912` bytes) สำเร็จ
+
+
 
 
 

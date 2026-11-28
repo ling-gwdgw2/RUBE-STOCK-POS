@@ -23,6 +23,7 @@ import type {
   LocaleCode,
   ModifierDto,
   ModifierGroupWithItemsDto,
+  NfcTableTagPackageDto,
   PosShiftDto,
   PrintedReceiptPreview,
   PrinterHardwareConfigDto,
@@ -1306,6 +1307,15 @@ export const posTransport = {
     tableSessions: TableQrSessionDto[];
   }> {
     return requestJson(`/api/qr-ordering/config?outletId=${encodeURIComponent(outletId)}`);
+  },
+
+  getQrNfcTagPackages(outletId = 'OUTLET-HQ'): Promise<{
+    config: QrOrderingConfigDto;
+    status: QrOrderingRuntimeStatusDto;
+    wifiOnlyWscBase64: string | null;
+    tags: NfcTableTagPackageDto[];
+  }> {
+    return requestJson(`/api/qr-ordering/nfc-tags?outletId=${encodeURIComponent(outletId)}`);
   },
 
   saveQrOrderingConfig(

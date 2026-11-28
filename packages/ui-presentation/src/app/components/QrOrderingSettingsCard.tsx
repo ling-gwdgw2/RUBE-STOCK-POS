@@ -3,16 +3,26 @@ import QRCode from 'qrcode';
 import {
   CheckCircle2,
   Copy,
+  Download,
   ExternalLink,
+  Nfc,
   Printer,
   QrCode,
   ShieldCheck,
+  Smartphone,
   Wifi,
 } from 'lucide-react';
 import {
+  buildNfcTableTagPackage,
   buildWifiQrPayload,
+  buildWifiWscCredentialBytes,
   DEFAULT_QR_ORDERING_CONFIG,
+  NFC_CHIP_USABLE_NDEF_BYTES,
   normalizeTableLabels,
+  type NfcRecordLayout,
+  type NfcTableTagPackageDto,
+  type NfcTagChipType,
+  type NfcTagMode,
   type QrOrderApprovalMode,
   type QrOrderingConfigDto,
   type QrOrderingRuntimeStatusDto,
@@ -23,6 +33,10 @@ import { posTransport } from '../api/pos-transport.ts';
 import { useI18n } from '../i18n/index.tsx';
 import type { BootstrapPayload } from '../types.ts';
 import { openA4TableQrPrintWindow } from '../utils/a4-qr-sheet-printer.ts';
+import {
+  isWebNfcSupported,
+  writeNfcPackageViaBrowserReader,
+} from '../utils/web-nfc-writer.ts';
 import { UI_INTERACTION } from './ui/UiPrimitives.tsx';
 
 interface QrOrderingSettingsCardProps {
@@ -60,6 +74,16 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
     initialCfg.customHostOverride
   );
   const [tablesText, setTablesText] = useState<string>(initialCfg.tableLabels.join(', '));
+  const [nfcEnabled, setNfcEnabled] = useState<boolean>(Boolean(initialCfg.nfcEnabled));
+  const [nfcTagMode, setNfcTagMode] = useState<NfcTagMode>(
+    initialCfg.nfcTagMode ?? 'STATIC_TABLE'
+  );
+  const [nfcRecordLayout, setNfcRecordLayout] = useState<NfcRecordLayout>(
+    initialCfg.nfcRecordLayout ?? 'URI_ONLY'
+  );
+  const [nfcChipType, setNfcChipType] = useState<NfcTagChipType>(
+    initialCfg.nfcChipType ?? 'NTAG215'
+  );
   const [runtimeStatus, setRuntimeStatus] = useState<QrOrderingRuntimeStatusDto | undefined>(
     bootstrap.qrOrderingStatus
   );
@@ -68,7 +92,14 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
   );
   const [wifiQrPreviewUrl, setWifiQrPreviewUrl] = useState<string | null>(null);
   const [showRouterGuide, setShowRouterGuide] = useState<boolean>(false);
+  const [showNfcTagsPanel, setShowNfcTagsPanel] = useState<boolean>(false);
+  const [bridgeQrTarget, setBridgeQrTarget] = useState<{ label: string; url: string } | null>(
+    null
+  );
+  const [bridgeQrDataUrl, setBridgeQrDataUrl] = useState<string | null>(null);
+  const [writingNfcTable, setWritingNfcTable] = useState<string | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
+  const webNfcAvailable = isWebNfcSupported();
 
   useEffect(() => {
     const cfg = bootstrap.qrOrderingConfig ?? DEFAULT_QR_ORDERING_CONFIG;
@@ -82,9 +113,31 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
     setMaxQtyPerItem(String(cfg.maxQtyPerItem));
     setCustomHostOverride(cfg.customHostOverride);
     setTablesText(cfg.tableLabels.join(', '));
+    setNfcEnabled(Boolean(cfg.nfcEnabled));
+    setNfcTagMode(cfg.nfcTagMode ?? 'STATIC_TABLE');
+    setNfcRecordLayout(cfg.nfcRecordLayout ?? 'URI_ONLY');
+    setNfcChipType(cfg.nfcChipType ?? 'NTAG215');
     setRuntimeStatus(bootstrap.qrOrderingStatus);
     setTableSessions(bootstrap.qrTableSessions ?? []);
   }, [bootstrap.qrOrderingConfig, bootstrap.qrOrderingStatus, bootstrap.qrTableSessions]);
+
+  useEffect(() => {
+    if (!bridgeQrTarget?.url) {
+      setBridgeQrDataUrl(null);
+      return;
+    }
+    let cancelled = false;
+    void QRCode.toDataURL(bridgeQrTarget.url, { width: 164, margin: 1, errorCorrectionLevel: 'M' })
+      .then((url) => {
+        if (!cancelled) setBridgeQrDataUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setBridgeQrDataUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bridgeQrTarget]);
 
   useEffect(() => {
     const payload = buildWifiQrPayload(wifiSsid, wifiPassword, wifiSecurity);
@@ -107,6 +160,44 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
 
   const parsedPort = Math.max(1024, Math.min(65535, Number(portInput.replace(/\D/g, '')) || 4174));
   const firewallCmd = `netsh advfirewall firewall add rule name="RUBE-POS Guest QR ${parsedPort}" dir=in action=allow protocol=TCP localport=${parsedPort}`;
+  const effectivePort = parsedPort === 4173 ? 4174 : parsedPort;
+  const effectiveTablesList = normalizeTableLabels(tablesText);
+  const effectiveBaseUrl =
+    runtimeStatus?.baseUrl ??
+    `http://${customHostOverride.trim() || '127.0.0.1'}:${effectivePort}`;
+  const liveEffectiveCfg: QrOrderingConfigDto = {
+    enabled,
+    port: effectivePort,
+    wifiSsid: wifiSsid.trim(),
+    wifiPassword: wifiSecurity === 'NOPASS' ? '' : wifiPassword.trim(),
+    wifiSecurity,
+    approvalMode,
+    tableLabels: effectiveTablesList,
+    maxQtyPerItem: Math.max(1, Math.min(99, Number(maxQtyPerItem.replace(/\D/g, '')) || 20)),
+    allowOpenTableSelection,
+    customHostOverride: customHostOverride.trim(),
+    nfcEnabled,
+    nfcTagMode,
+    nfcRecordLayout,
+    nfcChipType,
+  };
+  const sessionByUpper = new Map(
+    tableSessions.map((s) => [s.tableLabel.trim().toUpperCase(), s])
+  );
+  const nfcPackages: NfcTableTagPackageDto[] = effectiveTablesList.map((tableLabel) =>
+    buildNfcTableTagPackage({
+      baseUrl: effectiveBaseUrl,
+      tableLabel,
+      outletId,
+      signedToken: sessionByUpper.get(tableLabel.trim().toUpperCase())?.token ?? null,
+      config: liveEffectiveCfg,
+    })
+  );
+  const wifiWscPreviewBytes = buildWifiWscCredentialBytes(
+    liveEffectiveCfg.wifiSsid,
+    liveEffectiveCfg.wifiPassword,
+    liveEffectiveCfg.wifiSecurity
+  );
 
   const handleSave = async () => {
     setBusy(true);
@@ -115,7 +206,7 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
       const res = await posTransport.saveQrOrderingConfig({
         outletId,
         enabled,
-        port: parsedPort === 4173 ? 4174 : parsedPort,
+        port: effectivePort,
         wifiSsid: wifiSsid.trim(),
         wifiPassword: wifiSecurity === 'NOPASS' ? '' : wifiPassword.trim(),
         wifiSecurity,
@@ -124,6 +215,10 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
         maxQtyPerItem: Math.max(1, Math.min(99, Number(maxQtyPerItem.replace(/\D/g, '')) || 20)),
         customHostOverride: customHostOverride.trim(),
         tableLabels,
+        nfcEnabled,
+        nfcTagMode,
+        nfcRecordLayout,
+        nfcChipType,
       });
       setRuntimeStatus(res.status);
       setTableSessions(res.tableSessions);
@@ -155,26 +250,11 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
   const handlePrintA4Sheet = async () => {
     setBusy(true);
     try {
-      const effectiveCfg: QrOrderingConfigDto = {
-        enabled,
-        port: parsedPort === 4173 ? 4174 : parsedPort,
-        wifiSsid: wifiSsid.trim(),
-        wifiPassword: wifiSecurity === 'NOPASS' ? '' : wifiPassword.trim(),
-        wifiSecurity,
-        approvalMode,
-        tableLabels: normalizeTableLabels(tablesText),
-        maxQtyPerItem: Math.max(1, Math.min(99, Number(maxQtyPerItem.replace(/\D/g, '')) || 20)),
-        allowOpenTableSelection,
-        customHostOverride: customHostOverride.trim(),
-      };
-      const baseUrl =
-        runtimeStatus?.baseUrl ??
-        `http://${customHostOverride.trim() || '127.0.0.1'}:${effectiveCfg.port}`;
       const opened = await openA4TableQrPrintWindow({
         storeName: bootstrap.storeSettings.storeName,
         locale: fiscal.receiptLocale,
-        baseUrl,
-        config: effectiveCfg,
+        baseUrl: effectiveBaseUrl,
+        config: liveEffectiveCfg,
         activeSessions: tableSessions,
       });
       if (!opened) {
@@ -200,6 +280,79 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
       onToast(`${pick('คัดลอกแล้ว:', 'ຄັດລອກແລ້ວ:', 'Copied:')} ${label}`, 'success');
     } catch {
       onToast(text, 'warn');
+    }
+  };
+
+  const handleDownloadNfcExport = (format: 'csv' | 'json') => {
+    const content =
+      format === 'json'
+        ? JSON.stringify(
+            {
+              generatedAtIso: new Date().toISOString(),
+              outletId,
+              baseUrl: effectiveBaseUrl,
+              wifiSsid: liveEffectiveCfg.wifiSsid,
+              nfcTagMode,
+              nfcRecordLayout,
+              nfcChipType,
+              tags: nfcPackages,
+            },
+            null,
+            2
+          )
+        : [
+            'tableLabel,recordLayout,chipType,ndefByteLength,fitsSelectedChip,menuUrl,ndefType2TlvHex,wscBase64',
+            ...nfcPackages.map((p) =>
+              [
+                p.tableLabel,
+                p.recordLayout,
+                p.chipType,
+                String(p.ndefByteLength),
+                p.fitsSelectedChip ? 'YES' : 'NO',
+                `"${p.menuUrl.replace(/"/g, '""')}"`,
+                p.ndefType2TlvHex,
+                p.wscBase64 ?? '',
+              ].join(',')
+            ),
+          ].join('\r\n');
+
+    const blob = new Blob([content], {
+      type: format === 'json' ? 'application/json;charset=utf-8' : 'text/csv;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `rube-nfc-table-tags-${outletId.toLowerCase()}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    onToast(
+      pick(
+        `ดาวน์โหลดไฟล์รายการแท็ก NFC (${format.toUpperCase()}) แล้ว`,
+        `ດາວໂຫຼດໄຟລ໌ລາຍການແທັກ NFC (${format.toUpperCase()}) ແລ້ວ`,
+        `Exported NFC table tags (${format.toUpperCase()})`
+      ),
+      'success'
+    );
+  };
+
+  const handleWriteBrowserNfcTag = async (pkg: NfcTableTagPackageDto) => {
+    setWritingNfcTable(pkg.tableLabel);
+    try {
+      const res = await writeNfcPackageViaBrowserReader(pkg);
+      onToast(
+        pick(
+          `เขียนแท็ก NFC โต๊ะ ${pkg.tableLabel} สำเร็จ (${res.recordsCount} records · ${res.ndefByteLength} Bytes)`,
+          `ຂຽນແທັກ NFC ໂຕະ ${pkg.tableLabel} ສຳເລັດ (${res.ndefByteLength} Bytes)`,
+          `Wrote NFC tag for ${pkg.tableLabel} (${res.ndefByteLength} bytes)`
+        ),
+        'success'
+      );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setWritingNfcTable(null);
     }
   };
 
@@ -519,6 +672,333 @@ export const QrOrderingSettingsCard: React.FC<QrOrderingSettingsCardProps> = ({
             </div>
           </div>
         </div>
+      </div>
+
+      {/* NFC Tag Support & NDEF Programmer Section */}
+      <div className="rounded-[4px] border border-hairline bg-canvas p-4 space-y-4 text-xs">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="space-y-1">
+            <div className="font-medium text-ink flex items-center gap-2 text-sm">
+              <Nfc className="h-4 w-4 text-primary" />
+              <span>
+                {pick(
+                  '3. ระบบแท็ก NFC ประจำโต๊ะ (NTAG213 / NTAG215 / NTAG216 · NDEF URI & Wi-Fi WSC)',
+                  '3. ລະບົບແທັກ NFC ປະຈຳໂຕະ (NTAG213 / NTAG215 / NTAG216 · NDEF URI & Wi-Fi WSC)',
+                  '3. NFC Table Tags (NTAG213 / 215 / 216 · NDEF URI & Android Wi-Fi WSC)'
+                )}
+              </span>
+            </div>
+            <p className="text-ink-muted max-w-3xl">
+              {pick(
+                'รองรับการแตะสมาร์ตโฟน (iOS & Android) บนโต๊ะเพื่อเปิดหน้าเมนู Local LAN (&via=nfc) ควบคู่กับ QR Code และสร้าง Wi-Fi WSC NDEF สำหรับ Android Auto-Join + ปุ่มเตรียม/เขียนแท็กจาก POS',
+                'ຮອງຮັບການແຕະມືຖື (iOS & Android) ເພື່ອເປີດເມນູ Local LAN ຄູ່ກັບ QR Code ແລະ ສ້າງ Wi-Fi WSC ສຳລັບ Android',
+                'Supports iOS & Android tap-to-menu NDEF URIs alongside QR codes, plus offline WFA WSC Wi-Fi credentials for Android.'
+              )}
+            </p>
+          </div>
+
+          <button
+            type="button"
+            role="switch"
+            aria-checked={nfcEnabled}
+            disabled={!canManage || busy}
+            onClick={() => setNfcEnabled((prev) => !prev)}
+            className={`min-h-[38px] rounded-[48px] border px-4 font-google-display text-xs font-medium ${UI_INTERACTION.focusButton} ${
+              nfcEnabled
+                ? 'border-primary bg-primary text-white hover:bg-primary-hover'
+                : 'border-hairline bg-surface-1 text-ink hover:border-primary hover:text-primary'
+            }`}
+          >
+            {nfcEnabled
+              ? pick('เปิดใช้งาน NFC', 'ເປີດໃຊ້ NFC', 'NFC Enabled')
+              : pick('ปิดใช้งาน NFC', 'ປິດໃຊ້ NFC', 'NFC Disabled')}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label htmlFor={`${uid}-nfc-mode`} className="block text-ink-muted mb-1">
+              {pick('โหมดความปลอดภัยแท็ก NFC', 'ໂໝດຄວາມປອດໄພ NFC', 'NFC Tag Session Mode')}
+            </label>
+            <select
+              id={`${uid}-nfc-mode`}
+              disabled={!canManage}
+              value={nfcTagMode}
+              onChange={(e) => setNfcTagMode(e.target.value as NfcTagMode)}
+              className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink disabled:bg-surface-1 ${UI_INTERACTION.focusSelect}`}
+            >
+              <option value="STATIC_TABLE">
+                {pick(
+                  'Static Table Tag (เขียนถาวร · รอแคชเชียร์ยืนยัน)',
+                  'Static Table Tag (ຂຽນຖາວອນ · ລໍຖ້າຢືນຢັນ)',
+                  'Static Table Sticker (Cashier Confirm)'
+                )}
+              </option>
+              <option value="SIGNED_SESSION">
+                {pick(
+                  'Signed Session Tag (หมุน HMAC Token รายรอบ)',
+                  'Signed Session Tag (HMAC Token ລາຍຮອບ)',
+                  'Signed Session Tag (Rotating HMAC)'
+                )}
+              </option>
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor={`${uid}-nfc-layout`} className="block text-ink-muted mb-1">
+              {pick('โครงสร้างข้อมูล NDEF ในแท็ก', 'ໂຄງສ້າງຂໍ້ມູນ NDEF', 'NDEF Record Layout')}
+            </label>
+            <select
+              id={`${uid}-nfc-layout`}
+              disabled={!canManage}
+              value={nfcRecordLayout}
+              onChange={(e) => setNfcRecordLayout(e.target.value as NfcRecordLayout)}
+              className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink disabled:bg-surface-1 ${UI_INTERACTION.focusSelect}`}
+            >
+              <option value="URI_ONLY">
+                {pick(
+                  'URI_ONLY (เปิดเมนูตรง · ใช้ได้ทั้ง iOS & Android)',
+                  'URI_ONLY (ເປີດເມນູໂດຍຕົງ · iOS & Android)',
+                  'URI Only (Table Menu Link · iOS + Android)'
+                )}
+              </option>
+              <option value="WIFI_WSC_ONLY">
+                {pick(
+                  'WIFI_WSC_ONLY (ต่อ Wi-Fi ร้านอัตโนมัติ · เฉพาะ Android)',
+                  'WIFI_WSC_ONLY (ເຊື່ອມ Wi-Fi ອັດຕະໂນມັດ · Android)',
+                  'Wi-Fi WSC Auto-Join Only (Android)'
+                )}
+              </option>
+              <option value="URI_AND_WIFI_WSC">
+                {pick(
+                  'URI + Wi-Fi WSC (รวม 2 ระเบียน · แนะนำ NTAG215+)',
+                  'URI + Wi-Fi WSC (ລວມ 2 ລະບຽນ · ແນະນຳ NTAG215+)',
+                  'Multi-Record URI + Wi-Fi WSC (NTAG215+)'
+                )}
+              </option>
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor={`${uid}-nfc-chip`} className="block text-ink-muted mb-1">
+              {pick('ชนิดชิป NFC ที่ใช้งาน', 'ຊະນິດຊິບ NFC', 'Target NFC Chip EEPROM')}
+            </label>
+            <select
+              id={`${uid}-nfc-chip`}
+              disabled={!canManage}
+              value={nfcChipType}
+              onChange={(e) => setNfcChipType(e.target.value as NfcTagChipType)}
+              className={`h-10 w-full rounded-[4px] border border-hairline bg-canvas px-3 text-ink disabled:bg-surface-1 ${UI_INTERACTION.focusSelect}`}
+            >
+              <option value="NTAG213">NTAG213 ({NFC_CHIP_USABLE_NDEF_BYTES.NTAG213} Bytes usable)</option>
+              <option value="NTAG215">NTAG215 ({NFC_CHIP_USABLE_NDEF_BYTES.NTAG215} Bytes usable)</option>
+              <option value="NTAG216">NTAG216 ({NFC_CHIP_USABLE_NDEF_BYTES.NTAG216} Bytes usable)</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="rounded-[4px] border border-hairline bg-surface-1 p-3 space-y-1.5 text-[11px] text-ink-soft">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-medium text-ink flex items-center gap-1.5">
+              <Smartphone className="h-3.5 w-3.5 text-primary" />
+              <span>
+                {pick(
+                  'คำแนะนำใช้งานจริง iOS & Android + Wi-Fi Auto-Join',
+                  'ຄຳແນະນຳໃຊ້ງານຈິງ iOS & Android',
+                  'iOS vs Android Tap Behavior Note'
+                )}
+              </span>
+            </span>
+            {wifiWscPreviewBytes.length > 0 && (
+              <span className="rounded-[48px] border border-hairline bg-canvas px-2.5 py-0.5 font-mono-num text-[10px] text-ink">
+                WFA WSC Credential: {wifiWscPreviewBytes.length} Bytes
+              </span>
+            )}
+          </div>
+          <p>
+            {pick(
+              '• Android: รองรับ WFA Wi-Fi Simple Configuration (application/vnd.wfa.wsc) ต่อ Wi-Fi อัตโนมัติ + เด้ง Captive Portal หรือเปิดเมนูโต๊ะได้ทันที · • iPhone (iOS): Background NFC อ่านเฉพาะ NDEF URL เพื่อเปิด Safari (ไม่อ่าน Wi-Fi WSC) จึงควรคง Wi-Fi QR Code บนป้ายโต๊ะ A4 ไว้ให้ iPhone สแกนเชื่อม Wi-Fi ก่อนแล้วแตะจุด NFC ได้ตลอดมื้อ',
+              '• Android: ຮອງຮັບ WFA Wi-Fi Simple Configuration ເຊື່ອມ Wi-Fi ອັດຕະໂນມັດ · • iPhone (iOS): ຮອງຮັບສະເພາະ NDEF URL ເພື່ອເປີດ Safari ຄວນຄົງ Wi-Fi QR Code ເທິງປ້າຍໂຕະ A4 ໄວ້ຄູ່ກັນ',
+              '• Android supports native WFA WSC Wi-Fi auto-join + Captive Portal redirect. • iOS Background Tag Reading opens NDEF URLs in Safari only (keep Wi-Fi QR on A4 table tents for first-time iPhone Wi-Fi join).'
+            )}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setShowNfcTagsPanel((v) => !v)}
+            className={`inline-flex h-9 items-center gap-1.5 rounded-[48px] border border-primary bg-primary-soft px-4 text-xs font-medium text-primary-dark hover:bg-primary hover:text-white ${UI_INTERACTION.focusButton}`}
+          >
+            <Nfc className="h-3.5 w-3.5" />
+            <span>
+              {showNfcTagsPanel
+                ? pick(
+                    `ซ่อนรายการเตรียมแท็ก NFC (${nfcPackages.length} โต๊ะ)`,
+                    `ເຊື່ອງລາຍການແທັກ NFC (${nfcPackages.length})`,
+                    `Hide NFC Tag List (${nfcPackages.length})`
+                  )
+                : pick(
+                    `จัดการ / เขียน / Export แท็ก NFC ทุกโต๊ะ (${nfcPackages.length} โต๊ะ)`,
+                    `ຈັດການ / ຂຽນ / Export ແທັກ NFC (${nfcPackages.length})`,
+                    `Prepare / Write / Export NFC Tags (${nfcPackages.length} tables)`
+                  )}
+            </span>
+          </button>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => handleDownloadNfcExport('csv')}
+              className={`inline-flex h-9 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3.5 text-xs font-medium text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Export NFC CSV</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleDownloadNfcExport('json')}
+              className={`inline-flex h-9 items-center gap-1.5 rounded-[48px] border border-hairline bg-canvas px-3.5 text-xs font-medium text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Export NDEF JSON</span>
+            </button>
+          </div>
+        </div>
+
+        {showNfcTagsPanel && (
+          <div className="space-y-3 pt-2 border-t border-hairline">
+            {bridgeQrTarget && (
+              <div className="rounded-[4px] border border-primary bg-surface-1 p-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  {bridgeQrDataUrl && (
+                    <img
+                      src={bridgeQrDataUrl}
+                      alt={`NFC Bridge QR ${bridgeQrTarget.label}`}
+                      className="h-24 w-24 rounded-[4px] border border-hairline bg-white p-1 shrink-0"
+                    />
+                  )}
+                  <div className="space-y-1">
+                    <div className="font-medium text-ink">
+                      {pick(
+                        `QR ส่งลิงก์เข้าแอปเขียน NFC บนมือถือ (โต๊ะ ${bridgeQrTarget.label})`,
+                        `QR ສົ່ງລິ້ງເຂົ້າແອັບຂຽນ NFC (ໂຕະ ${bridgeQrTarget.label})`,
+                        `Mobile NFC Writer Bridge QR (${bridgeQrTarget.label})`
+                      )}
+                    </div>
+                    <div className="font-mono-num text-[11px] text-primary-dark break-all">
+                      {bridgeQrTarget.url}
+                    </div>
+                    <div className="text-[11px] text-ink-muted">
+                      {pick(
+                        'ใช้มือถือพนักงานสแกน QR นี้ คัดลอก URL แล้ววางในแอป NFC Tools -> Write -> Add Record -> URL/URI',
+                        'ໃຊ້ມືຖືພະນັກງານສະແກນ QR ນີ້ ແລ້ວວາງລິ້ງໃນແອັບ NFC Tools',
+                        'Scan on staff phone -> paste URL into NFC Tools Write -> URL/URI.'
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setBridgeQrTarget(null)}
+                  className={`h-8 rounded-[48px] border border-hairline bg-canvas px-3 text-[11px] font-medium text-ink-muted hover:text-ink ${UI_INTERACTION.focusButton}`}
+                >
+                  {pick('ปิด QR นี้', 'ປິດ QR ນີ້', 'Close')}
+                </button>
+              </div>
+            )}
+
+            <div className="overflow-x-auto rounded-[4px] border border-hairline">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-hairline bg-surface-1 text-ink-muted">
+                  <tr>
+                    <th className="py-2 px-3">{pick('โต๊ะ', 'ໂຕະ', 'Table')}</th>
+                    <th className="py-2 px-3">{pick('URL / Payload', 'URL / Payload', 'URL / Payload')}</th>
+                    <th className="py-2 px-3">{pick('ขนาด / ชิป', 'ຂະໜາດ / ຊິບ', 'Bytes / Chip')}</th>
+                    <th className="py-2 px-3 text-right">{pick('การทำงาน', 'ການດຳເນີນການ', 'Actions')}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-hairline">
+                  {nfcPackages.map((pkg) => (
+                    <tr key={pkg.tableLabel} className="hover:bg-surface-1">
+                      <td className="py-2 px-3 font-medium text-ink whitespace-nowrap">
+                        <div>{pkg.tableLabel}</div>
+                        <div className="text-[10px] text-ink-muted">
+                          {pkg.signedSessionActive ? 'Signed HMAC' : 'Static'}
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 max-w-xs">
+                        <div className="font-mono-num text-[11px] text-ink break-all">
+                          {pkg.menuUrl}
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 whitespace-nowrap">
+                        <span
+                          className={`inline-flex items-center rounded-[48px] border px-2 py-0.5 text-[10px] font-medium tabular-nums-google ${
+                            pkg.fitsSelectedChip
+                              ? 'border-primary/40 bg-primary-soft text-primary-dark'
+                              : 'border-danger bg-danger-soft text-danger'
+                          }`}
+                        >
+                          {pkg.ndefByteLength} / {pkg.chipCapacityBytes} B ({pkg.chipType})
+                        </span>
+                        {!pkg.fitsSelectedChip && (
+                          <div className="text-[10px] text-danger mt-0.5">
+                            {pkg.recommendedChipType
+                              ? `Recommend ${pkg.recommendedChipType}`
+                              : 'Exceeds NTAG216'}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 px-3 text-right whitespace-nowrap space-x-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyText(pkg.menuUrl, `NFC ${pkg.tableLabel}`)}
+                          className={`inline-flex h-8 items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-2.5 text-[11px] font-medium text-ink hover:border-primary hover:text-primary ${UI_INTERACTION.focusButton}`}
+                        >
+                          <Copy className="h-3 w-3" />
+                          <span>Copy URL</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setBridgeQrTarget({ label: pkg.tableLabel, url: pkg.menuUrl })
+                          }
+                          className={`inline-flex h-8 items-center gap-1 rounded-[48px] border border-hairline bg-canvas px-2.5 text-[11px] font-medium text-primary hover:border-primary ${UI_INTERACTION.focusButton}`}
+                        >
+                          <QrCode className="h-3 w-3" />
+                          <span>Bridge QR</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={writingNfcTable === pkg.tableLabel}
+                          onClick={() => void handleWriteBrowserNfcTag(pkg)}
+                          title={
+                            webNfcAvailable
+                              ? 'Write directly using Android Web NFC'
+                              : 'Requires Android Chrome Web NFC; click for instructions'
+                          }
+                          className={`inline-flex h-8 items-center gap-1 rounded-[48px] px-2.5 text-[11px] font-medium ${UI_INTERACTION.focusButton} ${
+                            webNfcAvailable
+                              ? 'bg-primary text-white hover:bg-primary-hover'
+                              : 'border border-hairline bg-surface-1 text-ink-muted hover:border-primary hover:text-primary'
+                          }`}
+                        >
+                          <Nfc className="h-3 w-3" />
+                          <span>
+                            {writingNfcTable === pkg.tableLabel
+                              ? pick('รอแตะแท็ก...', 'ລໍແຕະແທັກ...', 'Tap Tag...')
+                              : pick('เขียน NFC', 'ຂຽນ NFC', 'Write NFC')}
+                          </span>
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Router Captive Portal & Windows Firewall Guide */}
